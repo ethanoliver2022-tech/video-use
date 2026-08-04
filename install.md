@@ -109,7 +109,10 @@ Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
     When the user pastes a key, write it to `~/Developer/video-use/.env`:
 
     ```bash
-    printf 'ELEVENLABS_API_KEY=%s\n' "$KEY" > ~/Developer/video-use/.env
+    # Append, don't clobber — .env also holds generation and publishing keys.
+    touch ~/Developer/video-use/.env
+    sed -i.bak '/^ELEVENLABS_API_KEY=/d' ~/Developer/video-use/.env && rm -f ~/Developer/video-use/.env.bak
+    printf 'ELEVENLABS_API_KEY=%s\n' "$KEY" >> ~/Developer/video-use/.env
     chmod 600 ~/Developer/video-use/.env
     ```
 
@@ -124,6 +127,32 @@ Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
     ```
 
     `200` means the key works. `401` means the user pasted a wrong/expired key — ask once more and stop. Anything else (network, 5xx), move on and verify during first real transcription.
+
+### 5b. Generation + publishing keys (only if asked for)
+
+These are for the idea → video → upload path (`skills/ai-video/SKILL.md`). **Do not
+ask for them at install time.** Editing existing footage never needs them, and asking
+for four credentials up front is a worse first run than asking for one when it matters.
+
+Set them up the first time the user actually asks for a generated or published video:
+
+- **Generation** — `GEMINI_API_KEY` for Veo (default, [aistudio.google.com/apikey](https://aistudio.google.com/apikey)),
+  or `LUMA_API_KEY` / `RUNWAY_API_KEY` / `OPENAI_API_KEY`. Same append-don't-clobber
+  write as above.
+- **YouTube** — needs an OAuth client of type *TVs and Limited Input devices* with the
+  YouTube Data API v3 enabled. Write `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`,
+  then run the one-time device flow, which saves the refresh token itself:
+
+    ```bash
+    python ~/Developer/video-use/helpers/publish.py --auth youtube
+    ```
+
+  It prints a URL and a short code the user approves on any other device — no browser
+  needed on this machine. Every later upload is unattended.
+- **TikTok / Instagram** — `TIKTOK_ACCESS_TOKEN`, or `IG_USER_ID` + `IG_ACCESS_TOKEN`.
+  Only if that is where the user actually publishes.
+
+See `.env.example` for the full list with comments.
 
 ### 6. Verify end-to-end
 

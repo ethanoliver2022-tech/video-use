@@ -45,6 +45,7 @@ media/
 # (normally outputs go to <videos_dir>/edit/ — keep these as a safety net)
 edit/
 transcripts/
+generated/
 animations/
 clips_graded/
 clips_preview/
@@ -57,4 +58,7 @@ base_preview.mp4
 master.srt
 takes_packed.md
 edl.json
+brief.json
+manifest.json
+publish.json
 project.md
