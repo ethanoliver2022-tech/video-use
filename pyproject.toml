@@ -5,6 +5,7 @@ description = "Conversation-driven video editor skill for Claude Code"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic",
     "requests",
     "librosa",
     "matplotlib",

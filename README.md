@@ -8,6 +8,8 @@ Introducing **video-use** — edit videos with Claude Code. 100% open source.
 
 Drop raw footage in a folder, chat with Claude Code, get `final.mp4` back. Works for any content — talking heads, montages, tutorials, travel, interviews — without presets or menus.
 
+No footage? Describe the video you want instead — it generates the shots with an AI video model, cuts them together, and uploads the result for you.
+
 Try video-use in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_campaign=video-use-use-in-cloud&utm_source=github).
 
 ## What it does
@@ -19,6 +21,57 @@ Try video-use in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_campai
 - **Generates animation overlays** via [HyperFrames](https://github.com/heygen-com/hyperframes), [Remotion](https://www.remotion.dev/), [Manim](https://www.manim.community/), or PIL — spawned in parallel sub-agents, one per animation
 - **Self-evaluates the rendered output** at every cut boundary before showing you anything
 - **Persists session memory** in `project.md` so next week's session picks up where you left off
+- **Generates a video from just an idea** with [Veo](https://ai.google.dev/gemini-api/docs/veo), Luma, Runway, or Sora — then cuts, grades and subtitles it like any other footage
+- **Uploads it for you** to YouTube, TikTok, Instagram Reels, a folder, or a webhook
+
+## From an idea
+
+You don't need footage to start. Tell it what you want:
+
+> make me a 25-second vertical teaser about an hourglass running backwards, upload it to YouTube as unlisted
+
+It interviews the idea into a treatment, writes a shot-by-shot brief, and **waits for
+your OK before spending anything** — generation is billed per second of output. Then it
+generates the shots in parallel, assembles them through the same cut/grade/subtitle
+pipeline as filmed footage, self-evaluates the render, shows you the file, and only
+uploads once you say go.
+
+```
+Idea ──> Treatment ──> Brief ──> [confirm] ──> Generate ──> Assemble ──> Self-Eval ──> [confirm] ──> Publish
+```
+
+### Hands-off
+
+Don't want to be asked? One command runs the whole chain and hands you a link:
+
+```bash
+python helpers/autopilot.py "a 25s vertical teaser about an hourglass running backwards"
+```
+
+Claude writes the brief, the shots generate, they render, the video uploads. The
+decisions you'd otherwise be asked for move into `autopilot.json` (copy
+`autopilot.example.json`) — budget, destination, privacy, set once. Three things keep
+an unattended run honest: **credentials are checked before anything is generated** (a
+missing upload token stops the run at second zero, not after you've paid for the
+footage), **the brief is truncated to your budget** so a typo can't bill a feature
+film, and **privacy defaults to unlisted** — it uploads without asking, but nothing
+goes public until you say so. `--dry-run` writes the brief and checks every
+credential without spending a cent. It needs no TTY, so cron can run it too.
+
+Shots are cached by prompt, so fixing one bad shot regenerates one shot — not the brief.
+Uploads default to **private**, and `--dry-run` checks your credentials and the
+platform's length/aspect limits before the first real attempt.
+
+Add a generation key (`GEMINI_API_KEY` for Veo) to `.env`. For YouTube, one-time
+authorization is a short code you approve on your phone — no browser needed on the
+machine:
+
+```bash
+python helpers/publish.py --auth youtube
+```
+
+See [`skills/ai-video/SKILL.md`](./skills/ai-video/SKILL.md) for prompt craft, continuity
+rules, and the full destination matrix.
 
 ## Setup prompt
 

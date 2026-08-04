@@ -1,6 +1,6 @@
 ---
 name: video-use
-description: Edit any video by conversation. Transcribe, cut, color grade, generate overlay animations, burn subtitles — for talking heads, montages, tutorials, travel, interviews. No presets, no menus. Ask questions, confirm the plan, execute, iterate, persist. Production-correctness rules are hard; everything else is artistic freedom.
+description: Make and edit any video by conversation. Edit existing footage — transcribe, cut, color grade, generate overlay animations, burn subtitles — or start from nothing but an idea, generate the shots with an AI video model, and publish the result to YouTube, TikTok or Instagram. No presets, no menus. Ask questions, confirm the plan, execute, iterate, persist. Production-correctness rules are hard; everything else is artistic freedom.
 ---
 
 # Video Use
@@ -45,6 +45,9 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
     ├── project.md               ← memory; appended every session
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
     ├── edl.json                 ← cut decisions
+    ├── brief.json               ← shot brief (AI-generated videos only)
+    ├── generated/shot_<id>.mp4  ← AI-generated shots + manifest.json
+    ├── publish.json             ← upload receipts (destination, URL, timestamp)
     ├── transcripts/<name>.json  ← cached raw Scribe JSON
     ├── animations/slot_<id>/    ← per-animation source + render + reasoning
     ├── clips_graded/            ← per-segment extracts with grade + fades
@@ -77,8 +80,24 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`generate.py <brief.json> --edit-dir <dir>`** — generate shots from text prompts with a hosted AI video model (Veo/Luma/Runway/Sora). Parallel, cached per shot, `--emit-edl` writes an EDL `render.py` can assemble.
+- **`publish.py <final.mp4> --to <dest>`** — upload the finished file to YouTube, TikTok, Instagram Reels, a folder, or a webhook. `--dry-run` checks credentials and platform limits first.
+- **`autopilot.py "<idea>"`** — the whole chain unattended: Claude writes the brief, shots generate, render, upload. Policy lives in `autopilot.json`. Use when the user asked for hands-off.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
+
+## Two entry points
+
+This skill covers both directions:
+
+- **The user has footage** → the process below. Transcribe, cut, grade, subtitle.
+- **The user has only an idea** ("make me a video about X") → read
+  [`skills/ai-video/SKILL.md`](./skills/ai-video/SKILL.md) first. It generates the
+  shots, then hands off to this pipeline at the EDL, and finishes by publishing.
+  If they want it hands-off, that's `helpers/autopilot.py "<idea>"` — one command,
+  no confirmation stops, policy read from `autopilot.json`.
+
+Both end in the same place: `edit/final.mp4`, self-evaluated before the user sees it.
 
 ## The process
 

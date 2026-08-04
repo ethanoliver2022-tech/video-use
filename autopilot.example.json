@@ -1,0 +1,27 @@
+{
+  "_comment": "Copy to autopilot.json at the repo root. These are the decisions autopilot would otherwise have to ask you for on every video. Set them once.",
+
+  "provider": "veo",
+  "aspect": "9:16",
+  "resolution": "1080p",
+
+  "shot_seconds": 8,
+  "target_seconds": 24,
+
+  "_budget": "Hard ceilings. The brief is truncated to fit, so a typo in an idea cannot bill a feature film. max_seconds is the wallet's limit; the run also never generates more shots than target_seconds asked for.",
+  "max_seconds": 48,
+  "max_shots": 8,
+
+  "_trim": "Generated shots settle in the first frames and drift in the last. Trimmed off every clip before rendering.",
+  "trim_head": 0.3,
+  "trim_tail": 0.3,
+
+  "_publish": "Destinations stack. privacy is unlisted by default: the upload happens without asking, but the video is not public until you say so here. dest_dir is only used by the 'local' destination.",
+  "destinations": ["youtube"],
+  "privacy": "unlisted",
+  "dest_dir": null,
+
+  "grade": null,
+  "workers": 3,
+  "model": "claude-opus-5"
+}
