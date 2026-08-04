@@ -40,6 +40,24 @@ uploads once you say go.
 Idea ──> Treatment ──> Brief ──> [confirm] ──> Generate ──> Assemble ──> Self-Eval ──> [confirm] ──> Publish
 ```
 
+### Hands-off
+
+Don't want to be asked? One command runs the whole chain and hands you a link:
+
+```bash
+python helpers/autopilot.py "a 25s vertical teaser about an hourglass running backwards"
+```
+
+Claude writes the brief, the shots generate, they render, the video uploads. The
+decisions you'd otherwise be asked for move into `autopilot.json` (copy
+`autopilot.example.json`) — budget, destination, privacy, set once. Three things keep
+an unattended run honest: **credentials are checked before anything is generated** (a
+missing upload token stops the run at second zero, not after you've paid for the
+footage), **the brief is truncated to your budget** so a typo can't bill a feature
+film, and **privacy defaults to unlisted** — it uploads without asking, but nothing
+goes public until you say so. `--dry-run` writes the brief and checks every
+credential without spending a cent. It needs no TTY, so cron can run it too.
+
 Shots are cached by prompt, so fixing one bad shot regenerates one shot — not the brief.
 Uploads default to **private**, and `--dry-run` checks your credentials and the
 platform's length/aspect limits before the first real attempt.

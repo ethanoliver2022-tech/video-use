@@ -4,6 +4,9 @@
 *.pem
 *.key
 
+# Local autopilot policy (copy from autopilot.example.json)
+autopilot.json
+
 # Python
 __pycache__/
 *.py[cod]

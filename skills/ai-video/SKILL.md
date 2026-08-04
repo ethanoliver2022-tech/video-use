@@ -16,6 +16,26 @@ Idea ──> Treatment ──> Brief ──> [confirm] ──> Generate ──> 
               └── ask ─────┘                        └── parallel, cached                       receipt + link
 ```
 
+## Two modes
+
+**Interactive** (the process below) — you interview the idea, confirm the brief,
+confirm the upload. Right when the user is present and the video matters.
+
+**Autopilot** (`helpers/autopilot.py`) — one command runs the whole chain with no
+stops: Claude writes the treatment and brief, the shots generate, they render, and
+the result uploads. Right when the user wants to say an idea and walk away.
+
+```bash
+python helpers/autopilot.py "a 25s vertical teaser about an hourglass running backwards"
+```
+
+Autopilot does not delete the gates below — it moves them from *per video* to
+*once*, into `autopilot.json` (copy `autopilot.example.json`). Budget, destination
+and privacy are decided there, and three mechanisms enforce them at runtime:
+credentials are checked **before** anything is generated, the brief is truncated to
+the budget, and privacy defaults to unlisted. Use autopilot when the user has said
+they want it hands-off; use the interactive process otherwise.
+
 ## Principle
 
 1. **The idea is not the brief.** A sentence from the user is an intent. The
@@ -217,6 +237,38 @@ Report the URL from the receipt. Every attempt — success or failure — append
 Append to `edit/project.md`: the treatment, the final brief, which shots were
 regenerated and why, the destination and the resulting URL. Next session starts
 from what worked instead of from the idea again.
+
+## Autopilot
+
+`helpers/autopilot.py "<idea>"` runs stages 1–9 above end to end. What it does at
+each step is the same as the interactive path; what differs is who decides.
+
+```bash
+python helpers/autopilot.py "<idea>" --project-dir ~/videos/teaser
+python helpers/autopilot.py "<idea>" --to youtube --privacy public
+python helpers/autopilot.py "<idea>" --dry-run    # brief + preflight, generates nothing
+```
+
+- **The brief is written by `claude-opus-5`** via the Anthropic API, using a
+  structured-output schema and the prompt-craft rules above (continuity anchors,
+  negative prompts, no on-screen text, no named people). Needs `ANTHROPIC_API_KEY`
+  in the repo-root `.env`, or a profile from `ant auth login`.
+- **Preflight runs before generation.** A missing YouTube token stops the run at
+  second zero rather than after the footage is paid for.
+- **Every stage is resumable.** A failure at publish does not regenerate footage;
+  re-run the same command and it picks up from the cached brief and clips.
+- **`--dry-run` is the safe first run** on a new policy — it writes the brief and
+  checks every credential without spending anything.
+
+Order matters and is deliberate: brief → preflight → generate → render → publish →
+`project.md`. Nothing irreversible happens before the cheap checks pass.
+
+For a recurring schedule, point cron at the same command — autopilot needs no TTY
+and never prompts:
+
+```
+0 9 * * 1  cd ~/videos/weekly && python ~/Developer/video-use/helpers/autopilot.py "$(cat idea.txt)"
+```
 
 ## Destinations
 

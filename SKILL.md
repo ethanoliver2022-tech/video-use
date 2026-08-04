@@ -82,6 +82,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
 - **`generate.py <brief.json> --edit-dir <dir>`** — generate shots from text prompts with a hosted AI video model (Veo/Luma/Runway/Sora). Parallel, cached per shot, `--emit-edl` writes an EDL `render.py` can assemble.
 - **`publish.py <final.mp4> --to <dest>`** — upload the finished file to YouTube, TikTok, Instagram Reels, a folder, or a webhook. `--dry-run` checks credentials and platform limits first.
+- **`autopilot.py "<idea>"`** — the whole chain unattended: Claude writes the brief, shots generate, render, upload. Policy lives in `autopilot.json`. Use when the user asked for hands-off.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -93,6 +94,8 @@ This skill covers both directions:
 - **The user has only an idea** ("make me a video about X") → read
   [`skills/ai-video/SKILL.md`](./skills/ai-video/SKILL.md) first. It generates the
   shots, then hands off to this pipeline at the EDL, and finishes by publishing.
+  If they want it hands-off, that's `helpers/autopilot.py "<idea>"` — one command,
+  no confirmation stops, policy read from `autopilot.json`.
 
 Both end in the same place: `edit/final.mp4`, self-evaluated before the user sees it.
 
