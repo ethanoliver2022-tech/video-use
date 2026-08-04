@@ -41,6 +41,7 @@ from pathlib import Path
 
 import anthropic
 
+import publish
 from envkeys import REPO_ROOT, get_key
 
 HELPERS = Path(__file__).resolve().parent
@@ -155,12 +156,10 @@ def requested_shots(policy: dict) -> int:
 
 def write_brief(idea: str, policy: dict) -> dict:
     """Ask Claude for a treatment + shot brief. Returns the parsed object."""
-    if not (get_key("ANTHROPIC_API_KEY") or get_key("ANTHROPIC_AUTH_TOKEN")):
-        # The SDK also resolves `ant auth login` profiles, so absence of a key is
-        # not proof of no credentials — let the client try before complaining.
-        print("  (no ANTHROPIC_API_KEY in env or .env; relying on a stored profile)")
-
-    client = anthropic.Anthropic()
+    api_key = get_key("ANTHROPIC_API_KEY")
+    # The SDK also resolves `ant auth login` profiles, so an absent key is not
+    # proof of absent credentials — pass what we have and let it resolve the rest.
+    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     shots = requested_shots(policy)
 
     user = f"""IDEA: {idea}
@@ -194,6 +193,13 @@ Write the treatment and the brief."""
         sys.exit("Anthropic API key rejected. Set ANTHROPIC_API_KEY in the repo-root .env")
     except anthropic.APIConnectionError as e:
         sys.exit(f"could not reach the Anthropic API: {e}")
+    except TypeError as e:
+        # The SDK raises this — not AuthenticationError — when no credential can
+        # be resolved at all. Preflight normally catches it first.
+        if "authentication" in str(e).lower():
+            sys.exit("No Anthropic credentials resolved.\n"
+                     f"  Put ANTHROPIC_API_KEY=... in {REPO_ROOT / '.env'}, or run `ant auth login`.")
+        raise
 
     if response.stop_reason == "refusal":
         detail = getattr(response.stop_details, "explanation", "") or ""
@@ -277,14 +283,26 @@ def trim_edl(edl_path: Path, policy: dict) -> None:
     print(f"  trimmed {head}s/{tail}s off each clip")
 
 
-def preflight(policy: dict, edit_dir: Path, sample: Path) -> None:
+def preflight(policy: dict) -> None:
     """Check every credential before a cent is spent.
 
-    Generation is billed per second of output. Discovering a missing upload
-    token after the footage exists is the expensive ordering; this is the cheap
-    one.
+    Runs first, before even the brief. Generation is billed per second of output
+    and publishing needs tokens that take minutes to set up — discovering either
+    gap after the footage exists is the expensive ordering.
+
+    Checks the credential stores directly rather than shelling out to
+    `publish.py --dry-run`: that path needs a real video to probe, which does
+    not exist yet at preflight time, and a probe failure would swallow the
+    credential result and let the run proceed.
     """
-    print("\n=== preflight ===")
+    print("=== preflight ===")
+
+    if not (get_key("ANTHROPIC_API_KEY") or get_key("ANTHROPIC_AUTH_TOKEN")
+            or (Path.home() / ".config/anthropic").exists()):
+        sys.exit("No Anthropic credentials — autopilot needs them to write the brief.\n"
+                 f"  Put ANTHROPIC_API_KEY=... in {REPO_ROOT / '.env'}, or run `ant auth login`.")
+    print(f"  {'anthropic':<20} present")
+
     gen_key = {"veo": "GEMINI_API_KEY", "luma": "LUMA_API_KEY",
                "runway": "RUNWAY_API_KEY", "sora": "OPENAI_API_KEY"}[policy["provider"]]
     if not get_key(gen_key):
@@ -292,19 +310,13 @@ def preflight(policy: dict, edit_dir: Path, sample: Path) -> None:
                  f"  Put it in {REPO_ROOT / '.env'} and re-run.")
     print(f"  {gen_key:<20} present")
 
-    dests = [d for d in policy["destinations"] if d not in ("local", "webhook")]
-    if dests:
-        # publish.py --dry-run validates credentials and platform limits without
-        # uploading. Give it a real file so its probe has something to read.
-        cmd = [str(HELPERS / "publish.py"), str(sample), "--title", "preflight", "--dry-run"]
-        for d in policy["destinations"]:
-            cmd += ["--to", d]
-        result = subprocess.run([sys.executable, *cmd], capture_output=True, text=True)
-        for line in result.stdout.splitlines():
-            if "MISSING" in line:
-                sys.exit(f"upload credentials incomplete —{line.split(maxsplit=1)[-1]}\n"
-                         f"  Fix this before generating; see .env.example.")
-        print(f"  destinations         {', '.join(policy['destinations'])} ready")
+    for dest in policy["destinations"]:
+        status = publish.credential_status(dest)
+        if status != "ready":
+            sys.exit(f"{dest} is not configured — {status}.\n"
+                     f"  Set these in {REPO_ROOT / '.env'} before generating; see .env.example.\n"
+                     f"  For YouTube, run: python helpers/publish.py --auth youtube")
+        print(f"  {dest:<20} ready")
 
 
 # -------- Main ---------------------------------------------------------------
@@ -346,7 +358,11 @@ def main() -> None:
 
     t0 = time.time()
 
-    # 1. Brief
+    # 1. Preflight — before the brief, which is itself a (small) spend.
+    print()
+    preflight(policy)
+
+    # 2. Brief
     brief_path = edit_dir / "brief.json"
     if brief_path.exists() and not args.force:
         print("\n=== brief (cached) ===")
@@ -364,9 +380,6 @@ def main() -> None:
 
     planned = sum(s["duration"] for s in spec["shots"])
     print(f"  {len(spec['shots'])} shots, {planned}s to generate")
-
-    # 2. Preflight — before any spend.
-    preflight(policy, edit_dir, sample=brief_path)
 
     if args.dry_run:
         print(f"\ndry run: brief written to {brief_path}, nothing generated or uploaded")

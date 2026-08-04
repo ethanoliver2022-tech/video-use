@@ -253,15 +253,16 @@ python helpers/autopilot.py "<idea>" --dry-run    # brief + preflight, generates
   structured-output schema and the prompt-craft rules above (continuity anchors,
   negative prompts, no on-screen text, no named people). Needs `ANTHROPIC_API_KEY`
   in the repo-root `.env`, or a profile from `ant auth login`.
-- **Preflight runs before generation.** A missing YouTube token stops the run at
-  second zero rather than after the footage is paid for.
+- **Preflight runs first — before even the brief.** It reads the credential stores
+  directly, so a missing YouTube token stops the run at second zero rather than
+  after the footage is paid for.
 - **Every stage is resumable.** A failure at publish does not regenerate footage;
   re-run the same command and it picks up from the cached brief and clips.
 - **`--dry-run` is the safe first run** on a new policy — it writes the brief and
   checks every credential without spending anything.
 
-Order matters and is deliberate: brief → preflight → generate → render → publish →
-`project.md`. Nothing irreversible happens before the cheap checks pass.
+Order matters and is deliberate: preflight → brief → generate → render → publish →
+`project.md`. Every check that can fail for free happens before anything that costs.
 
 For a recurring schedule, point cron at the same command — autopilot needs no TTY
 and never prompts:
