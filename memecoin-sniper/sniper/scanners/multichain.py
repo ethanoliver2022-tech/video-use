@@ -28,14 +28,34 @@ def _float(v) -> Optional[float]:
         return None
 
 
+# Quote assets that are never the "new token" in a pool.
+QUOTE_TOKENS = {
+    "So11111111111111111111111111111111111111112",   # SOL
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC (Solana)
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT (Solana)
+    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",    # WETH (Ethereum)
+    "0x4200000000000000000000000000000000000006",    # WETH (Base)
+    "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",    # WBNB
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",    # USDC (Ethereum)
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",    # USDC (Base)
+    "0xdac17f958d2ee523a2206206994597c13d831ec7",    # USDT (Ethereum)
+    "0x55d398326f99059ff775485246999027b3197955",    # USDT (BSC)
+}
+
+
+def _token_id(pool: dict, rel: str) -> str:
+    tid = pool.get("relationships", {}).get(rel, {}).get("data", {}).get("id", "")
+    return tid.split("_", 1)[1] if "_" in tid else ""
+
+
 def parse_gecko_pools(network: str, payload: dict) -> list[Candidate]:
     out = []
     for pool in payload.get("data", []):
         attrs = pool.get("attributes", {})
-        base_id = (pool.get("relationships", {}).get("base_token", {})
-                   .get("data", {}).get("id", ""))
-        mint = base_id.split("_", 1)[1] if "_" in base_id else ""
-        if not mint:
+        mint = _token_id(pool, "base_token")
+        if mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
+            mint = _token_id(pool, "quote_token")  # pool listed as SOL/NEW instead of NEW/SOL
+        if not mint or mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
             continue
         created = attrs.get("pool_created_at")
         ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() if created else None
@@ -57,25 +77,33 @@ def parse_gecko_pools(network: str, payload: dict) -> list[Candidate]:
     return out
 
 
-async def _poll(name: str, interval: int, fn: Callable[[], Awaitable[None]]) -> None:
+def _describe(e: Exception) -> str:
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"HTTP {e.response.status_code}"
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+
+
+async def _poll(name: str, interval: int, fn: Callable[[], Awaitable[None]],
+                active: Callable[[], bool] = lambda: True) -> None:
     while True:
-        try:
-            await fn()
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.warning("%s poll failed: %s", name, e)
+        if active():  # no point burning API rate limits while the bot is paused
+            try:
+                await fn()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("%s poll failed: %s", name, _describe(e))
         await asyncio.sleep(interval)
 
 
 class GeckoTerminalScanner:
     def __init__(self, api: str, networks: list[str], interval: int, on_candidate: CandidateHandler,
-                 http: httpx.AsyncClient):
+                 http: httpx.AsyncClient, active: Callable[[], bool] = lambda: True):
         self.api, self.networks, self.interval = api, networks, interval
-        self.on_candidate, self.http = on_candidate, http
+        self.on_candidate, self.http, self.active = on_candidate, http, active
 
     async def run(self) -> None:
-        await _poll("geckoterminal", self.interval, self._tick)
+        await _poll("geckoterminal", self.interval, self._tick, self.active)
 
     async def _tick(self) -> None:
         for network in self.networks:
@@ -97,18 +125,25 @@ class GeckoTerminalScanner:
 class DexScreenerScanner:
     """Watches newly created DexScreener token profiles, then enriches with pair data."""
 
-    def __init__(self, api: str, interval: int, on_candidate: CandidateHandler, http: httpx.AsyncClient):
+    def __init__(self, api: str, interval: int, on_candidate: CandidateHandler, http: httpx.AsyncClient,
+                 active: Callable[[], bool] = lambda: True):
         self.api, self.interval, self.on_candidate, self.http = api, interval, on_candidate, http
-        self._seen: set[str] = set()
+        self.active = active
+        self._seen: set[tuple[str, str]] = set()
 
     async def run(self) -> None:
-        await _poll("dexscreener", self.interval, self._tick)
+        await _poll("dexscreener", self.interval, self._tick, self.active)
 
     async def _tick(self) -> None:
+        if len(self._seen) > 20_000:  # keep memory flat; old profiles have aged out anyway
+            self._seen.clear()
         resp = await self.http.get(f"{self.api}/token-profiles/latest/v1")
         resp.raise_for_status()
         fresh: dict[str, list[str]] = {}
-        for prof in resp.json():
+        profiles = resp.json()
+        for prof in profiles if isinstance(profiles, list) else []:
+            if not isinstance(prof, dict):
+                continue
             chain, addr = prof.get("chainId"), prof.get("tokenAddress")
             if not chain or not addr or (chain, addr) in self._seen:
                 continue
@@ -123,6 +158,8 @@ class DexScreenerScanner:
         resp.raise_for_status()
         best: dict[str, dict] = {}
         for pair in resp.json() or []:
+            if not isinstance(pair, dict):
+                continue
             addr = pair.get("baseToken", {}).get("address")
             liq = (pair.get("liquidity") or {}).get("usd") or 0
             if addr and liq >= ((best.get(addr) or {}).get("liquidity") or {}).get("usd", -1):

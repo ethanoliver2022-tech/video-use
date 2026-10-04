@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 
 from .config import load_config
@@ -30,6 +31,8 @@ def main() -> None:
     stats.add_argument("--days", type=float, default=0, help="only the last N days")
 
     args = p.parse_args()
+    # `docker stop` sends SIGTERM: turn it into a clean shutdown (positions are saved either way)
+    signal.signal(signal.SIGTERM, _terminate)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "httpcore", "websockets"):
@@ -82,6 +85,10 @@ def main() -> None:
             asyncio.run(Engine(cfg, live=live, scan_only=args.cmd == "scan").run())
         except KeyboardInterrupt:
             pass
+
+
+def _terminate(*_) -> None:
+    raise KeyboardInterrupt
 
 
 async def _wallet(cfg) -> None:

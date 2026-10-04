@@ -236,6 +236,7 @@ def make_engine(tmp_path, **cfg_over) -> Engine:
     cfg = load_config("config.example.yaml")
     cfg.data_dir = str(tmp_path)
     cfg.filters.reject_reused_socials = False
+    cfg.pumpportal_api_key = cfg_over.pop("api_key", "test-key")
     for section, values in cfg_over.items():
         for k, v in values.items():
             setattr(getattr(cfg, section), k, v)
@@ -260,7 +261,7 @@ async def test_copy_trade_follows_buy_and_sell(tmp_path):
     assert {"method": "subscribeAccountTrade", "keys": [WHALE]} in eng.sent
 
     await eng.on_trade(pump_trade("CopyMint", "buy", WHALE, 2.0, 32.0))
-    await asyncio.gather(*eng._bg)
+    await eng.settle()
     p = eng.positions["CopyMint"]
     assert p.sol_in == 0.1 and p.leader == WHALE and p.route == "pump"
 
@@ -268,9 +269,11 @@ async def test_copy_trade_follows_buy_and_sell(tmp_path):
     msg = pump_trade("CopyMint", "buy", wallet(), 0.5, 33.0, sig="dup")
     await eng.on_trade(msg)
     await eng.on_trade(msg)
+    await eng.settle()
     assert len(p.recent_trades) == 1
 
     await eng.on_trade(pump_trade("CopyMint", "sell", WHALE, 2.0, 31.0))
+    await eng.settle()
     assert p.closed and p.close_reason == "copied wallet sold"
     await eng.http.aclose()
 
@@ -280,7 +283,7 @@ async def test_copy_ignores_dust(tmp_path):
                                            "min_leader_buy_sol": 0.5})
     await eng.add_copy_wallet(WHALE)
     await eng.on_trade(pump_trade("Dust", "buy", WHALE, 0.01, 30.0))
-    await asyncio.gather(*eng._bg)
+    await eng.settle()
     assert "Dust" not in eng.positions
     await eng.http.aclose()
 
@@ -343,8 +346,10 @@ async def test_restore_after_restart_and_telegram_controls(tmp_path):
         "sniper.execution.executors", fromlist=["CurveState"]).CurveState(31.0, 1.04e9)
     await tg.handle_update({"callback_query": {"id": "1", "data": "s:NewPump:50",
                                                "message": {"chat": {"id": 42}}}})
+    await eng2.settle()
     assert 0 < p.tokens_remaining < p.tokens_initial
     await tg.handle_update({"message": {"chat": {"id": 42}, "text": "/sell FROG"}})
+    await eng2.settle()
     assert p.closed and p.close_reason == "manual"
     await tg.handle_update({"message": {"chat": {"id": 42}, "text": "/stats"}})
     assert "Trades: 1" in replies[-1][0]

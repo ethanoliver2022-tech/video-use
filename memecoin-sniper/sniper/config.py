@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -163,6 +164,8 @@ class Config:
     private_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    pumpportal_api_key: str = ""   # needed for live trade / copy-trade streams
+    jupiter_api_key: str = ""      # free at portal.jup.ag; switches to api.jup.ag
 
 
 # Presets sit underneath your config.yaml: anything you set there wins.
@@ -201,11 +204,13 @@ def _build(cls: type, raw: dict[str, Any]) -> Any:
     hints = get_type_hints(cls)
     known = {f.name for f in fields(cls)}
     unknown = set(raw) - known
-    if unknown:
-        raise ValueError(f"Unknown config keys for {cls.__name__}: {sorted(unknown)}")
+    if unknown:  # a typo shouldn't take a 24/7 bot offline: warn and carry on
+        logging.getLogger("sniper").warning("config.yaml: ignoring unknown %s setting(s): %s",
+                                            cls.__name__.replace("Config", "").lower() or "top-level",
+                                            ", ".join(sorted(unknown)))
     kwargs: dict[str, Any] = {}
     for f in fields(cls):
-        if f.name not in raw:
+        if f.name not in raw or raw[f.name] is None:  # "key:" with no value = use the default
             continue
         val = raw[f.name]
         typ = hints[f.name]
@@ -222,8 +227,13 @@ def _build(cls: type, raw: dict[str, Any]) -> Any:
 def load_config(path: str | os.PathLike | None = None, preset: str | None = None) -> Config:
     load_dotenv()
     raw: dict[str, Any] = {}
-    if path and Path(path).exists():
-        raw = yaml.safe_load(Path(path).read_text()) or {}
+    if path and Path(path).is_file():
+        try:
+            raw = yaml.safe_load(Path(path).read_text()) or {}
+        except yaml.YAMLError as e:
+            raise SystemExit(f"{path} is not valid YAML, fix it and restart:\n{e}") from None
+        if not isinstance(raw, dict):
+            raise SystemExit(f"{path} should contain settings like 'trading:', not {type(raw).__name__}")
     name = preset or raw.get("preset", "balanced")
     if name not in PRESETS:
         raise ValueError(f"unknown preset '{name}' (choose from {', '.join(PRESETS)})")
@@ -236,6 +246,10 @@ def load_config(path: str | os.PathLike | None = None, preset: str | None = None
     cfg.private_key = os.getenv("SOLANA_PRIVATE_KEY", "").strip()
     cfg.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     cfg.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    cfg.pumpportal_api_key = os.getenv("PUMPPORTAL_API_KEY", "").strip()
+    cfg.jupiter_api_key = os.getenv("JUPITER_API_KEY", "").strip()
+    if cfg.jupiter_api_key and "lite-api.jup.ag" in cfg.endpoints.jupiter_api:
+        cfg.endpoints.jupiter_api = cfg.endpoints.jupiter_api.replace("lite-api.jup.ag", "api.jup.ag")
 
     cfg.exits.take_profit.sort(key=lambda lvl: lvl.at_pct)
     return cfg

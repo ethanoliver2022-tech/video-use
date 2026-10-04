@@ -93,6 +93,7 @@ class Position:
     kol_bought: list[str] = field(default_factory=list)
     kol_exit_done: bool = False
     migrated: bool = False
+    dev_tokens: Optional[float] = None   # creator's balance at entry (RPC dev-sell detection)
     route: str = "jupiter"
     leader: Optional[str] = None
     leader_sold: bool = False
@@ -137,8 +138,11 @@ class Position:
         return cls(**{k: v for k, v in d.items() if k in known})
 
     def update_price(self, price: float, ts: Optional[float] = None) -> None:
+        """Record a new price. `last_update` only moves when the price does, so polling a
+        token nobody trades still lets the dead-token exit fire."""
         if price <= 0:
             return
+        if abs(price - self.last_price) > self.last_price * 1e-9:
+            self.last_update = ts or time.time()
         self.last_price = price
         self.peak_price = max(self.peak_price, price)
-        self.last_update = ts or time.time()

@@ -200,6 +200,7 @@ def test_example_config_loads(tmp_path):
 async def test_paper_engine_snipe_and_exit(tmp_path):
     cfg = load_config("config.example.yaml")
     cfg.data_dir = str(tmp_path)
+    cfg.pumpportal_api_key = "test-key"  # trade stream on
     eng = Engine(cfg, live=False)
     sent = []
     async def no_ws(payload):
@@ -218,12 +219,14 @@ async def test_paper_engine_snipe_and_exit(tmp_path):
     v_tok = 30.86 * 1_043_000_000 / v_sol
     await eng.on_trade({"mint": "Mint1pump", "txType": "buy", "traderPublicKey": "anon",
                         "solAmount": 5, "vSolInBondingCurve": v_sol, "vTokensInBondingCurve": v_tok})
+    await eng.settle()  # exits run in the background
     assert p.tp_levels_hit == {0} and 0 < p.tokens_remaining < p.tokens_initial
 
     # dev dumps -> everything out
     await eng.on_trade({"mint": "Mint1pump", "txType": "sell", "traderPublicKey": CREATOR,
                         "solAmount": 1, "vSolInBondingCurve": v_sol - 1,
                         "vTokensInBondingCurve": v_tok * 1.03})
+    await eng.settle()
     assert p.closed and p.close_reason == "dev sold"
     assert p.sol_out > p.sol_in  # took profit before the rug
     assert [e["event"] for e in eng.store.events()] == ["buy", "sell", "sell", "close"]

@@ -36,7 +36,7 @@ discovery:
   geckoterminal_networks: [solana, base, bsc, eth]   # non-Solana = alerts only
   dexscreener_profiles: true
 
-copytrade:
+copytrade:                      # needs PUMPPORTAL_API_KEY in .env
   enabled: false
   min_leader_buy_sol: 0.2
   run_safety_checks: true
@@ -47,7 +47,7 @@ copytrade:
 notify:
   telegram: false               # needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
   telegram_control: true        # commands + sell buttons from your chat
-  alert_other_chains: true
+  alert_other_chains: true     # Base/BSC/ETH launches that pass filters (max 20 per hour)
 
 endpoints:
   # Public RPC is too slow for live trading: set SOLANA_RPC_URL in .env to a paid one.

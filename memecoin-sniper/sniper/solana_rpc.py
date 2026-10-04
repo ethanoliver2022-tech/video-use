@@ -24,9 +24,17 @@ class SolanaRpc:
 
     async def call(self, method: str, params: list[Any] | None = None) -> Any:
         body = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params or []}
-        resp = await self.http.post(self.url, json=body)
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await self.http.post(self.url, json=body)
+        except httpx.HTTPError as e:  # never echo the URL: paid RPC URLs embed the API key
+            raise RpcError(f"{method}: {type(e).__name__}") from None
+        if resp.status_code != 200:
+            raise RpcError(f"{method}: HTTP {resp.status_code}"
+                           + (" (rate limited)" if resp.status_code == 429 else ""))
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RpcError(f"{method}: invalid JSON response") from None
         if "error" in data:
             raise RpcError(f"{method}: {data['error']}")
         return data.get("result")
@@ -62,16 +70,30 @@ class SolanaRpc:
         res = await self.call("getMultipleAccounts", [addresses, {"encoding": "jsonParsed"}])
         return res.get("value", []) if res else []
 
-    async def get_token_balance(self, owner: str, mint: str) -> float:
+    async def get_token_balance_raw(self, owner: str, mint: str) -> tuple[int, int]:
+        """(raw amount, decimals) summed over the owner's accounts for this mint."""
         res = await self.call(
             "getTokenAccountsByOwner",
             [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}],
         )
-        total = 0.0
+        raw, decimals = 0, 0
         for acct in (res or {}).get("value", []):
             amt = acct["account"]["data"]["parsed"]["info"]["tokenAmount"]
-            total += float(amt.get("uiAmount") or 0)
-        return total
+            raw += int(amt["amount"])
+            decimals = int(amt["decimals"])
+        return raw, decimals
+
+    async def get_token_balance(self, owner: str, mint: str) -> float:
+        raw, decimals = await self.get_token_balance_raw(owner, mint)
+        return raw / 10 ** decimals if raw else 0.0
+
+    async def get_account_bytes(self, address: str) -> Optional[bytes]:
+        res = await self.call("getAccountInfo", [address, {"encoding": "base64",
+                                                           "commitment": "confirmed"}])
+        value = res and res.get("value")
+        if not value:
+            return None
+        return base64.b64decode(value["data"][0])
 
     async def send_raw_transaction(self, raw: bytes) -> str:
         encoded = base64.b64encode(raw).decode()
@@ -80,15 +102,23 @@ class SolanaRpc:
             [encoded, {"encoding": "base64", "skipPreflight": True, "maxRetries": 3}],
         )
 
-    async def confirm(self, signature: str, timeout: float = 45.0) -> bool:
-        """Poll until confirmed. Returns False on timeout, raises on on-chain error."""
+    async def confirm(self, signature: str, timeout: float = 90.0) -> bool:
+        """Poll until confirmed. Returns False on timeout, raises on on-chain error.
+
+        90s covers a blockhash's whole lifetime (~150 slots), so a False here means
+        the transaction can no longer land."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
-            res = await self.call(
-                "getSignatureStatuses", [[signature], {"searchTransactionHistory": False}]
-            )
-            status = (res or {}).get("value", [None])[0]
+            try:
+                res = await self.call(
+                    "getSignatureStatuses", [[signature], {"searchTransactionHistory": False}]
+                )
+            except (httpx.HTTPError, ValueError, RpcError) as e:  # a flaky poll must not abort
+                log.debug("status poll failed: %s", e)
+                await asyncio.sleep(1.0)
+                continue
+            status = ((res or {}).get("value") or [None])[0]
             if status:
                 if status.get("err"):
                     raise RpcError(f"transaction {signature} failed: {status['err']}")
@@ -98,12 +128,16 @@ class SolanaRpc:
         return False
 
     async def get_transaction(self, signature: str) -> Optional[dict]:
-        for _ in range(10):
-            res = await self.call(
+        for _ in range(15):
+            try:
+                res = await self.call(
                 "getTransaction",
-                [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                             "commitment": "confirmed"}],
-            )
+                    [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+                                 "commitment": "confirmed"}],
+                )
+            except (httpx.HTTPError, ValueError, RpcError) as e:
+                log.debug("getTransaction failed: %s", e)
+                res = None
             if res:
                 return res
             await asyncio.sleep(1.0)

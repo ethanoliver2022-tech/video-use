@@ -40,7 +40,7 @@ async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -
     if gateway and "/ipfs/" in uri:
         uri = gateway.rstrip("/") + "/ipfs/" + uri.split("/ipfs/", 1)[1]
     try:
-        resp = await http.get(uri, timeout=3)
+        resp = await http.get(uri, timeout=2)
         if resp.status_code == 200:
             data = resp.json()
             return data if isinstance(data, dict) else None

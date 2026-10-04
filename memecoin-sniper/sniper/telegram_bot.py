@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 PENDING_TTL = 300
 EXPORT_TTL = 60
+MAX_PAIR_ATTEMPTS = 10   # wrong codes before the pairing code is replaced
+
+
+class TelegramError(RuntimeError):
+    """Telegram API error. Never includes the request URL (it contains the bot token)."""
 
 HELP = """<b>Everything is in the menu</b>, tap /menu.
 
@@ -59,7 +64,8 @@ class TelegramControl:
     def __init__(self, engine: "Engine", token: str, chat_id: str, http: httpx.AsyncClient):
         self.engine, self.token, self.http = engine, token, http
         self.owner = str(chat_id or engine.store.get_setting("owner_chat_id") or "")
-        self.pair_code = "" if self.owner else secrets.token_hex(3).upper()
+        self.pair_code = "" if self.owner else self._new_code()
+        self.pair_failures = 0
         self.offset = 0
         self.pending: Optional[dict] = None
         engine.notifier.token = token
@@ -67,11 +73,23 @@ class TelegramControl:
 
     # ---------- transport ----------
 
+    @staticmethod
+    def _new_code() -> str:
+        return secrets.token_hex(5).upper()  # 10 hex chars: not brute-forceable over Telegram
+
     async def api(self, method: str, **params):
-        resp = await self.http.post(f"https://api.telegram.org/bot{self.token}/{method}",
-                                    json=params, timeout=35)
-        resp.raise_for_status()
-        return resp.json().get("result")
+        try:
+            resp = await self.http.post(f"https://api.telegram.org/bot{self.token}/{method}",
+                                        json=params, timeout=35)
+        except httpx.HTTPError as e:
+            raise TelegramError(f"{method}: {type(e).__name__}") from None
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code != 200 or not data.get("ok", False):
+            raise TelegramError(f"{method}: {data.get('description') or resp.status_code}")
+        return data.get("result")
 
     async def send(self, text: str, buttons=None) -> None:
         await self.engine.notifier.telegram(text, buttons, chat_id=self.owner)
@@ -87,6 +105,9 @@ class TelegramControl:
                     params["reply_markup"] = keyboard(buttons)
                 await self.api("editMessageText", **params)
                 return
+            except TelegramError as e:
+                if "not modified" in str(e):  # tapped Refresh and nothing changed
+                    return
             except Exception:
                 pass
         await self.send(text, buttons)
@@ -95,24 +116,39 @@ class TelegramControl:
         if self.pair_code:
             log.warning("📱 Telegram not paired yet. Send this to your bot:  /start %s", self.pair_code)
         try:
+            me = await self.api("getMe")
+            log.info("telegram bot @%s ready", (me or {}).get("username", "?"))
+        except Exception as e:
+            if any(x in str(e) for x in ("Unauthorized", "Not Found", "401", "404")):
+                log.error("Telegram rejected the bot token (%s). Check TELEGRAM_BOT_TOKEN in .env.", e)
+            else:
+                log.warning("can't reach Telegram yet (%s); will keep retrying", e)
+        try:
             await self.api("setMyCommands", commands=[
                 {"command": c, "description": d} for c, d in [
                     ("menu", "Main menu"), ("positions", "Open positions"), ("wallet", "Wallet"),
                     ("settings", "Settings"), ("stats", "Performance"), ("help", "Help")]])
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
+        backoff = 5.0
         while True:
             try:
                 updates = await self.api("getUpdates", offset=self.offset, timeout=25,
                                          allowed_updates=["message", "callback_query"])
+                backoff = 5.0
                 for u in updates or []:
                     self.offset = u["update_id"] + 1
                     await self.handle_update(u)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("telegram poll failed: %s", e)
-                await asyncio.sleep(5)
+                if "Conflict" in str(e):
+                    log.error("Another copy of this bot is running with the same token. Stop it "
+                              "(only one may poll Telegram at a time).")
+                else:
+                    log.warning("telegram poll failed: %s (retry in %.0fs)", e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
 
     # ---------- routing ----------
 
@@ -161,15 +197,22 @@ class TelegramControl:
 
     async def _try_pair(self, chat: str, text: str) -> None:
         parts = text.split()
-        if len(parts) == 2 and parts[0].split("@")[0] in ("/start", "/pair") \
-                and secrets.compare_digest(parts[1].upper(), self.pair_code):
-            self.owner = chat
-            self.pair_code = ""
-            self.engine.store.set_setting("owner_chat_id", chat)
-            self.engine.notifier.chat = chat
-            log.info("telegram paired with chat %s", chat)
-            await self.send(WELCOME)
-            await self.main_menu()
+        if len(parts) != 2 or parts[0].split("@")[0] not in ("/start", "/pair"):
+            return
+        if not secrets.compare_digest(parts[1].upper().encode(), self.pair_code.encode()):
+            self.pair_failures += 1
+            if self.pair_failures >= MAX_PAIR_ATTEMPTS:
+                self.pair_failures = 0
+                self.pair_code = self._new_code()
+                log.warning("too many wrong pairing codes; new code:  /start %s", self.pair_code)
+            return
+        self.owner = chat
+        self.pair_code = ""
+        self.engine.store.set_setting("owner_chat_id", chat)
+        self.engine.notifier.chat = chat
+        log.info("telegram paired with chat %s", chat)
+        await self.send(WELCOME)
+        await self.main_menu()
 
     # ---------- commands ----------
 
@@ -189,10 +232,10 @@ class TelegramControl:
             await self.positions()
         elif cmd == "/buy" and args:
             sol = float(args[1]) if len(args) > 1 and args[1] != "force" else None
-            await self.send(await e.manual_buy(args[0], sol, force="force" in args))
+            self._bg_reply(e.manual_buy(args[0], sol, force="force" in args))
         elif cmd == "/sell" and args:
             pct = float(args[1].rstrip("%")) if len(args) > 1 else 100.0
-            await self.send(await e.manual_sell(args[0], pct))
+            self._bg_reply(e.manual_sell(args[0], pct))
         elif cmd == "/pause":
             e.set_paused(True)
             await self.send("⏸ Sniping paused. Open positions are still managed.")
@@ -235,10 +278,10 @@ class TelegramControl:
             await self.positions()
         elif head == "s":
             mint, _, pct = rest.rpartition(":")
-            await self.send(await e.manual_sell(mint, float(pct)))
+            self._bg_reply(e.manual_sell(mint, float(pct)))
         elif head in ("b", "bf"):
             mint, _, sol = rest.partition(":")
-            await self.send(await e.manual_buy(mint, float(sol) if sol else None, force=head == "bf"))
+            self._bg_reply(e.manual_buy(mint, float(sol) if sol else None, force=head == "bf"))
         elif head == "bc":
             self._ask("buy_custom", rest)
             await self.send("Send the amount of SOL to buy:", [[("✖️ Cancel", "x")]])
@@ -279,6 +322,19 @@ class TelegramControl:
         elif data == "wd!":
             await self.do_withdraw()
 
+    def _bg_reply(self, coro) -> None:
+        """Run a slow action (a trade can take ~90s to confirm) without freezing the chat;
+        the result arrives as its own message."""
+        async def runner():
+            try:
+                result = await coro
+                if result:
+                    await self.send(result)
+            except Exception as e:
+                log.exception("telegram action failed")
+                await self.send(f"⚠️ {html.escape(str(e))}", [[("🏠 Menu", "m")]])
+        self.engine._spawn(runner())
+
     # ---------- pending text replies ----------
 
     def _ask(self, kind: str, data=None) -> None:
@@ -311,7 +367,7 @@ class TelegramControl:
                 await self.copy_command(["add", *text.split()])
                 await self.copy_menu()
             elif kind == "buy_custom":
-                await self.send(await e.manual_buy(p["data"], float(text.replace("SOL", "").strip())))
+                self._bg_reply(e.manual_buy(p["data"], float(text.replace("SOL", "").strip())))
         except Exception as ex:
             self.pending = p  # let them try again
             p["expires"] = time.time() + PENDING_TTL
@@ -333,6 +389,10 @@ class TelegramControl:
         open_n = sum(1 for p in e.positions.values() if not p.closed)
         lines.append(f"📊 Open {open_n}/{e.cfg.trading.max_open_positions} · today "
                      f"{e.store.realized_today():+.4f} SOL · buy {e.cfg.trading.buy_amount_sol:g} SOL")
+        if not e.has_trade_stream:
+            lines.append("ℹ️ No PumpPortal key: prices use on-chain polling, and copy trading is off.")
+        if "api.mainnet-beta.solana.com" in e.cfg.endpoints.rpc_url:
+            lines.append("⚠️ Public Solana RPC: set SOLANA_RPC_URL before going live.")
         toggle = ("⏸ Pause sniping", "stop") if not e.paused else ("▶️ Start sniping", "go")
         switch = ("📝 Go PAPER", "mode:paper") if e.live else ("🔴 Go LIVE", "mode:live")
         await self.show("\n".join(lines), [
@@ -441,7 +501,8 @@ class TelegramControl:
             await self.send("That withdrawal expired. Start again from 💼 Wallet.")
             return
         address, sol = p["data"]
-        await self.send(await self.engine.withdraw(address, sol))
+        await self.send("⏳ Sending…")
+        self._bg_reply(self.engine.withdraw(address, sol))
 
     async def mode_action(self, action: str, msg_id: Optional[int]) -> None:
         e = self.engine
@@ -539,6 +600,9 @@ class TelegramControl:
         wallets = e.copy_wallets()
         status = "✅ on" if e.cfg.copytrade.enabled else "❌ off"
         lines = [f"👥 <b>Copy trading</b> ({status})"]
+        if not e.has_trade_stream:
+            lines.append("Needs a PumpPortal API key: add PUMPPORTAL_API_KEY to .env on the "
+                         "server and restart.")
         rows = []
         for w in wallets:
             lines.append(f"• {html.escape(w.label or '-')} <code>{w.address}</code> · "

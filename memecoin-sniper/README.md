@@ -56,16 +56,46 @@ copy trading.
 
 1. **Create a Telegram bot.** In Telegram, message **@BotFather**, send `/newbot`
    and copy the token it gives you.
-2. **Start the bot on a server** that stays on, such as a small VPS. A laptop
-   works for testing.
+2. **Start the bot on a server** that stays on, such as a small VPS. On a fresh
+   Ubuntu server, one command does everything (Docker, firewall, download, start):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/ethanoliver2022-tech/video-use/claude/memecoin-sniping-bot-x4vgsq/memecoin-sniper/install.sh | sudo bash
+   ```
+   It asks for your bot token and optional keys (see **Keys and costs** below),
+   then prints a pairing code. Running it again later updates the bot and keeps
+   your wallet, settings and history.
+
+   Manual alternative:
    ```bash
    cd memecoin-sniper
-   cp .env.example .env              # paste TELEGRAM_BOT_TOKEN (and SOLANA_RPC_URL)
+   cp .env.example .env              # paste TELEGRAM_BOT_TOKEN (+ optional keys)
    docker compose up -d --build      # or: pip install -e . && python -m sniper bot
-   docker compose logs | grep pair   # shows: Send this to your bot:  /start A1B2C3
+   docker compose logs | grep /start # shows: Send this to your bot:  /start 3F9A1C27B0
    ```
-3. **Pair your chat.** Open your bot in Telegram and send `/start A1B2C3`. From
-   then on, only your chat can control the bot and everyone else is ignored.
+3. **Pair your chat.** Open your bot in Telegram and send the `/start …` line.
+   From then on, only your chat can control the bot and everyone else is ignored.
+   After 10 wrong codes the code changes and the new one appears in the server log.
+
+### Keys and costs
+
+Only the Telegram token is required. Everything else is optional; each key goes
+in `.env` on the server, then run `docker compose up -d` to apply it.
+
+| Key | What it unlocks | Cost |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | The bot itself | Free |
+| `SOLANA_RPC_URL` | Fast, reliable trading. The public RPC is fine for paper testing but too slow and rate-limited for live trades | Helius and others have free tiers; paid plans for heavy use |
+| `PUMPPORTAL_API_KEY` | The live trade stream: instant prices, instant dev-dump detection, KOL and sell-pressure exits, bundle detection in the confirmation window, and **copy trading** | PumpPortal bills the wallet linked to your key per message received (0.01 SOL per 10,000 at the time of writing), and requires that wallet to hold at least 0.02 SOL. Check pumpportal.fun for current pricing |
+| `JUPITER_API_KEY` | Jupiter's supported API (`api.jup.ag`). The keyless API still works today but is being retired | Free key from portal.jup.ag |
+
+Without a PumpPortal key the bot still runs fully: it reads pump.fun prices and
+graduations straight from the bonding curve on-chain, and detects dev dumps by
+watching the dev's token balance, every 2 seconds. That's slower than the
+stream, and copy trading, KOL exits and sell-pressure exits stay off.
+
+Per-trade costs to know about: Solana network fees, your priority fee, the Jito
+tip (when Jito is on), pump.fun's own trading fee, and PumpPortal's fee on
+trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 
 ### Everything else happens in the chat
 
@@ -146,20 +176,42 @@ stored as overrides on top of it.
 - Jito tips and priority fees are paid on every buy and every sell, so check
   that your average win covers about 4 times that.
 
+## Reliability
+
+Built to run unattended:
+- **No position is dropped on a hiccup.** A failed sell retries with backoff
+  (up to once a minute) and re-checks the wallet each time, so a sell that landed
+  late is recognized, not repeated. A position is only written off after about
+  40 failed attempts (30+ minutes), and you get a Telegram message telling you so.
+- **No double sells.** Once a transaction is sent, the bot never sends a second
+  one for the same exit; it waits for the first to land or expire.
+- **No orphaned buys.** If an RPC error hides a buy's outcome, the bot checks
+  the wallet and starts managing any tokens that arrived.
+- **One slow trade never blocks the others.** Each exit runs on its own, and
+  the live trade stream never waits on a sell or on Telegram.
+- **Jito down or rate limited?** Transactions fall back to plain RPC, because
+  getting out matters more than MEV protection.
+- **Crashes restart themselves.** Each internal loop is supervised, and Docker
+  restarts the whole bot if it ever exits. Positions reload on start.
+- **Memory stays flat** however long it runs, and nothing polls while paused.
+- **Secrets stay out of messages.** RPC URLs and the bot token never appear in
+  logs or Telegram errors, and token names are escaped so they can't inject links.
+
 ## Known limitations
 
-- Copy trading sees pump.fun and PumpSwap trades from PumpPortal. A followed
-  wallet trading on other DEXes isn't seen yet. A Helius/Yellowstone gRPC
-  feed would add that.
+- Copy trading sees pump.fun and PumpSwap trades from PumpPortal, and needs a
+  PumpPortal API key. A followed wallet trading on other DEXes isn't seen.
 - Dev reputation only knows about launches seen while the bot was running.
-  Leave it running in `scan` mode for a day before trading to build up history.
+  Leave it running paused for a day before trading to build up history (it keeps
+  learning while paused).
 - No web dashboard; Telegram is the UI.
-- EVM chains are alert-only.
-- This code hasn't been run against live mainnet APIs yet. Start in paper mode,
-  then do a first live run with a tiny `buy_amount_sol`.
+- EVM chains are alert-only (capped at 20 alerts an hour).
+- The trading code has been tested offline (73 tests) and the Docker image has
+  been built and run, but it hasn't placed real trades against mainnet yet.
+  Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 50 tests, no network needed
+pip install -e '.[dev]' && pytest     # 73 tests, no network needed
 ```

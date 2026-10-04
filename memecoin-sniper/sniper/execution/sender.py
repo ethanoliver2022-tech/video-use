@@ -100,6 +100,14 @@ class TxSender:
             jobs += [r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]]
         results = await asyncio.gather(*jobs, return_exceptions=True)
         ok = [r for r in results if not isinstance(r, Exception)]
+        if not ok and self.cfg.jito_enabled and not self.cfg.jito_also_send_rpc:
+            # Jito unreachable / rate limited: getting the trade out matters more than
+            # MEV protection (think: exiting a rug), so fall back to plain RPC.
+            log.warning("jito submission failed (%s); sending through RPC instead", results[0])
+            results = await asyncio.gather(
+                *[r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]],
+                return_exceptions=True)
+            ok = [r for r in results if not isinstance(r, Exception)]
         if not ok:
             raise RuntimeError(f"every submission path failed: {results[0]}")
         for r in results:

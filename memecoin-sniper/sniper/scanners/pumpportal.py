@@ -60,8 +60,13 @@ def _f(v) -> Optional[float]:
 
 
 class PumpPortalStream:
-    def __init__(self, url: str, new_tokens: bool, migrations: bool):
+    """New-token and migration events are free. Token and account trade streams need a
+    PumpPortal API key whose linked wallet holds SOL (PumpPortal bills per message), so
+    without a key those subscriptions are tracked but never sent."""
+
+    def __init__(self, url: str, new_tokens: bool, migrations: bool, api_key: str = ""):
         self.url = url
+        self.api_key = api_key
         self.want_new_tokens = new_tokens
         self.want_migrations = migrations
         self.token_subs: set[str] = set()
@@ -72,17 +77,30 @@ class PumpPortalStream:
         self._ws = None
         self._send_lock = asyncio.Lock()
 
+    @property
+    def trades_enabled(self) -> bool:
+        return bool(self.api_key)
+
+    @property
+    def connect_url(self) -> str:
+        if not self.api_key:
+            return self.url
+        sep = "&" if "?" in self.url else "?"
+        return f"{self.url}{sep}api-key={self.api_key}"
+
     async def watch_token(self, mint: str) -> None:
         if mint in self.token_subs:
             return
         self.token_subs.add(mint)
-        await self._send({"method": "subscribeTokenTrade", "keys": [mint]})
+        if self.trades_enabled:
+            await self._send({"method": "subscribeTokenTrade", "keys": [mint]})
 
     async def unwatch_token(self, mint: str) -> None:
         if mint not in self.token_subs:
             return
         self.token_subs.discard(mint)
-        await self._send({"method": "unsubscribeTokenTrade", "keys": [mint]})
+        if self.trades_enabled:
+            await self._send({"method": "unsubscribeTokenTrade", "keys": [mint]})
 
     async def set_feeds(self, new_tokens: bool, migrations: bool) -> None:
         if new_tokens != self.want_new_tokens:
@@ -96,12 +114,14 @@ class PumpPortalStream:
         new = [w for w in wallets if w not in self.account_subs]
         if new:
             self.account_subs.update(new)
-            await self._send({"method": "subscribeAccountTrade", "keys": new})
+            if self.trades_enabled:
+                await self._send({"method": "subscribeAccountTrade", "keys": new})
 
     async def unwatch_account(self, wallet: str) -> None:
         if wallet in self.account_subs:
             self.account_subs.discard(wallet)
-            await self._send({"method": "unsubscribeAccountTrade", "keys": [wallet]})
+            if self.trades_enabled:
+                await self._send({"method": "unsubscribeAccountTrade", "keys": [wallet]})
 
     async def _send(self, payload: dict) -> None:
         ws = self._ws
@@ -118,16 +138,17 @@ class PumpPortalStream:
             await self._send({"method": "subscribeNewToken"})
         if self.want_migrations:
             await self._send({"method": "subscribeMigration"})
-        if self.token_subs:
+        if self.token_subs and self.trades_enabled:
             await self._send({"method": "subscribeTokenTrade", "keys": sorted(self.token_subs)})
-        if self.account_subs:
+        if self.account_subs and self.trades_enabled:
             await self._send({"method": "subscribeAccountTrade", "keys": sorted(self.account_subs)})
 
     async def run(self) -> None:
         backoff = 1.0
         while True:
             try:
-                async with websockets.connect(self.url, ping_interval=20, max_size=2**22) as ws:
+                async with websockets.connect(self.connect_url, ping_interval=20, ping_timeout=20,
+                                              open_timeout=15, max_size=2**22) as ws:
                     self._ws = ws
                     backoff = 1.0
                     log.info("pumpportal connected")
@@ -148,7 +169,11 @@ class PumpPortalStream:
             msg = json.loads(raw)
         except ValueError:
             return
-        if not isinstance(msg, dict) or "mint" not in msg:
+        if not isinstance(msg, dict):
+            return
+        if "mint" not in msg:
+            if msg.get("errors") or msg.get("error"):  # e.g. bad / unfunded API key
+                log.warning("pumpportal: %s", msg.get("errors") or msg.get("error"))
             return  # subscription acks etc.
         tx_type = msg.get("txType")
         try:

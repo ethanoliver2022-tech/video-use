@@ -29,6 +29,7 @@ class Harness:
         cfg = load_config("config.example.yaml")
         cfg.data_dir = str(tmp_path)
         cfg.filters.reject_reused_socials = False
+        cfg.pumpportal_api_key = "test-key"
         self.eng = Engine(cfg, live=False, config_path="config.example.yaml", start_paused=True)
         self.eng.telegram_ui = True
         self.sent, self.api_calls, self.ws = [], [], []
@@ -57,11 +58,14 @@ class Harness:
     async def text(self, text, chat=OWNER, msg_id=1):
         await self.tg.handle_update({"message": {"chat": {"id": int(chat)}, "text": text,
                                                  "message_id": msg_id}})
+        await self.eng.settle()
 
-    async def tap(self, data, chat=OWNER):
+    async def tap(self, data, chat=OWNER, settle=True):
         await self.tg.handle_update({"callback_query": {"id": "q", "data": data,
                                                         "message": {"chat": {"id": int(chat)},
                                                                     "message_id": 5}}})
+        if settle:
+            await self.eng.settle()
 
     @property
     def last(self):
@@ -73,6 +77,7 @@ class Harness:
     async def close(self):
         for t in list(self.eng._bg):
             t.cancel()
+        await asyncio.gather(*self.eng._bg, return_exceptions=True)
         await self.eng.http.aclose()
 
 
@@ -144,7 +149,7 @@ async def test_wallet_create_import_export(tmp_path):
     backups = [p for p in os.listdir(tmp_path) if p.startswith("wallet.key.bak-")]
     assert len(backups) == 1  # old key kept, never deleted
 
-    await h.tap("w:exp!")
+    await h.tap("w:exp!", settle=False)  # don't wait out the 60s auto-delete
     method, params = h.api_calls[-1]
     assert method == "sendMessage" and h.eng.wallet.export() in params["text"]
     assert h.eng._bg  # auto-delete scheduled
@@ -183,7 +188,7 @@ async def test_withdraw_flow(tmp_path):
     await h.text(f"{dest} 0.5")
     assert "wd!" in h.buttons() and not sent_txs  # nothing sent before confirming
     await h.tap("wd!")
-    assert "Sent 0.500000 SOL" in h.last
+    assert "Sent 0.500000000 SOL" in h.last
     [tx] = sent_txs
     assert tx.verify_with_results() == [True]
     assert dest in [str(k) for k in tx.message.account_keys]

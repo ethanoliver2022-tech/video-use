@@ -47,6 +47,14 @@ class CurveState:
         return (self.v_sol - k / (self.v_tokens + tokens_in)) * (1 - PUMP_FEE)
 
 
+class NotLanded(RuntimeError):
+    """The transaction expired without landing: safe to retry."""
+
+
+class NothingToSell(RuntimeError):
+    """The wallet holds none of the token (sold elsewhere, or a sell landed late)."""
+
+
 class Executor(Protocol):
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill: ...
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
@@ -55,8 +63,9 @@ class Executor(Protocol):
 
 
 class Jupiter:
-    def __init__(self, api: str, rpc: SolanaRpc, http: httpx.AsyncClient):
+    def __init__(self, api: str, rpc: SolanaRpc, http: httpx.AsyncClient, api_key: str = ""):
         self.api, self.rpc, self.http = api, rpc, http
+        self.headers = {"x-api-key": api_key} if api_key else {}
         self._decimals: dict[str, int] = {SOL_MINT: 9}
 
     async def decimals(self, mint: str) -> int:
@@ -67,27 +76,35 @@ class Jupiter:
             self._decimals[mint] = int(info["decimals"])
         return self._decimals[mint]
 
-    async def quote(self, in_mint: str, out_mint: str, amount_ui: float, slippage_pct: float) -> dict:
-        raw = int(amount_ui * 10 ** await self.decimals(in_mint))
-        resp = await self.http.get(f"{self.api}/quote", params={
+    async def quote(self, in_mint: str, out_mint: str, amount_ui: float, slippage_pct: float,
+                    raw_amount: Optional[int] = None) -> dict:
+        raw = raw_amount if raw_amount is not None else int(amount_ui * 10 ** await self.decimals(in_mint))
+        if raw <= 0:
+            raise ValueError("amount too small to quote")
+        resp = await self.http.get(f"{self.api}/quote", headers=self.headers, params={
             "inputMint": in_mint, "outputMint": out_mint, "amount": raw,
             "slippageBps": int(slippage_pct * 100), "restrictIntermediateTokens": "true",
         })
-        resp.raise_for_status()
-        return resp.json()
+        if resp.status_code != 200:
+            raise RuntimeError(f"jupiter quote {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        if "outAmount" not in data:
+            raise RuntimeError(f"jupiter: no route ({str(data)[:200]})")
+        return data
 
     async def out_ui(self, quote: dict) -> float:
         return int(quote["outAmount"]) / 10 ** await self.decimals(quote["outputMint"])
 
     async def swap_tx(self, quote: dict, user: str, priority_fee_sol: float) -> bytes:
-        resp = await self.http.post(f"{self.api}/swap", json={
+        resp = await self.http.post(f"{self.api}/swap", headers=self.headers, json={
             "quoteResponse": quote,
             "userPublicKey": user,
             "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": int(priority_fee_sol * 1e9),
         })
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            raise RuntimeError(f"jupiter swap {resp.status_code}: {resp.text[:200]}")
         return base64.b64decode(resp.json()["swapTransaction"])
 
 
@@ -141,16 +158,29 @@ class LiveExecutor:
             raise RuntimeError(f"pumpportal {resp.status_code}: {resp.text[:200]}")
         return resp.content
 
-    async def _submit(self, unsigned: bytes, mint: str) -> Fill:
+    def _tip(self) -> float:
+        return self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+
+    async def _submit(self, unsigned: bytes, mint: str, side: str) -> Fill:
+        """Sign, send, confirm and read back the real fill.
+
+        Raises NotLanded if the transaction expired without landing. Any other error
+        after sending means the outcome is uncertain; callers reconcile with the wallet.
+        """
         sig = await self.sender.send(self._sign(unsigned), self.kp)
-        log.info("sent %s", sig)
+        log.info("sent %s %s", side, sig)
         if not await self.rpc.confirm(sig):
-            raise RuntimeError(f"transaction {sig} not confirmed in time")
+            raise NotLanded(f"transaction {sig} expired without landing")
         tx = await self.rpc.get_transaction(sig)
-        if not tx:
-            raise RuntimeError(f"confirmed tx {sig} not retrievable")
-        tok, sol = balance_deltas(tx, self.pubkey, mint)
-        return Fill(tokens=abs(tok), sol=abs(sol), signature=sig)
+        tok, sol = balance_deltas(tx, self.pubkey, mint) if tx else (0.0, 0.0)
+        tok, sol = abs(tok), abs(sol)
+        if tok <= 0:
+            log.warning("could not read fill for %s from the transaction; using wallet balance", sig)
+            if side == "buy":
+                tok = await self.rpc.get_token_balance(self.pubkey, mint)
+        # the Jito tip is a separate transaction in the bundle: count it as a cost
+        sol = sol + self._tip() if side == "buy" else max(0.0, sol - self._tip())
+        return Fill(tokens=tok, sol=sol, signature=sig)
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
         if cand.route == "pump":
@@ -158,23 +188,43 @@ class LiveExecutor:
         else:
             q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        return await self._submit(unsigned, cand.mint)
+        try:
+            return await self._submit(unsigned, cand.mint, "buy")
+        except NotLanded:
+            raise
+        except Exception as e:
+            # outcome unknown (RPC hiccup after sending): trust the wallet, never orphan tokens
+            held = await self.rpc.get_token_balance(self.pubkey, cand.mint)
+            if held > 0:
+                log.warning("buy %s errored (%s) but tokens arrived; tracking them", cand.mint, e)
+                return Fill(tokens=held, sol=sol + self._tip(), signature="unconfirmed")
+            raise
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState]) -> Fill:
-        if sell_all:
-            # sell what is actually in the wallet, not what we think is there
-            tokens = await self.rpc.get_token_balance(self.pubkey, mint) or tokens
+        raw, decimals = await self.rpc.get_token_balance_raw(self.pubkey, mint)
+        if raw <= 0:
+            raise NothingToSell(f"no {mint} left in the wallet")
+        held = raw / 10 ** decimals
+        if sell_all or tokens >= held:
+            sell_all, tokens, sell_raw = True, held, raw   # sell what is really there
+        else:
+            sell_raw = int(tokens * 10 ** decimals)
+        unsigned = None
         if pump:
-            try:
+            try:  # only *building* falls back; once a tx is sent we never send a second one
                 unsigned = await self._pumpportal_tx(
                     "sell", mint, "100%" if sell_all else tokens, in_sol=False)
-                return await self._submit(unsigned, mint)
             except Exception as e:
-                log.warning("pumpportal sell failed (%s); falling back to Jupiter", e)
-        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct)
-        unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        return await self._submit(unsigned, mint)
+                log.warning("pumpportal sell build failed (%s); using Jupiter", e)
+        if unsigned is None:
+            q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct,
+                                         raw_amount=sell_raw)
+            unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
+        fill = await self._submit(unsigned, mint, "sell")
+        if fill.tokens <= 0:
+            fill.tokens = tokens
+        return fill
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:
         q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct)

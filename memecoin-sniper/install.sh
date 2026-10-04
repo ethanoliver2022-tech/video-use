@@ -47,14 +47,22 @@ if [ ! -f .env ]; then
   while ! [[ "$TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]]; do
     read -rp "That doesn't look like a bot token, paste it again: " TOKEN </dev/tty
   done
-  read -rp "Solana RPC URL (Enter to skip; strongly recommended before going live): " RPC </dev/tty
+  read -rp "Solana RPC URL, e.g. from Helius (Enter to skip; needed before going live): " RPC </dev/tty
+  read -rp "PumpPortal API key (Enter to skip; enables live trade feed + copy trading): " PP </dev/tty
+  read -rp "Jupiter API key from portal.jup.ag (Enter to skip): " JUP </dev/tty
   umask 077
   cat > .env <<EOF
 TELEGRAM_BOT_TOKEN=$TOKEN
 TELEGRAM_CHAT_ID=
 SOLANA_RPC_URL=$RPC
+PUMPPORTAL_API_KEY=$PP
+JUPITER_API_KEY=$JUP
 EOF
   umask 022
+else
+  # older installs: add any newer optional keys so they're easy to fill in later
+  grep -q '^PUMPPORTAL_API_KEY=' .env || echo 'PUMPPORTAL_API_KEY=' >> .env
+  grep -q '^JUPITER_API_KEY=' .env || echo 'JUPITER_API_KEY=' >> .env
 fi
 
 if [ ! -f config.yaml ]; then
@@ -73,21 +81,27 @@ EOF
 
 mkdir -p data
 say "Building and starting the bot (first build takes a minute or two)"
-docker compose up -d --build
+# always recreate so the logs below are from this run (positions persist across restarts)
+docker compose up -d --build --force-recreate
 
 say "Waiting for the bot to start"
 CODE=""
 for _ in $(seq 1 45); do
-  CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{6\}' | tail -1 || true)"
+  CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{10\}' | tail -1 || true)"
   if [ -n "$CODE" ] || docker compose logs 2>/dev/null | grep -q "sniper starting"; then
     sleep 2
-    CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{6\}' | tail -1 || true)"
+    CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{10\}' | tail -1 || true)"
     break
   fi
   sleep 2
 done
 
 echo
+if docker compose logs 2>/dev/null | grep -q "rejected the bot token"; then
+  echo "❌ Telegram rejected the bot token. Fix TELEGRAM_BOT_TOKEN in $DIR/memecoin-sniper/.env"
+  echo "   (nano .env), then run:  cd $DIR/memecoin-sniper && docker compose up -d"
+  exit 1
+fi
 if [ -n "$CODE" ]; then
   printf '\033[1;32m✅ Running! Open your bot in Telegram and send:\n\n    %s\033[0m\n\n' "$CODE"
 elif docker compose logs 2>/dev/null | grep -q "sniper starting"; then
@@ -96,6 +110,7 @@ else
   echo "⚠️  The bot didn't report in yet. Check the logs with:"
   echo "    cd $DIR/memecoin-sniper && docker compose logs --tail 50"
 fi
+echo "Add or change keys later:  nano $DIR/memecoin-sniper/.env   then: docker compose up -d"
 echo "Useful commands (run in $DIR/memecoin-sniper):"
 echo "  docker compose logs -f --tail 50    # live logs"
 echo "  docker compose restart              # restart"
