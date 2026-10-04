@@ -2,7 +2,9 @@
 
 Priority (first match wins):
   1. dev sold            -> dump everything (the classic rug precursor)
+     copied wallet sold  -> follow the leader out
   2. stop loss           -> dump everything
+     breakeven stop      -> after the first take-profit, never round-trip into a loss
   3. trailing stop       -> dump everything once armed and price falls off the peak
   4. sell pressure       -> dump everything when most recent trades are sells
   5. max hold / stale    -> dump everything; memecoin edge decays in minutes
@@ -38,6 +40,8 @@ def record_trade(pos: Position, msg: dict, kol_wallets: set[str], own_wallet: st
                                        sol=float(msg.get("solAmount") or 0), ts=time.time()))
     if side == "sell" and pos.creator and trader == pos.creator:
         pos.dev_sold = True
+    if side == "sell" and pos.leader and trader == pos.leader:
+        pos.leader_sold = True
     if side == "buy" and trader in kol_wallets and trader not in pos.kol_bought:
         pos.kol_bought.append(trader)
 
@@ -57,9 +61,13 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
 
     if cfg.exit_on_dev_sell and pos.dev_sold:
         return everything("dev sold")
+    if pos.leader_sold:
+        return everything("copied wallet sold")
 
     if pos.pnl_pct <= -abs(cfg.stop_loss_pct):
         return everything(f"stop loss ({pos.pnl_pct:.0f}%)")
+    if cfg.breakeven_after_first_tp and pos.tp_levels_hit and pos.pnl_pct <= 0:
+        return everything("breakeven stop")
 
     peak_gain = (pos.peak_price / pos.entry_price - 1) * 100 if pos.entry_price else 0
     if peak_gain >= cfg.trailing_activate_pct and pos.drawdown_from_peak_pct >= cfg.trailing_stop_pct:

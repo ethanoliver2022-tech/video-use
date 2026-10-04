@@ -1,60 +1,57 @@
 # memecoin-sniper
 
-A Solana-funded memecoin sniper. It watches for new launches across chains,
-filters out the most obvious rugs, buys on Solana, and manages exits on its own
-with take-profits, stop-losses, and dev-dump and KOL detection.
+A self-hosted Solana memecoin sniper with the feature set of the paid bots
+(Trojan, BonkBot, Photon, BullX, GMGN, Axiom). It has no subscription and no
+1% fee on every trade, and your private key never leaves your machine.
 
 > **Read this first.** Most new memecoins go to zero. On pump.fun the first
-> block is usually taken by the dev's own bundled buys and by pro bots using
-> Jito bundles and co-located RPC. This bot will not beat them to block 0. Its
-> edge is being early and leaving with discipline. Start in paper mode, run a
-> dedicated hot wallet that only holds what you can afford to lose, and expect
-> losing streaks.
+> block usually goes to the dev's own bundled buys and to pro bots with
+> co-located infrastructure. The paid bots don't beat them either. What they
+> sell is fast landing, rug filtering and disciplined exits, and that's what
+> this bot does. Start in paper mode, use a dedicated hot wallet, and only fund
+> it with what you can afford to lose.
+
+## Features
+
+| | What it does | Paid-bot equivalent |
+|---|---|---|
+| ⚡ **Jito bundles** | The swap and a validator tip go out as one atomic bundle. It can't be sandwiched, gets block priority, and if the swap fails you don't pay. | Trojan/BonkBot "MEV protection", Banana Gun "anti-rug" |
+| 📡 **Multi-RPC broadcast** | Every transaction goes to all of your RPCs and Jito regions at the same time. | "Turbo mode" |
+| 💸 **Auto priority fee** | Pays a percentile of the network's recent priority fees, with a floor and a cap. | "Auto fee" |
+| 🎯 **Multi-chain discovery** | pump.fun launches and graduations (live websocket), plus new pools on Solana, Base, BSC and ETH from GeckoTerminal and DexScreener. | Photon/BullX "new pairs" |
+| 👥 **Copy trading** | Mirrors buys from wallets you follow, can follow their sells out, and sets a size per wallet. Wallets can be added or removed live from Telegram. | GMGN/Trojan copy trade |
+| 🔍 **Early-flow confirmation** | Watches the first N seconds of trading before buying. It catches bundled launches (several wallets buying identical sizes), whale-dominated launches, dev dumps and thin interest. | Axiom/BullX "bundle checker" |
+| 🧠 **Dev reputation** | Records every pump.fun launch and rejects serial launchers. Devs who dumped on you are blocklisted automatically, and the blocklist persists. | GMGN "dev history" |
+| 🌐 **Socials check** | Reads the token metadata, can require Twitter/Telegram/website links, and rejects copycats that reuse another launch's socials. | Photon "socials filter" |
+| 🍯 **Honeypot check** | Quotes a buy and then a sell before entering. A token that can't be sold, or loses too much on the round trip, is rejected. | "Honeypot / tax check" |
+| 🛡 **On-chain rug filters** | Rejects tokens where mint or freeze authority isn't revoked, or with dangerous Token-2022 extensions. Also checks top-10 *wallet* concentration (curve/LP vaults excluded), dev buy size and RugCheck flags. | Standard on all paid bots |
+| 📈 **Smart exits** | Exits on: dev sells, copied wallet sells, stop loss, breakeven stop after the first take-profit, trailing stop, sell pressure, KOL buys, a take-profit ladder, max hold time, or a token going quiet. | "Auto sell", "trailing stop" |
+| 📱 **Telegram control panel** | Status, positions with Sell 25/50/100% buttons, manual buy/sell, pause, buy size, copy wallets, blocklist and stats, all from your phone. | Trojan/BonkBot UI |
+| 💾 **Restart-safe** | Positions, settings, copy wallets and reputation data are stored in SQLite. Open positions are reloaded after a restart and checked against the wallet. | Hosted bots |
+| 🎚 **Presets** | `degen`, `balanced` or `safe`, each with one-line overrides. | "Strategy presets" |
+| 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source. | GMGN PnL cards |
 
 ## How it works
 
 ```
- PumpPortal WS ──┐   (new pump.fun launches, migrations, live trades)
- GeckoTerminal ──┼─► dedup ─► safety filters ─► risk limits ─► BUY (Solana)
- DexScreener  ───┘                  │                             │
-   (solana/base/bsc/eth)            └─ non-Solana: alert only     ▼
-                                                     exit engine (every trade + 1s tick)
-                                                     dev sold · stop loss · trailing stop
-                                                     sell pressure · max hold · KOL buy
-                                                     take-profit ladder ─► SELL
+ PumpPortal WS ─────┐  launches · migrations · trades · copy-wallet trades
+ GeckoTerminal ─────┤
+ DexScreener  ──────┘
+        │
+        ▼
+ dedup ─► filters (on-chain, reputation, socials, honeypot, RugCheck)
+        │       └─ non-Solana: Telegram alert only
+        ▼
+ early-flow confirmation (optional) ─► risk limits ─► BUY
+        │                                             │ PumpPortal (pump.fun) / Jupiter
+        │                                             │ signed locally → Jito bundle + RPC fan-out
+        ▼                                             ▼
+ Telegram control panel  ◄────────────────  exit engine (every trade + 1s tick) ─► SELL
 ```
 
-**Discovery (multi-chain)**
-- **pump.fun via PumpPortal websocket**: brand-new tokens within about a second of creation, plus graduations.
-- **GeckoTerminal `new_pools`** on Solana, Base, BSC and Ethereum (configurable).
-- **DexScreener** newly created token profiles, enriched with pair liquidity and FDV.
-
-**Execution (Solana only, funded in SOL)**
-- pump.fun tokens are routed through PumpPortal's *local* transaction API. It builds the transaction and the bot signs it locally, so your key never leaves your machine.
-- All other tokens go through the Jupiter aggregator.
-- Fills are read back from the confirmed transaction, so PnL includes real slippage and fees.
-
-Tokens on Base, BSC and Ethereum are **alerts only**. Buying them needs ETH or BNB for gas plus a bridge. That can be added later, but it's slower and a poor fit for sniping.
-
-**Safety filters (before buying)**
-- Mint and freeze authority must be revoked.
-- Dangerous Token-2022 extensions are rejected: permanent delegate, transfer hook, pausable, high transfer fee.
-- Top-10 *wallet* concentration. Program-owned accounts such as the bonding curve and LP vaults are excluded.
-- pump.fun: the dev's launch buy can't exceed N% of supply.
-- AMM pools: minimum liquidity and maximum FDV.
-- RugCheck.xyz "danger" flags.
-- Blocklists for names and for creator wallets.
-
-**Exits (first rule that matches wins)**
-1. **Dev sold**: the creator wallet sells → sell everything immediately.
-2. **Stop loss**: down N% from entry.
-3. **Trailing stop**: arms after +X%, then sells everything on a Y% drop from the peak.
-4. **Sell pressure**: most of the recent trades are sells, which usually means the crowd is leaving.
-5. **Max hold / stale**: memecoin edge fades within minutes.
-6. **KOL buy**: when a wallet on your `kol_wallets` list buys, sell part of your bag into the followers they bring.
-7. **Take-profit ladder**: scale out at set multiples, as a % of the original bag.
-
-**Risk limits**: maximum SOL per trade, maximum open positions, a SOL reserve kept for fees, a daily realized-loss stop and a cooldown after a loss.
+Execution is Solana-only, funded in SOL. Base, BSC and ETH tokens are alerts
+only, because buying them would need ETH or BNB for gas plus a bridge, which is
+too slow for sniping.
 
 ## Setup
 
@@ -66,55 +63,82 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-1. **Paper trade first** (no wallet needed):
+1. **Paper trade first.** No wallet is needed:
    ```bash
-   python -m sniper scan          # just show what passes the filters
-   python -m sniper run           # paper trading; ledger in data/trades-paper.jsonl
+   python -m sniper scan                  # only shows what passes the filters
+   python -m sniper run                   # paper trading
+   python -m sniper -p safe run           # try another preset
+   python -m sniper stats                 # see how it did
    ```
-2. **Create a dedicated hot wallet**:
+2. **Telegram** (strongly recommended): create a bot with @BotFather. Message
+   the bot once, then get your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+   Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` and set `notify.telegram: true`.
+   Only your chat id can control the bot.
+3. **Create a hot wallet** and fund it with a small amount:
    ```bash
-   python -m sniper keygen        # paste the SOLANA_PRIVATE_KEY line into .env
+   python -m sniper keygen                # paste the line into .env
+   python -m sniper wallet
    ```
-   Send it a small amount of SOL, then check it with `python -m sniper wallet`.
-3. **Get a paid RPC** (Helius, Triton, QuickNode, ...) and set `SOLANA_RPC_URL` in `.env`.
-   The public RPC is too slow and too rate-limited for live trading.
-4. **Go live**:
+4. **Paid RPC.** Set `SOLANA_RPC_URL` (Helius, Triton, QuickNode, ...). You can
+   also add more RPCs to `speed.broadcast_rpcs` and the nearest Jito region to
+   `speed.jito_block_engines`.
+5. **Go live:**
    ```bash
-   python -m sniper run --live    # asks you to type "yes"
-   ```
-5. **Emergency exit** for a single token:
-   ```bash
-   python -m sniper sell <mint>
+   python -m sniper run --live            # asks you to type "yes"
    ```
 
-Telegram alerts: create a bot with @BotFather, put `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_CHAT_ID` in `.env`, and set `notify.telegram: true`.
+### Telegram commands
 
-## Tuning tips
+```
+/status                  mode, balance, open positions, PnL today
+/positions               each position with Sell 25% / 50% / 100% buttons
+/buy <mint> [sol] [force] manual buy (force skips filters)
+/sell <mint|SYMBOL> [pct] manual sell
+/pause  /resume          stop or restart new entries (open positions are still managed)
+/setbuy <sol>            change the auto-buy size (persists)
+/copy list | add <wallet> [label] [sol] | rm <wallet>
+/block <creator>         never buy from this dev
+/stats                   performance summary
+```
 
-- Run paper mode for at least a few hundred trades. Then read
-  `data/trades-paper.jsonl` (`close` rows hold `pnl_sol` and `reason`) and adjust
-  the filters and exits.
-- `max_creator_initial_buy_pct` and `max_top10_holder_pct` are the filters that
-  catch the most rugs.
-- To leave before the KOLs and the crowd, fill `kol_wallets` with wallets you've
-  watched pump coins. Tighten `trailing_stop_pct` or `sell_pressure_ratio` to
-  exit sooner, at the cost of selling some winners early.
-- Raising `priority_fee_sol` gets transactions in faster but costs money on every
-  buy and sell.
+### CLI
 
-## Known limitations / next steps
+```
+python -m sniper [-p degen|balanced|safe] run [--live]
+python -m sniper scan
+python -m sniper stats [--live] [--days N]
+python -m sniper wallet | keygen
+python -m sniper sell <mint>           # emergency: sell the whole wallet balance
+```
 
-- No Jito bundles or private transaction submission yet, so you're competing in
-  the public mempool path.
-- Open positions are not reloaded after a restart. Use `sniper sell <mint>`, or
-  check the ledger.
-- There is no dev-history scoring yet (how many coins this wallet launched and
-  how many it rugged). That would be the strongest filter to add next.
-- Non-Solana chains are alert-only.
+## Tuning
+
+- Run paper mode for a few hundred trades, then use `python -m sniper stats`.
+  The by-exit-reason breakdown shows which rule makes or loses money.
+- The `safe` preset's 6-second confirmation window gives up the very first
+  entry, but filters out most bundled and farmed launches.
+- To leave before the KOLs and the crowd, fill `exits.kol_wallets` with wallets
+  you've watched pump coins. The bot sells part of your bag into their buys.
+  Tighten `trailing_stop_pct` or `sell_pressure_ratio` to exit earlier.
+- Copy trading works best with a few wallets that have been profitable for a
+  while, not wallets that had one lucky hit. Leave `run_safety_checks` on.
+- Jito tips and priority fees are paid on every buy and every sell, so check
+  that your average win covers about 4 times that.
+
+## Known limitations
+
+- Copy trading sees pump.fun and PumpSwap trades from PumpPortal. A followed
+  wallet trading on other DEXes isn't seen yet. A Helius/Yellowstone gRPC
+  feed would add that.
+- Dev reputation only knows about launches seen while the bot was running.
+  Leave it running in `scan` mode for a day before trading to build up history.
+- No web dashboard; Telegram is the UI.
+- EVM chains are alert-only.
+- This code hasn't been run against live mainnet APIs yet. Start in paper mode,
+  then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest
+pip install -e '.[dev]' && pytest     # 40 tests, no network needed
 ```

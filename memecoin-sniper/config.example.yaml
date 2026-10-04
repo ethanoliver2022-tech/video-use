@@ -1,60 +1,96 @@
 # Copy to config.yaml and tune. Secrets go in .env, not here.
+#
+# Pick a preset, then override only what you want. Anything set below wins over the preset.
+#   degen    — instant snipes, loose filters, wide stops, let winners run
+#   balanced — the defaults
+#   safe     — 6s early-flow confirmation, strict filters, tight stops, quick profits
+preset: balanced
 
 trading:
-  buy_amount_sol: 0.05          # per snipe
+  buy_amount_sol: 0.05          # per snipe (changeable live from Telegram: /setbuy)
   max_open_positions: 3
-  slippage_pct: 20              # memecoins move fast; too low = failed buys
-  priority_fee_sol: 0.0005      # raise to land faster in congested blocks
+  slippage_pct: 20
+  priority_fee_sol: 0.0005      # only used when speed.auto_priority_fee is false
   min_sol_reserve: 0.03         # always keep this for sell fees + rent
   daily_loss_limit_sol: 0.5     # stops new entries for the rest of the UTC day
   cooldown_after_loss_seconds: 60
 
+speed:
+  jito_enabled: true            # swap + tip as one bundle: MEV/sandwich protection + priority
+  jito_tip_sol: 0.0005
+  jito_block_engines:           # add the region closest to you for lower latency
+    - https://mainnet.block-engine.jito.wtf
+    # - https://ny.mainnet.block-engine.jito.wtf
+    # - https://amsterdam.mainnet.block-engine.jito.wtf
+    # - https://frankfurt.mainnet.block-engine.jito.wtf
+    # - https://tokyo.mainnet.block-engine.jito.wtf
+  jito_also_send_rpc: false     # true = lands more often, but loses sandwich protection
+  broadcast_rpcs: []            # extra RPC URLs to fan every transaction out to
+  auto_priority_fee: true
+  priority_fee_percentile: 75
+  max_priority_fee_sol: 0.003
+
 discovery:
-  pumpfun_new_tokens: true      # brand-new pump.fun launches (fastest feed)
-  pumpfun_migrations: false     # tokens graduating to an AMM
-  geckoterminal_networks: [solana, base, bsc, eth]   # non-solana = alerts only
-  geckoterminal_poll_seconds: 20
+  pumpfun_new_tokens: true
+  pumpfun_migrations: false
+  geckoterminal_networks: [solana, base, bsc, eth]   # non-Solana = alerts only
   dexscreener_profiles: true
-  dexscreener_poll_seconds: 30
-  max_candidate_age_seconds: 1800
 
-filters:
-  require_mint_revoked: true
-  require_freeze_revoked: true
-  max_top10_holder_pct: 30
-  max_creator_initial_buy_pct: 8
-  min_liquidity_usd: 8000
-  max_fdv_usd: 2000000
-  use_rugcheck: true
-  rugcheck_reject_danger: true
-  name_blocklist: [test, rug, scam]
-  creator_blocklist: []         # wallets you've seen rug before
-
-exits:
-  take_profit:                  # sell_pct is % of the ORIGINAL bag
-    - {at_pct: 40,  sell_pct: 40}
-    - {at_pct: 100, sell_pct: 30}
-    - {at_pct: 250, sell_pct: 20}
-  stop_loss_pct: 25
-  trailing_activate_pct: 30
-  trailing_stop_pct: 20
-  max_hold_seconds: 900
-  stale_seconds: 120
-  exit_on_dev_sell: true
-  kol_wallets: []               # add KOL wallet addresses; we sell into their buys
-  kol_buy_sell_pct: 50
-  sell_pressure_window: 20
-  sell_pressure_ratio: 0.75
-  sell_pressure_min_trades: 12
+copytrade:
+  enabled: false
+  min_leader_buy_sol: 0.2
+  run_safety_checks: true
+  wallets: []
+  #  - {address: <wallet>, label: whale1, buy_sol: 0.1, copy_sells: true}
+  # You can also add/remove wallets live from Telegram: /copy add <wallet> [label] [sol]
 
 notify:
   telegram: false               # needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
+  telegram_control: true        # commands + sell buttons from your chat
   alert_other_chains: true
 
 endpoints:
-  # Public RPC is rate-limited and slow. Set SOLANA_RPC_URL in .env to a paid
-  # endpoint (Helius, Triton, QuickNode...) before going live.
+  # Public RPC is too slow for live trading: set SOLANA_RPC_URL in .env to a paid one.
   rpc_url: https://api.mainnet-beta.solana.com
   jupiter_api: https://lite-api.jup.ag/swap/v1
+  ipfs_gateway: ""              # e.g. a dedicated Pinata gateway for faster metadata
 
 data_dir: data
+
+# ---- Strategy overrides (uncomment to override the preset) ----
+# entry:
+#   confirm_seconds: 0          # >0 = watch early trades before buying (bundle detection)
+#   min_unique_buyers: 5
+#   max_single_buyer_pct: 35
+#   max_identical_buys: 3
+#   max_market_cap_sol: 0
+#
+# filters:
+#   max_top10_holder_pct: 30
+#   max_creator_initial_buy_pct: 8
+#   min_liquidity_usd: 8000
+#   max_fdv_usd: 2000000
+#   honeypot_check: true
+#   max_roundtrip_loss_pct: 25
+#   min_socials: 0
+#   reject_reused_socials: true
+#   max_creator_launches_24h: 3
+#   auto_blocklist_ruggers: true
+#   name_blocklist: [test, rug, scam]
+#   creator_blocklist: []
+#
+# exits:
+#   take_profit:                # sell_pct is % of the ORIGINAL bag
+#     - {at_pct: 40,  sell_pct: 40}
+#     - {at_pct: 100, sell_pct: 30}
+#     - {at_pct: 250, sell_pct: 20}
+#   stop_loss_pct: 25
+#   breakeven_after_first_tp: true
+#   trailing_activate_pct: 30
+#   trailing_stop_pct: 20
+#   max_hold_seconds: 900
+#   stale_seconds: 120
+#   exit_on_dev_sell: true
+#   kol_wallets: []
+#   kol_buy_sell_pct: 50
+#   sell_pressure_ratio: 0.75

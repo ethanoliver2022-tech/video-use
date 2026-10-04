@@ -1,4 +1,4 @@
-"""CLI: python -m sniper {run,scan,wallet,keygen,sell}"""
+"""CLI: python -m sniper {run,scan,wallet,keygen,sell,stats}"""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,8 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="sniper", description="Solana-funded memecoin sniper")
     p.add_argument("-c", "--config", default="config.yaml")
     p.add_argument("-v", "--verbose", action="store_true", help="log rejected tokens too")
+    p.add_argument("-p", "--preset", choices=["degen", "balanced", "safe"],
+                   help="strategy preset (overrides config.yaml's preset)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="trade (paper by default)")
@@ -22,6 +24,9 @@ def main() -> None:
     sub.add_parser("keygen", help="create a fresh hot wallet")
     sell = sub.add_parser("sell", help="emergency: sell 100%% of a token back to SOL")
     sell.add_argument("mint")
+    stats = sub.add_parser("stats", help="performance summary")
+    stats.add_argument("--live", action="store_true", help="live results instead of paper")
+    stats.add_argument("--days", type=float, default=0, help="only the last N days")
 
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -36,9 +41,15 @@ def main() -> None:
               f"SOLANA_PRIVATE_KEY={secret}")
         return
 
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, preset=args.preset)
 
-    if args.cmd == "wallet":
+    if args.cmd == "stats":
+        import time
+        from .stats import format_summary, summarize
+        from .store import Store
+        since = time.time() - args.days * 86400 if args.days else 0
+        print(format_summary(summarize(Store(cfg.data_dir, "live" if args.live else "paper"), since)))
+    elif args.cmd == "wallet":
         asyncio.run(_wallet(cfg))
     elif args.cmd == "sell":
         asyncio.run(_sell(cfg, args.mint))
@@ -46,7 +57,7 @@ def main() -> None:
         from .engine import Engine
         live = args.cmd == "run" and args.live
         if live:
-            print(f"LIVE MODE: up to {cfg.trading.buy_amount_sol} SOL per trade, "
+            print(f"LIVE MODE (preset {cfg.preset}): {cfg.trading.buy_amount_sol} SOL per trade, "
                   f"{cfg.trading.max_open_positions} positions, "
                   f"daily loss stop {cfg.trading.daily_loss_limit_sol} SOL.")
             if input("Type 'yes' to trade real funds: ").strip().lower() != "yes":

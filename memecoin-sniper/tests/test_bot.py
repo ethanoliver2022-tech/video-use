@@ -226,6 +226,6 @@ async def test_paper_engine_snipe_and_exit(tmp_path):
                         "vTokensInBondingCurve": v_tok * 1.03})
     assert p.closed and p.close_reason == "dev sold"
     assert p.sol_out > p.sol_in  # took profit before the rug
-    rows = [json.loads(line) for line in (tmp_path / "trades-paper.jsonl").read_text().splitlines()]
-    assert [r["event"] for r in rows] == ["buy", "sell", "sell", "close"]
+    assert [e["event"] for e in eng.store.events()] == ["buy", "sell", "sell", "close"]
+    assert eng.store.is_blocked(CREATOR) is None  # profitable, so no auto-block
     await eng.http.aclose()

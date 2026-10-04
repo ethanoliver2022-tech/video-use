@@ -21,6 +21,7 @@ from solders.transaction import VersionedTransaction
 from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
 from ..solana_rpc import SolanaRpc, balance_deltas
+from .sender import TxSender
 
 log = logging.getLogger(__name__)
 
@@ -116,24 +117,24 @@ class PaperExecutor:
 
 class LiveExecutor:
     def __init__(self, cfg: Config, keypair: Keypair, rpc: SolanaRpc, jupiter: Jupiter,
-                 http: httpx.AsyncClient):
+                 http: httpx.AsyncClient, sender: Optional[TxSender] = None):
         self.cfg, self.kp, self.rpc, self.jupiter, self.http = cfg, keypair, rpc, jupiter, http
         self.pubkey = str(keypair.pubkey())
+        self.sender = sender or TxSender(cfg.speed, rpc, http, cfg.trading.priority_fee_sol)
 
-    def _sign(self, unsigned: bytes) -> bytes:
+    def _sign(self, unsigned: bytes) -> VersionedTransaction:
         tx = VersionedTransaction.from_bytes(unsigned)
-        return bytes(VersionedTransaction(tx.message, [self.kp]))
+        return VersionedTransaction(tx.message, [self.kp])
 
     async def _pumpportal_tx(self, action: str, mint: str, amount, in_sol: bool) -> bytes:
-        t = self.cfg.trading
         resp = await self.http.post(self.cfg.endpoints.pumpportal_trade, data={
             "publicKey": self.pubkey,
             "action": action,
             "mint": mint,
             "amount": amount,
             "denominatedInSol": "true" if in_sol else "false",
-            "slippage": int(t.slippage_pct),
-            "priorityFee": t.priority_fee_sol,
+            "slippage": int(self.cfg.trading.slippage_pct),
+            "priorityFee": await self.sender.priority_fee(),
             "pool": "auto",
         })
         if resp.status_code != 200:
@@ -141,7 +142,7 @@ class LiveExecutor:
         return resp.content
 
     async def _submit(self, unsigned: bytes, mint: str) -> Fill:
-        sig = await self.rpc.send_raw_transaction(self._sign(unsigned))
+        sig = await self.sender.send(self._sign(unsigned), self.kp)
         log.info("sent %s", sig)
         if not await self.rpc.confirm(sig):
             raise RuntimeError(f"transaction {sig} not confirmed in time")
@@ -152,11 +153,11 @@ class LiveExecutor:
         return Fill(tokens=abs(tok), sol=abs(sol), signature=sig)
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
-        if cand.source.startswith("pumpfun"):
+        if cand.route == "pump":
             unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
         else:
             q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
-            unsigned = await self.jupiter.swap_tx(q, self.pubkey, self.cfg.trading.priority_fee_sol)
+            unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         return await self._submit(unsigned, cand.mint)
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
@@ -172,7 +173,7 @@ class LiveExecutor:
             except Exception as e:
                 log.warning("pumpportal sell failed (%s); falling back to Jupiter", e)
         q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct)
-        unsigned = await self.jupiter.swap_tx(q, self.pubkey, self.cfg.trading.priority_fee_sol)
+        unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         return await self._submit(unsigned, mint)
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:

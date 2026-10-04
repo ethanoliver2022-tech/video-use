@@ -8,14 +8,20 @@ coordinated dumps.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 from solders.pubkey import Pubkey
 
 from .config import FilterConfig
-from .models import PUMP_TOTAL_SUPPLY, Candidate, SafetyReport
+from .intel import extract_socials, fetch_metadata
+from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, SafetyReport
 from .solana_rpc import SolanaRpc
+
+if TYPE_CHECKING:
+    from .execution.executors import Jupiter
+    from .store import Store
 
 log = logging.getLogger(__name__)
 
@@ -99,13 +105,25 @@ def concentration_pct(largest: list[dict], owners: list[Optional[dict]], supply_
 
 
 class SafetyChecker:
-    def __init__(self, cfg: FilterConfig, rpc: SolanaRpc, http: httpx.AsyncClient, rugcheck_api: str):
+    def __init__(self, cfg: FilterConfig, rpc: SolanaRpc, http: httpx.AsyncClient, rugcheck_api: str,
+                 store: Optional["Store"] = None, jupiter: Optional["Jupiter"] = None,
+                 ipfs_gateway: str = "", probe_sol: float = 0.05):
         self.cfg, self.rpc, self.http, self.rugcheck_api = cfg, rpc, http, rugcheck_api
+        self.store, self.jupiter, self.ipfs_gateway = store, jupiter, ipfs_gateway
+        self.probe_sol = probe_sol
 
     async def evaluate(self, c: Candidate) -> SafetyReport:
         r = static_checks(c, self.cfg)
-        if not r.passed or c.chain != "solana":
+        if c.chain != "solana" or not r.passed:
             return r
+        self._reputation(c, r)
+        if not r.passed:
+            return r
+
+        if c.uri:
+            await self._socials(c, r)
+            if not r.passed:
+                return r
 
         # Brand-new pump.fun coins: the program itself revokes mint/freeze and the
         # curve holds ~all supply, so on-chain + rugcheck lookups only add latency.
@@ -122,6 +140,8 @@ class SafetyChecker:
             r.fail("mint account not found")
             return r
         check_mint(info, self.cfg, r)
+        if not r.passed:
+            return r
 
         try:
             decimals = int(info.get("decimals", 0))
@@ -135,9 +155,57 @@ class SafetyChecker:
         except Exception as e:
             r.notes.append(f"holder check skipped: {e}")
 
-        if self.cfg.use_rugcheck:
+        if r.passed and self.cfg.use_rugcheck:
             await self._rugcheck(c, r)
+        if r.passed and self.cfg.honeypot_check and c.route == "jupiter" and self.jupiter:
+            await self._honeypot(c, r)
         return r
+
+    def _reputation(self, c: Candidate, r: SafetyReport) -> None:
+        if not self.store or not c.creator:
+            return
+        reason = self.store.is_blocked(c.creator)
+        if reason:
+            r.fail(f"creator blocklisted: {reason}")
+            return
+        n = self.store.launches_since(c.creator, time.time() - 86400, exclude_mint=c.mint)
+        if n:
+            r.notes.append(f"creator launched {n} other coin(s) in 24h")
+        if n >= self.cfg.max_creator_launches_24h:
+            r.fail(f"serial launcher: {n} other launches in 24h")
+
+    async def _socials(self, c: Candidate, r: SafetyReport) -> None:
+        if not (self.cfg.min_socials or self.cfg.reject_reused_socials):
+            return
+        meta = await fetch_metadata(self.http, c.uri or "", self.ipfs_gateway)
+        if meta is None:
+            if self.cfg.min_socials:
+                r.fail("metadata unavailable")
+            return
+        socials = extract_socials(meta)
+        r.notes.append(f"{len(socials)} socials")
+        if len(socials) < self.cfg.min_socials:
+            r.fail(f"{len(socials)} socials (< {self.cfg.min_socials})")
+        if self.store and socials:
+            reused = self.store.record_socials(c.mint, socials)
+            if reused and self.cfg.reject_reused_socials:
+                r.fail("socials reused from an earlier launch: " + ", ".join(reused))
+
+    async def _honeypot(self, c: Candidate, r: SafetyReport) -> None:
+        """Quote SOL -> token -> SOL. No sell route, or a huge round-trip loss, means
+        a honeypot, a heavy tax or liquidity too thin to get out."""
+        try:
+            buy_q = await self.jupiter.quote(SOL_MINT, c.mint, self.probe_sol, 50)
+            tokens = await self.jupiter.out_ui(buy_q)
+            sell_q = await self.jupiter.quote(c.mint, SOL_MINT, tokens, 50)
+            back = await self.jupiter.out_ui(sell_q)
+        except Exception as e:
+            r.fail(f"no sell route ({e})")
+            return
+        loss = (1 - back / self.probe_sol) * 100
+        r.notes.append(f"round-trip loss {loss:.1f}%")
+        if loss > self.cfg.max_roundtrip_loss_pct:
+            r.fail(f"round-trip loses {loss:.0f}% (tax / honeypot / thin liquidity)")
 
     async def _rugcheck(self, c: Candidate, r: SafetyReport) -> None:
         try:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Optional
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -29,10 +29,15 @@ class Candidate:
     v_sol: Optional[float] = None
     v_tokens: Optional[float] = None
     url: Optional[str] = None
+    uri: Optional[str] = None       # token metadata JSON (pump.fun)
+    route: str = "jupiter"          # "pump" (PumpPortal, curve or pump-amm) | "jupiter"
+    leader: Optional[str] = None    # copy-trade wallet that triggered this, if any
+    buy_sol: Optional[float] = None # per-candidate size override (copy trades, manual buys)
+    force: bool = False             # manual buy: skip filters
 
     @property
     def on_bonding_curve(self) -> bool:
-        return self.source == "pumpfun"
+        return self.route == "pump" and self.source != "pumpfun-migration"
 
     @property
     def age_seconds(self) -> float:
@@ -88,6 +93,9 @@ class Position:
     kol_bought: list[str] = field(default_factory=list)
     kol_exit_done: bool = False
     migrated: bool = False
+    route: str = "jupiter"
+    leader: Optional[str] = None
+    leader_sold: bool = False
     closed: bool = False
     close_reason: str = ""
 
@@ -113,6 +121,20 @@ class Position:
     def realized_pnl_sol(self) -> float:
         """Only meaningful once closed; while open it ignores unsold tokens."""
         return self.sol_out - self.sol_in
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["tp_levels_hit"] = sorted(self.tp_levels_hit)
+        d["recent_trades"] = []  # transient flow data isn't worth persisting
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Position":
+        d = dict(d)
+        d["tp_levels_hit"] = set(d.get("tp_levels_hit", []))
+        d.pop("recent_trades", None)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
     def update_price(self, price: float, ts: Optional[float] = None) -> None:
         if price <= 0:

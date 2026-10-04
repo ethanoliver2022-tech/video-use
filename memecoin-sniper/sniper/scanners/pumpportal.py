@@ -36,6 +36,8 @@ def candidate_from_create(msg: dict) -> Candidate:
         v_sol=_f(msg.get("vSolInBondingCurve")),
         v_tokens=_f(msg.get("vTokensInBondingCurve")),
         url=f"https://pump.fun/coin/{msg['mint']}",
+        uri=msg.get("uri"),
+        route="pump",
     )
 
 
@@ -63,6 +65,7 @@ class PumpPortalStream:
         self.want_new_tokens = new_tokens
         self.want_migrations = migrations
         self.token_subs: set[str] = set()
+        self.account_subs: set[str] = set()
         self.on_candidate: Optional[CandidateHandler] = None
         self.on_trade: Optional[TradeHandler] = None
         self.on_migration: Optional[MigrationHandler] = None
@@ -81,6 +84,17 @@ class PumpPortalStream:
         self.token_subs.discard(mint)
         await self._send({"method": "unsubscribeTokenTrade", "keys": [mint]})
 
+    async def watch_accounts(self, wallets: list[str]) -> None:
+        new = [w for w in wallets if w not in self.account_subs]
+        if new:
+            self.account_subs.update(new)
+            await self._send({"method": "subscribeAccountTrade", "keys": new})
+
+    async def unwatch_account(self, wallet: str) -> None:
+        if wallet in self.account_subs:
+            self.account_subs.discard(wallet)
+            await self._send({"method": "unsubscribeAccountTrade", "keys": [wallet]})
+
     async def _send(self, payload: dict) -> None:
         ws = self._ws
         if ws is None:
@@ -98,6 +112,8 @@ class PumpPortalStream:
             await self._send({"method": "subscribeMigration"})
         if self.token_subs:
             await self._send({"method": "subscribeTokenTrade", "keys": sorted(self.token_subs)})
+        if self.account_subs:
+            await self._send({"method": "subscribeAccountTrade", "keys": sorted(self.account_subs)})
 
     async def run(self) -> None:
         backoff = 1.0
@@ -137,7 +153,7 @@ class PumpPortalStream:
                     await self.on_migration(msg["mint"])
                 if self.want_migrations and self.on_candidate:
                     await self.on_candidate(Candidate(
-                        chain="solana", mint=msg["mint"], source="pumpfun-migration",
+                        chain="solana", mint=msg["mint"], source="pumpfun-migration", route="pump",
                         url=f"https://pump.fun/coin/{msg['mint']}",
                     ))
         except Exception:

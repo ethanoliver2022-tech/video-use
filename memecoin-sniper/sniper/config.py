@@ -1,6 +1,7 @@
-"""Config loading: config.yaml for strategy, .env for secrets."""
+"""Config loading: config.yaml for strategy, .env for secrets, presets for quick starts."""
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -17,14 +18,37 @@ class TakeProfitLevel:
 
 
 @dataclass
+class CopyWallet:
+    address: str
+    label: str = ""
+    buy_sol: float = 0.0        # 0 = use trading.buy_amount_sol
+    copy_sells: bool = True     # exit when they exit
+
+
+@dataclass
 class TradingConfig:
     buy_amount_sol: float = 0.05
     max_open_positions: int = 3
     slippage_pct: float = 20.0
-    priority_fee_sol: float = 0.0005
+    priority_fee_sol: float = 0.0005       # used when speed.auto_priority_fee is off
     min_sol_reserve: float = 0.03          # never spend below this (rent + fees for sells)
     daily_loss_limit_sol: float = 0.5      # stop opening positions after this much realized loss
     cooldown_after_loss_seconds: int = 0
+
+
+@dataclass
+class SpeedConfig:
+    jito_enabled: bool = True
+    jito_tip_sol: float = 0.0005
+    jito_block_engines: list[str] = field(
+        default_factory=lambda: ["https://mainnet.block-engine.jito.wtf"]
+    )
+    jito_also_send_rpc: bool = False       # faster landing, but gives up sandwich protection
+    broadcast_rpcs: list[str] = field(default_factory=list)  # extra RPCs to fan out to
+    auto_priority_fee: bool = True
+    priority_fee_percentile: float = 75.0
+    min_priority_fee_sol: float = 0.0001
+    max_priority_fee_sol: float = 0.003
 
 
 @dataclass
@@ -41,16 +65,32 @@ class DiscoveryConfig:
 
 
 @dataclass
+class EntryConfig:
+    """Early-flow confirmation for pump.fun launches (0 seconds = instant snipe)."""
+    confirm_seconds: float = 0.0
+    min_unique_buyers: int = 5
+    max_single_buyer_pct: float = 35.0     # of early buy volume, excluding the dev
+    max_identical_buys: int = 3            # same SOL size from different wallets = bundle
+    min_net_flow_sol: float = 0.0          # early buys minus sells
+    max_market_cap_sol: float = 0.0        # 0 = no cap; skip if it already ran too far
+
+
+@dataclass
 class FilterConfig:
     require_mint_revoked: bool = True
     require_freeze_revoked: bool = True
     max_top10_holder_pct: float = 30.0     # excludes program-owned accounts (curve / LP vaults)
     max_creator_initial_buy_pct: float = 8.0
-    min_creator_initial_buy_sol: float = 0.0
     min_liquidity_usd: float = 8000.0      # for AMM pools (not pump.fun curve)
     max_fdv_usd: float = 2_000_000.0
     use_rugcheck: bool = True
     rugcheck_reject_danger: bool = True
+    honeypot_check: bool = True            # quote buy->sell round trip before entering
+    max_roundtrip_loss_pct: float = 25.0
+    min_socials: int = 0                   # pump.fun metadata: twitter / telegram / website
+    reject_reused_socials: bool = True     # same twitter/telegram as an earlier launch
+    max_creator_launches_24h: int = 3      # serial launchers are almost always farming
+    auto_blocklist_ruggers: bool = True    # creators who dev-dump on us get blocklisted
     name_blocklist: list[str] = field(default_factory=lambda: ["test", "rug", "scam"])
     creator_blocklist: list[str] = field(default_factory=list)
 
@@ -65,6 +105,7 @@ class ExitConfig:
         ]
     )
     stop_loss_pct: float = 25.0             # sell all if down this much
+    breakeven_after_first_tp: bool = True   # after the first TP, never let it go red
     trailing_activate_pct: float = 30.0     # trailing stop arms once up this much
     trailing_stop_pct: float = 20.0         # then sells all on this % drop from peak
     max_hold_seconds: int = 900
@@ -78,8 +119,17 @@ class ExitConfig:
 
 
 @dataclass
+class CopyTradeConfig:
+    enabled: bool = False
+    wallets: list[CopyWallet] = field(default_factory=list)
+    min_leader_buy_sol: float = 0.2         # ignore dust buys / tests
+    run_safety_checks: bool = True
+
+
+@dataclass
 class NotifyConfig:
     telegram: bool = False                  # needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env
+    telegram_control: bool = True           # accept commands + buttons from your chat
     alert_other_chains: bool = True
 
 
@@ -92,14 +142,19 @@ class Endpoints:
     geckoterminal_api: str = "https://api.geckoterminal.com/api/v2"
     dexscreener_api: str = "https://api.dexscreener.com"
     rugcheck_api: str = "https://api.rugcheck.xyz/v1"
+    ipfs_gateway: str = ""                  # rewrite ipfs.io metadata links to a faster gateway
 
 
 @dataclass
 class Config:
+    preset: str = "balanced"
     trading: TradingConfig = field(default_factory=TradingConfig)
+    speed: SpeedConfig = field(default_factory=SpeedConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
+    entry: EntryConfig = field(default_factory=EntryConfig)
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
+    copytrade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     endpoints: Endpoints = field(default_factory=Endpoints)
     data_dir: str = "data"
@@ -110,13 +165,45 @@ class Config:
     telegram_chat_id: str = ""
 
 
+# Presets sit underneath your config.yaml: anything you set there wins.
+PRESETS: dict[str, dict[str, Any]] = {
+    "degen": {
+        "entry": {"confirm_seconds": 0},
+        "filters": {"max_creator_initial_buy_pct": 15, "max_top10_holder_pct": 45,
+                    "min_socials": 0, "max_creator_launches_24h": 10, "min_liquidity_usd": 3000},
+        "exits": {"stop_loss_pct": 35, "trailing_activate_pct": 50, "trailing_stop_pct": 30,
+                  "max_hold_seconds": 1800,
+                  "take_profit": [{"at_pct": 100, "sell_pct": 50}, {"at_pct": 400, "sell_pct": 30}]},
+    },
+    "balanced": {},
+    "safe": {
+        "entry": {"confirm_seconds": 6, "min_unique_buyers": 8, "max_single_buyer_pct": 25},
+        "filters": {"max_creator_initial_buy_pct": 4, "max_top10_holder_pct": 20, "min_socials": 1,
+                    "max_creator_launches_24h": 1, "min_liquidity_usd": 20000},
+        "exits": {"stop_loss_pct": 15, "trailing_activate_pct": 20, "trailing_stop_pct": 12,
+                  "max_hold_seconds": 600,
+                  "take_profit": [{"at_pct": 25, "sell_pct": 50}, {"at_pct": 60, "sell_pct": 30}]},
+    },
+}
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = copy.deepcopy(base)
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 def _build(cls: type, raw: dict[str, Any]) -> Any:
     hints = get_type_hints(cls)
-    kwargs: dict[str, Any] = {}
     known = {f.name for f in fields(cls)}
     unknown = set(raw) - known
     if unknown:
         raise ValueError(f"Unknown config keys for {cls.__name__}: {sorted(unknown)}")
+    kwargs: dict[str, Any] = {}
     for f in fields(cls):
         if f.name not in raw:
             continue
@@ -126,15 +213,22 @@ def _build(cls: type, raw: dict[str, Any]) -> Any:
             val = _build(typ, val)
         elif f.name == "take_profit":
             val = [TakeProfitLevel(**lvl) for lvl in val]
+        elif f.name == "wallets":
+            val = [CopyWallet(address=w) if isinstance(w, str) else CopyWallet(**w) for w in val]
         kwargs[f.name] = val
     return cls(**kwargs)
 
 
-def load_config(path: str | os.PathLike | None = None) -> Config:
+def load_config(path: str | os.PathLike | None = None, preset: str | None = None) -> Config:
     load_dotenv()
     raw: dict[str, Any] = {}
     if path and Path(path).exists():
         raw = yaml.safe_load(Path(path).read_text()) or {}
+    name = preset or raw.get("preset", "balanced")
+    if name not in PRESETS:
+        raise ValueError(f"unknown preset '{name}' (choose from {', '.join(PRESETS)})")
+    raw = _deep_merge(PRESETS[name], raw)
+    raw["preset"] = name
     cfg: Config = _build(Config, raw)
 
     if os.getenv("SOLANA_RPC_URL"):
