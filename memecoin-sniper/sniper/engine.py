@@ -383,7 +383,8 @@ class Engine:
             if fill.tokens <= 0:
                 await self.notifier.send(f"❌ buy {esc(c.symbol)} returned 0 tokens ({fill.signature})")
                 return "buy returned 0 tokens"
-            source = c.source + (f"/{c.trigger.split(':')[0]}" if c.trigger else "")
+            tag = c.trigger.split(":")[0]
+            source = c.source + (f"/{tag}" if tag and tag != c.source else "")
             pos = Position(mint=c.mint, symbol=c.symbol or c.mint[:6], source=source,
                            creator=c.creator, entry_price=fill.sol / fill.tokens,
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,

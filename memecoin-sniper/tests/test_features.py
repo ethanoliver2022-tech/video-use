@@ -232,7 +232,7 @@ async def test_limit_buy_triggers_on_dip_and_persists(tmp_path):
     await eng.settle()
     assert eng.executor.buys == [(mint, 0.2)]
     assert eng.store.open_orders() == []
-    assert eng.positions[mint].source == "limit/limit"
+    assert eng.positions[mint].source == "limit"
     await eng.http.aclose()
 
 
