@@ -14,13 +14,14 @@ from . import exits
 from .config import Config, CopyWallet
 from .execution.executors import CurveState, Executor, Jupiter, LiveExecutor, PaperExecutor
 from .execution.sender import TxSender
-from .execution.wallet import load_keypair
+from .execution.wallet import WalletManager, transfer_tx
 from .intel import EarlyFlow
 from .models import Candidate, Position
 from .notify import Notifier
 from .safety import SafetyChecker
 from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
 from .scanners.pumpportal import PumpPortalStream, trade_price
+from .settings import BY_KEY, apply_overrides, apply_setting, format_value, to_storable, update_in_place
 from .solana_rpc import SolanaRpc
 from .store import Store
 
@@ -31,13 +32,19 @@ QUOTE_GAP_SECONDS = 5  # poll a Jupiter quote when the trade stream has been qui
 
 
 class Engine:
-    def __init__(self, cfg: Config, live: bool = False, scan_only: bool = False):
+    def __init__(self, cfg: Config, live: bool = False, scan_only: bool = False,
+                 config_path: Optional[str] = None, start_paused: bool = False):
         self.cfg, self.live, self.scan_only = cfg, live, scan_only
+        self.config_path = config_path
         self.mode = "live" if live else "paper"
-        self.http = httpx.AsyncClient(timeout=15, headers={"user-agent": "memecoin-sniper/0.2"})
+        self.http = httpx.AsyncClient(timeout=15, headers={"user-agent": "memecoin-sniper/0.3"})
         self.rpc = SolanaRpc(cfg.endpoints.rpc_url, self.http)
         self.jupiter = Jupiter(cfg.endpoints.jupiter_api, self.rpc, self.http)
         self.store = Store(cfg.data_dir, self.mode)
+        self.wallet = WalletManager(cfg.data_dir, cfg.private_key)
+        bad = apply_overrides(cfg, self.store.overrides())  # settings changed from Telegram
+        if bad:
+            log.warning("ignoring invalid saved settings: %s", ", ".join(bad))
         self.safety = SafetyChecker(cfg.filters, self.rpc, self.http, cfg.endpoints.rugcheck_api,
                                     store=self.store, jupiter=self.jupiter,
                                     ipfs_gateway=cfg.endpoints.ipfs_gateway,
@@ -45,14 +52,7 @@ class Engine:
         self.notifier = Notifier(self.http, cfg.telegram_bot_token if cfg.notify.telegram else "",
                                  cfg.telegram_chat_id)
         self.own_wallet = ""
-        self.executor: Executor
-        if live:
-            kp = load_keypair(cfg.private_key)
-            self.own_wallet = str(kp.pubkey())
-            sender = TxSender(cfg.speed, self.rpc, self.http, cfg.trading.priority_fee_sol)
-            self.executor = LiveExecutor(cfg, kp, self.rpc, self.jupiter, self.http, sender)
-        else:
-            self.executor = PaperExecutor(self.jupiter, cfg.trading.slippage_pct)
+        self.executor: Executor = self._build_executor(live)
 
         d = cfg.discovery
         self.stream = PumpPortalStream(cfg.endpoints.pumpportal_ws, d.pumpfun_new_tokens,
@@ -69,20 +69,38 @@ class Engine:
         self.sell_locks: dict[str, asyncio.Lock] = {}
         self.sell_failures: dict[str, int] = {}
         self.buy_lock = asyncio.Lock()
-        self.kol_wallets = set(cfg.exits.kol_wallets)
         self.last_loss_at = 0.0
         self._recent_sigs: deque[str] = deque(maxlen=2000)
         self._recent_sig_set: set[str] = set()
         self._bg: set[asyncio.Task] = set()
 
-        # runtime settings changed from Telegram survive restarts
-        if (v := self.store.get_setting("buy_amount_sol")):
-            cfg.trading.buy_amount_sol = float(v)
-        self.paused = self.store.get_setting("paused") == "1"
+        saved_pause = self.store.get_setting("paused")
+        self.paused = start_paused if saved_pause is None else saved_pause == "1"
         self._copy: dict[str, CopyWallet] = {}
-        if cfg.copytrade.enabled:
-            for w in cfg.copytrade.wallets:
-                self._copy[w.address] = w
+        self._load_copy_wallets()
+        self.telegram_ui = False  # set by `sniper bot`: Telegram is the whole interface
+
+    @property
+    def kol_wallets(self) -> set[str]:
+        return set(self.cfg.exits.kol_wallets)
+
+    def _build_executor(self, live: bool) -> Executor:
+        if not live:
+            self.own_wallet = ""
+            return PaperExecutor(self.jupiter, self.cfg.trading.slippage_pct)
+        kp = self.wallet.keypair()
+        if kp is None:
+            raise ValueError("no wallet yet — create or import one first")
+        self.own_wallet = str(kp.pubkey())
+        sender = TxSender(self.cfg.speed, self.rpc, self.http, self.cfg.trading.priority_fee_sol)
+        return LiveExecutor(self.cfg, kp, self.rpc, self.jupiter, self.http, sender)
+
+    def _load_copy_wallets(self) -> None:
+        self._copy.clear()
+        if not self.cfg.copytrade.enabled:
+            return
+        for w in self.cfg.copytrade.wallets:
+            self._copy[w.address] = w
         for w in self.store.copy_wallets():  # added from Telegram
             self._copy[w["address"]] = CopyWallet(**w)
 
@@ -163,8 +181,10 @@ class Engine:
     async def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0) -> None:
         from solders.pubkey import Pubkey
         Pubkey.from_string(address)  # validates
-        self._copy[address] = CopyWallet(address, label, buy_sol, True)
         self.store.add_copy_wallet(address, label, buy_sol, True)
+        if not self.cfg.copytrade.enabled:
+            await self.set_setting("copytrade.enabled", True)
+        self._copy[address] = CopyWallet(address, label, buy_sol, True)
         await self.stream.watch_accounts([address])
 
     async def remove_copy_wallet(self, address: str) -> bool:
@@ -420,6 +440,81 @@ class Engine:
         self._bg.add(t)
         t.add_done_callback(self._bg.discard)
 
+    # ---------- runtime reconfiguration (Telegram) ----------
+
+    async def set_setting(self, key: str, raw) -> str:
+        if key not in BY_KEY:
+            raise ValueError(f"unknown setting {key}")
+        value = apply_setting(self.cfg, key, raw)
+        self.store.set_override(key, to_storable(BY_KEY[key], value))
+        await self._setting_changed(key)
+        return f"{BY_KEY[key].label}: {format_value(BY_KEY[key], value)}"
+
+    async def _setting_changed(self, key: str) -> None:
+        if key.startswith("discovery.pumpfun"):
+            await self.stream.set_feeds(self.cfg.discovery.pumpfun_new_tokens,
+                                        self.cfg.discovery.pumpfun_migrations)
+        elif key.startswith("copytrade."):
+            before = set(self._copy)
+            self._load_copy_wallets()
+            for w in before - set(self._copy):
+                await self.stream.unwatch_account(w)
+            if self._copy:
+                await self.stream.watch_accounts(list(self._copy))
+        elif key == "trading.buy_amount_sol":
+            self.safety.probe_sol = self.cfg.trading.buy_amount_sol
+
+    async def apply_preset(self, name: str) -> str:
+        from .config import load_config
+        new = load_config(self.config_path, preset=name)
+        apply_overrides(new, self.store.overrides())
+        update_in_place(self.cfg, new, skip={"private_key", "telegram_bot_token",
+                                             "telegram_chat_id", "data_dir", "endpoints"})
+        self.store.set_setting("preset", name)
+        for key in ("discovery.pumpfun_new_tokens", "copytrade.enabled", "trading.buy_amount_sol"):
+            await self._setting_changed(key)
+        n = len(self.store.overrides())
+        return f"Preset {name} applied" + (f" (your {n} custom setting(s) still win)" if n else "")
+
+    async def reset_settings(self) -> str:
+        self.store.clear_overrides()
+        return await self.apply_preset(self.cfg.preset)
+
+    async def switch_mode(self, live: bool) -> str:
+        if live == self.live:
+            return f"Already in {self.mode.upper()} mode."
+        open_pos = [p for p in self.positions.values() if not p.closed]
+        if open_pos:
+            return (f"Close your {len(open_pos)} open {self.mode} position(s) first "
+                    f"(Positions → Sell 100%).")
+        self.executor = self._build_executor(live)  # raises if no wallet
+        for mint in list(self.positions):
+            await self.stream.unwatch_token(mint)
+        self.live, self.mode = live, "live" if live else "paper"
+        self.store.mode = self.mode
+        self.store.set_setting("mode", self.mode)
+        self.positions.clear()
+        self.sell_failures.clear()
+        await self.restore()
+        return f"Switched to {self.mode.upper()} mode."
+
+    async def withdraw(self, to: str, amount: Optional[float]) -> str:
+        """Send SOL out of the hot wallet. amount=None sends everything minus the fee."""
+        kp = self.wallet.keypair()
+        if kp is None:
+            raise ValueError("no wallet")
+        bal = await self.rpc.get_balance_sol(str(kp.pubkey()))
+        fee = 0.000005
+        sol = bal - fee if amount is None else amount
+        if sol <= 0 or sol + fee > bal + 1e-12:
+            raise ValueError(f"balance is {bal:.6f} SOL")
+        tx = transfer_tx(kp, to, int(sol * 1e9), await self.rpc.get_latest_blockhash())
+        sig = await self.rpc.send_raw_transaction(bytes(tx))
+        confirmed = await self.rpc.confirm(sig)
+        self.store.event("withdraw", to=to, sol=sol, sig=sig)
+        return (f"{'✅ Sent' if confirmed else '⏳ Submitted'} {sol:.6f} SOL to {to}\n"
+                f"https://solscan.io/tx/{sig}")
+
     async def restore(self) -> None:
         """Reload open positions from the database after a restart."""
         for pos in self.store.open_positions():
@@ -444,12 +539,26 @@ class Engine:
     async def run(self) -> None:
         d, e = self.cfg.discovery, self.cfg.endpoints
         mode = "SCAN-ONLY" if self.scan_only else self.mode.upper()
-        who = f" wallet {self.own_wallet}" if self.live else ""
         self.store.prune_launches(time.time() - 2 * 86400)
+        tg = None
+        if self.cfg.telegram_bot_token and (
+                self.telegram_ui or (self.notifier.enabled and self.cfg.notify.telegram_control)):
+            from .telegram_bot import TelegramControl
+            tg = TelegramControl(self, self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, self.http)
+        if self.telegram_ui and not self.live and self.store.get_setting("mode") == "live":
+            try:  # resume live mode chosen from chat before the restart
+                self.executor = self._build_executor(True)
+                self.live, self.mode, self.store.mode = True, "live", "live"
+                mode = "LIVE"
+            except Exception as ex:
+                log.warning("could not resume live mode: %s", ex)
         await self.restore()
         if self._copy:
             await self.stream.watch_accounts(list(self._copy))
-        await self.notifier.send(f"🚀 sniper starting in {mode} mode (preset {self.cfg.preset}){who}")
+        who = f" wallet {self.own_wallet}" if self.live else ""
+        paused = " — paused, tap /menu to start" if self.paused and not self.scan_only else ""
+        await self.notifier.send(
+            f"🚀 sniper starting in {mode} mode (preset {self.cfg.preset}){who}{paused}")
         tasks = [asyncio.create_task(self.stream.run())]
         if d.geckoterminal_networks:
             tasks.append(asyncio.create_task(GeckoTerminalScanner(
@@ -460,10 +569,8 @@ class Engine:
                 e.dexscreener_api, d.dexscreener_poll_seconds, self.on_candidate, self.http).run()))
         tasks += [asyncio.create_task(self.worker()) for _ in range(6)]
         tasks += [asyncio.create_task(self.exit_loop()), asyncio.create_task(self.quote_poller())]
-        if self.notifier.enabled and self.cfg.notify.telegram_control:
-            from .telegram_bot import TelegramControl
-            tasks.append(asyncio.create_task(TelegramControl(
-                self, self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, self.http).run()))
+        if tg:
+            tasks.append(asyncio.create_task(tg.run()))
         try:
             await asyncio.gather(*tasks)
         finally:

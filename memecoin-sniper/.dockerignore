@@ -1,0 +1,5 @@
+.env
+data/
+config.yaml
+tests/
+**/__pycache__

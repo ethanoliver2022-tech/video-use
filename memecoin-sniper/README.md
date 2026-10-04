@@ -26,10 +26,77 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 🍯 **Honeypot check** | Quotes a buy and then a sell before entering. A token that can't be sold, or loses too much on the round trip, is rejected. | "Honeypot / tax check" |
 | 🛡 **On-chain rug filters** | Rejects tokens where mint or freeze authority isn't revoked, or with dangerous Token-2022 extensions. Also checks top-10 *wallet* concentration (curve/LP vaults excluded), dev buy size and RugCheck flags. | Standard on all paid bots |
 | 📈 **Smart exits** | Exits on: dev sells, copied wallet sells, stop loss, breakeven stop after the first take-profit, trailing stop, sell pressure, KOL buys, a take-profit ladder, max hold time, or a token going quiet. | "Auto sell", "trailing stop" |
-| 📱 **Telegram control panel** | Status, positions with Sell 25/50/100% buttons, manual buy/sell, pause, buy size, copy wallets, blocklist and stats, all from your phone. | Trojan/BonkBot UI |
+| 📱 **Telegram-first** | The whole bot runs from a chat: wallet, deposit, withdraw, paper/live, every setting, presets, copy trading, manual trades, stats. | Trojan/BonkBot UI |
 | 💾 **Restart-safe** | Positions, settings, copy wallets and reputation data are stored in SQLite. Open positions are reloaded after a restart and checked against the wallet. | Hosted bots |
 | 🎚 **Presets** | `degen`, `balanced` or `safe`, each with one-line overrides. | "Strategy presets" |
 | 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source. | GMGN PnL cards |
+
+## Run it all from Telegram
+
+The whole bot is driven from a Telegram chat, like Trojan or BonkBot. You start
+one process on a server once, and everything after that happens in the chat:
+wallet, deposits, withdrawals, starting and stopping, paper/live, settings and
+copy trading.
+
+```
+🎯 Memecoin Sniper
+📝 PAPER · ▶️ sniping · preset balanced
+💼 7xKX…9fQ2
+💰 1.2500 SOL
+📊 Open 1/3 · today +0.0312 SOL · buy 0.05 SOL
+
+[ ⏸ Pause sniping            ]
+[ 💼 Wallet   ][ 📊 Positions ]
+[ ⚙️ Settings ][ 👥 Copy trade]
+[ 📈 Stats    ][ 🔴 Go LIVE   ]
+[ 🔄 Refresh                  ]
+```
+
+### One-time setup (about 5 minutes)
+
+1. **Create a Telegram bot.** In Telegram, message **@BotFather**, send `/newbot`
+   and copy the token it gives you.
+2. **Start the bot on a server** that stays on, such as a small VPS. A laptop
+   works for testing.
+   ```bash
+   cd memecoin-sniper
+   cp .env.example .env              # paste TELEGRAM_BOT_TOKEN (and SOLANA_RPC_URL)
+   docker compose up -d --build      # or: pip install -e . && python -m sniper bot
+   docker compose logs | grep pair   # shows: Send this to your bot:  /start A1B2C3
+   ```
+3. **Pair your chat.** Open your bot in Telegram and send `/start A1B2C3`. From
+   then on, only your chat can control the bot and everyone else is ignored.
+
+### Everything else happens in the chat
+
+| You want to… | In Telegram |
+|---|---|
+| Get a wallet | 💼 Wallet → ✨ Create new wallet (or 📥 Import a private key; your message is deleted right after it's read) |
+| Deposit | 💼 Wallet shows the deposit address. Tap it to copy, then send SOL from Phantom or an exchange |
+| Back up the key | 💼 Wallet → 🔑 Export key. It's shown behind a spoiler and auto-deleted after 60s |
+| Withdraw | 💼 Wallet → 📤 Withdraw → `<address> <amount|all>` → confirm |
+| Test safely | It starts **paused** in 📝 PAPER mode. Tap ▶️ Start sniping and check 📈 Stats |
+| Trade real SOL | 🔴 Go LIVE → review the summary → confirm (only allowed with no open paper positions) |
+| Change any setting | ⚙️ Settings → category → tap a setting (on/off toggles flip instantly, numbers ask for a value) |
+| Switch strategy | ⚙️ Settings → 🎚 Presets → degen / balanced / safe (your custom settings still win) |
+| Sell | 📊 Positions → Sell 25% / 50% / 100%, or use the buttons on any buy alert |
+| Buy a token yourself | Paste its address into the chat → pick an amount (runs your filters; ⚠️ option skips them) |
+| Copy a wallet | 👥 Copy trade → ➕ Add wallet → `<address> [label] [sol]` |
+| Stop everything | ⏸ Pause sniping (open positions are still managed and exited) |
+
+Every change is saved on the server and survives restarts: wallet, settings,
+preset, paper/live mode, pause state, positions, copy wallets and the blocklist.
+
+### Security
+
+- **Your key stays on your server.** It's stored in `data/wallet.key` (permissions `0600`)
+  and every transaction is signed locally. Whoever can log into the server
+  can read the key, so lock the server down, and back up `data/`.
+- **Only the paired chat is obeyed.** To change owner, delete the `owner_chat_id`
+  setting, or set `TELEGRAM_CHAT_ID` in `.env`.
+- **Replacing a wallet never deletes the old key.** It's kept as `wallet.key.bak-*`.
+- **Wallet changes are blocked while LIVE.** Switch to paper first.
+- **Use a dedicated hot wallet** holding only what you can afford to lose.
 
 ## How it works
 
@@ -46,70 +113,24 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
         │                                             │ PumpPortal (pump.fun) / Jupiter
         │                                             │ signed locally → Jito bundle + RPC fan-out
         ▼                                             ▼
- Telegram control panel  ◄────────────────  exit engine (every trade + 1s tick) ─► SELL
+ Telegram UI  ◄────────────────────────────  exit engine (every trade + 1s tick) ─► SELL
 ```
 
 Execution is Solana-only, funded in SOL. Base, BSC and ETH tokens are alerts
 only, because buying them would need ETH or BNB for gas plus a bridge, which is
 too slow for sniping.
 
-## Setup
-
-```bash
-cd memecoin-sniper
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-cp config.example.yaml config.yaml
-cp .env.example .env
-```
-
-1. **Paper trade first.** No wallet is needed:
-   ```bash
-   python -m sniper scan                  # only shows what passes the filters
-   python -m sniper run                   # paper trading
-   python -m sniper -p safe run           # try another preset
-   python -m sniper stats                 # see how it did
-   ```
-2. **Telegram** (strongly recommended): create a bot with @BotFather. Message
-   the bot once, then get your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`.
-   Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` and set `notify.telegram: true`.
-   Only your chat id can control the bot.
-3. **Create a hot wallet** and fund it with a small amount:
-   ```bash
-   python -m sniper keygen                # paste the line into .env
-   python -m sniper wallet
-   ```
-4. **Paid RPC.** Set `SOLANA_RPC_URL` (Helius, Triton, QuickNode, ...). You can
-   also add more RPCs to `speed.broadcast_rpcs` and the nearest Jito region to
-   `speed.jito_block_engines`.
-5. **Go live:**
-   ```bash
-   python -m sniper run --live            # asks you to type "yes"
-   ```
-
-### Telegram commands
+## Without Telegram (CLI)
 
 ```
-/status                  mode, balance, open positions, PnL today
-/positions               each position with Sell 25% / 50% / 100% buttons
-/buy <mint> [sol] [force] manual buy (force skips filters)
-/sell <mint|SYMBOL> [pct] manual sell
-/pause  /resume          stop or restart new entries (open positions are still managed)
-/setbuy <sol>            change the auto-buy size (persists)
-/copy list | add <wallet> [label] [sol] | rm <wallet>
-/block <creator>         never buy from this dev
-/stats                   performance summary
-```
-
-### CLI
-
-```
-python -m sniper [-p degen|balanced|safe] run [--live]
-python -m sniper scan
+python -m sniper [-p degen|balanced|safe] run [--live]   # settings from config.yaml
+python -m sniper scan                                    # filters only, no trading
 python -m sniper stats [--live] [--days N]
 python -m sniper wallet | keygen
-python -m sniper sell <mint>           # emergency: sell the whole wallet balance
+python -m sniper sell <mint>                             # emergency: sell whole balance
 ```
+`config.example.yaml` documents every setting. Settings changed in Telegram are
+stored as overrides on top of it.
 
 ## Tuning
 
@@ -140,5 +161,5 @@ python -m sniper sell <mint>           # emergency: sell the whole wallet balanc
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 40 tests, no network needed
+pip install -e '.[dev]' && pytest     # 50 tests, no network needed
 ```

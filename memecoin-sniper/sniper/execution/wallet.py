@@ -2,9 +2,17 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from pathlib import Path
+from typing import Optional
 
 import base58
 from solders.keypair import Keypair
+from solders.message import MessageV0
+from solders.pubkey import Pubkey
+from solders.system_program import TransferParams, transfer
+from solders.transaction import VersionedTransaction
 
 
 def load_keypair(secret: str) -> Keypair:
@@ -20,3 +28,57 @@ def load_keypair(secret: str) -> Keypair:
 def new_keypair() -> tuple[str, str]:
     kp = Keypair()
     return str(kp.pubkey()), base58.b58encode(bytes(kp)).decode()
+
+
+class WalletManager:
+    """Hot wallet that can be created, imported and exported from Telegram.
+
+    The key lives in <data_dir>/wallet.key (permissions 0600). SOLANA_PRIVATE_KEY in
+    .env takes precedence and locks the wallet against changes from chat.
+    Replacing a wallet never deletes the old key: it is moved to a timestamped backup.
+    """
+
+    def __init__(self, data_dir: str, env_secret: str = ""):
+        self.dir = Path(data_dir)
+        self.path = self.dir / "wallet.key"
+        self.env_secret = env_secret.strip()
+
+    @property
+    def from_env(self) -> bool:
+        return bool(self.env_secret)
+
+    def keypair(self) -> Optional[Keypair]:
+        if self.env_secret:
+            return load_keypair(self.env_secret)
+        if self.path.exists():
+            return load_keypair(self.path.read_text())
+        return None
+
+    def _save(self, kp: Keypair) -> Keypair:
+        if self.from_env:
+            raise PermissionError("wallet is set by SOLANA_PRIVATE_KEY in .env; change it there")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            self.path.rename(self.dir / f"wallet.key.bak-{time.time_ns()}")
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(base58.b58encode(bytes(kp)).decode())
+        return kp
+
+    def create(self) -> Keypair:
+        return self._save(Keypair())
+
+    def import_secret(self, secret: str) -> Keypair:
+        return self._save(load_keypair(secret))
+
+    def export(self) -> str:
+        kp = self.keypair()
+        if not kp:
+            raise ValueError("no wallet yet")
+        return base58.b58encode(bytes(kp)).decode()
+
+
+def transfer_tx(payer: Keypair, to: str, lamports: int, blockhash) -> VersionedTransaction:
+    ix = transfer(TransferParams(from_pubkey=payer.pubkey(), to_pubkey=Pubkey.from_string(to),
+                                 lamports=lamports))
+    return VersionedTransaction(MessageV0.try_compile(payer.pubkey(), [ix], [], blockhash), [payer])

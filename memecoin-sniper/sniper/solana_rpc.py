@@ -35,6 +35,11 @@ class SolanaRpc:
         res = await self.call("getBalance", [pubkey, {"commitment": "confirmed"}])
         return res["value"] / 1e9
 
+    async def get_latest_blockhash(self):
+        from solders.hash import Hash
+        res = await self.call("getLatestBlockhash", [{"commitment": "confirmed"}])
+        return Hash.from_string(res["value"]["blockhash"])
+
     async def get_mint_info(self, mint: str) -> Optional[dict]:
         res = await self.call("getAccountInfo", [mint, {"encoding": "jsonParsed"}])
         value = res and res.get("value")

@@ -1,4 +1,4 @@
-"""CLI: python -m sniper {run,scan,wallet,keygen,sell,stats}"""
+"""CLI: python -m sniper {bot,run,scan,wallet,keygen,sell,stats}"""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +17,7 @@ def main() -> None:
                    help="strategy preset (overrides config.yaml's preset)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("bot", help="Telegram-first mode: control everything from your chat")
     run = sub.add_parser("run", help="trade (paper by default)")
     run.add_argument("--live", action="store_true", help="sign and send real transactions")
     sub.add_parser("scan", help="discovery + filters only, no trading")
@@ -42,6 +43,11 @@ def main() -> None:
         return
 
     cfg = load_config(args.config, preset=args.preset)
+    if args.cmd == "bot" and not args.preset:
+        from .store import Store
+        saved = Store(cfg.data_dir).get_setting("preset")  # chosen from Telegram earlier
+        if saved and saved != cfg.preset:
+            cfg = load_config(args.config, preset=saved)
 
     if args.cmd == "stats":
         import time
@@ -49,6 +55,16 @@ def main() -> None:
         from .store import Store
         since = time.time() - args.days * 86400 if args.days else 0
         print(format_summary(summarize(Store(cfg.data_dir, "live" if args.live else "paper"), since)))
+    elif args.cmd == "bot":
+        if not cfg.telegram_bot_token:
+            sys.exit("Set TELEGRAM_BOT_TOKEN in .env (create a bot with @BotFather first).")
+        from .engine import Engine
+        eng = Engine(cfg, live=False, config_path=args.config, start_paused=True)
+        eng.telegram_ui = True
+        try:
+            asyncio.run(eng.run())
+        except KeyboardInterrupt:
+            pass
     elif args.cmd == "wallet":
         asyncio.run(_wallet(cfg))
     elif args.cmd == "sell":
@@ -69,9 +85,11 @@ def main() -> None:
 
 
 async def _wallet(cfg) -> None:
-    from .execution.wallet import load_keypair
+    from .execution.wallet import WalletManager
     from .solana_rpc import SolanaRpc
-    kp = load_keypair(cfg.private_key)
+    kp = WalletManager(cfg.data_dir, cfg.private_key).keypair()
+    if kp is None:
+        sys.exit("no wallet: run `sniper keygen`, or create one from Telegram")
     rpc = SolanaRpc(cfg.endpoints.rpc_url)
     print(f"address: {kp.pubkey()}\nbalance: {await rpc.get_balance_sol(str(kp.pubkey())):.6f} SOL")
     await rpc.http.aclose()
@@ -80,11 +98,14 @@ async def _wallet(cfg) -> None:
 async def _sell(cfg, mint: str) -> None:
     import httpx
     from .execution.executors import Jupiter, LiveExecutor
-    from .execution.wallet import load_keypair
+    from .execution.wallet import WalletManager
     from .solana_rpc import SolanaRpc
+    kp = WalletManager(cfg.data_dir, cfg.private_key).keypair()
+    if kp is None:
+        sys.exit("no wallet configured")
     async with httpx.AsyncClient(timeout=15) as http:
         rpc = SolanaRpc(cfg.endpoints.rpc_url, http)
-        ex = LiveExecutor(cfg, load_keypair(cfg.private_key), rpc,
+        ex = LiveExecutor(cfg, kp, rpc,
                           Jupiter(cfg.endpoints.jupiter_api, rpc, http), http)
         bal = await rpc.get_token_balance(ex.pubkey, mint)
         if bal <= 0:

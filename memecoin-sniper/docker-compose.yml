@@ -1,0 +1,8 @@
+services:
+  sniper:
+    build: .
+    restart: unless-stopped
+    env_file: .env          # TELEGRAM_BOT_TOKEN (+ optional SOLANA_RPC_URL)
+    volumes:
+      - ./data:/app/data    # wallet key + database: back this folder up
+      # - ./config.yaml:/app/config.yaml:ro   # optional

@@ -1,7 +1,9 @@
-"""SQLite persistence: trade ledger, open positions, creator reputation, socials, blocklist.
+"""SQLite persistence: trade ledger, open positions, creator reputation, socials, blocklist,
+copy wallets and bot settings.
 
-Everything survives restarts. Paper and live keep separate databases so
-simulated results never mix with real ones.
+Everything survives restarts. Trades and positions are tagged with the mode
+(paper/live) so simulated results never mix with real ones, while reputation,
+blocklist, copy wallets and settings are shared between modes.
 """
 from __future__ import annotations
 
@@ -16,9 +18,10 @@ from .models import Position
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY, ts REAL, event TEXT, mint TEXT, symbol TEXT, data TEXT);
-CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
-CREATE TABLE IF NOT EXISTS positions (mint TEXT PRIMARY KEY, data TEXT, closed INTEGER);
+    id INTEGER PRIMARY KEY, mode TEXT, ts REAL, event TEXT, mint TEXT, symbol TEXT, data TEXT);
+CREATE INDEX IF NOT EXISTS events_mode_ts ON events(mode, ts);
+CREATE TABLE IF NOT EXISTS positions (
+    mode TEXT, mint TEXT, data TEXT, closed INTEGER, PRIMARY KEY (mode, mint));
 CREATE TABLE IF NOT EXISTS launches (mint TEXT PRIMARY KEY, creator TEXT, ts REAL);
 CREATE INDEX IF NOT EXISTS launches_creator ON launches(creator, ts);
 CREATE TABLE IF NOT EXISTS socials (handle TEXT, mint TEXT, ts REAL, PRIMARY KEY (handle, mint));
@@ -30,20 +33,22 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 
 
 class Store:
-    def __init__(self, data_dir: str, mode: str):
+    def __init__(self, data_dir: str, mode: str = "paper"):
         Path(data_dir).mkdir(parents=True, exist_ok=True)
-        self.path = Path(data_dir) / f"sniper-{mode}.db"
+        self.mode = mode
+        self.path = Path(data_dir) / "sniper.db"
         self.db = sqlite3.connect(self.path, isolation_level=None)  # autocommit
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
 
     # ---- ledger ----
     def event(self, event: str, mint: str = "", symbol: str = "", **data) -> None:
-        self.db.execute("INSERT INTO events(ts, event, mint, symbol, data) VALUES (?,?,?,?,?)",
-                        (time.time(), event, mint, symbol, json.dumps(data, default=str)))
+        self.db.execute("INSERT INTO events(mode, ts, event, mint, symbol, data) VALUES (?,?,?,?,?,?)",
+                        (self.mode, time.time(), event, mint, symbol, json.dumps(data, default=str)))
 
     def events(self, event: Optional[str] = None, since: float = 0) -> list[dict]:
-        q, args = "SELECT ts, event, mint, symbol, data FROM events WHERE ts >= ?", [since]
+        q = "SELECT ts, event, mint, symbol, data FROM events WHERE mode = ? AND ts >= ?"
+        args: list = [self.mode, since]
         if event:
             q += " AND event = ?"
             args.append(event)
@@ -57,11 +62,12 @@ class Store:
 
     # ---- positions ----
     def save_position(self, pos: Position) -> None:
-        self.db.execute("INSERT OR REPLACE INTO positions(mint, data, closed) VALUES (?,?,?)",
-                        (pos.mint, json.dumps(pos.to_dict(), default=str), int(pos.closed)))
+        self.db.execute("INSERT OR REPLACE INTO positions(mode, mint, data, closed) VALUES (?,?,?,?)",
+                        (self.mode, pos.mint, json.dumps(pos.to_dict(), default=str), int(pos.closed)))
 
     def open_positions(self) -> list[Position]:
-        rows = self.db.execute("SELECT data FROM positions WHERE closed = 0").fetchall()
+        rows = self.db.execute("SELECT data FROM positions WHERE mode = ? AND closed = 0",
+                               (self.mode,)).fetchall()
         return [Position.from_dict(json.loads(r[0])) for r in rows]
 
     # ---- creator reputation ----
@@ -119,3 +125,14 @@ class Store:
 
     def set_setting(self, key: str, value: str) -> None:
         self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, value))
+
+    def overrides(self) -> dict:
+        return json.loads(self.get_setting("overrides") or "{}")
+
+    def set_override(self, key: str, value) -> None:
+        o = self.overrides()
+        o[key] = value
+        self.set_setting("overrides", json.dumps(o))
+
+    def clear_overrides(self) -> None:
+        self.set_setting("overrides", "{}")

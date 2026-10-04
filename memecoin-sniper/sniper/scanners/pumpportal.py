@@ -84,6 +84,14 @@ class PumpPortalStream:
         self.token_subs.discard(mint)
         await self._send({"method": "unsubscribeTokenTrade", "keys": [mint]})
 
+    async def set_feeds(self, new_tokens: bool, migrations: bool) -> None:
+        if new_tokens != self.want_new_tokens:
+            self.want_new_tokens = new_tokens
+            await self._send({"method": "subscribeNewToken" if new_tokens else "unsubscribeNewToken"})
+        if migrations != self.want_migrations:
+            self.want_migrations = migrations
+            await self._send({"method": "subscribeMigration" if migrations else "unsubscribeMigration"})
+
     async def watch_accounts(self, wallets: list[str]) -> None:
         new = [w for w in wallets if w not in self.account_subs]
         if new:

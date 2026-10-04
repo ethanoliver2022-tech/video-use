@@ -1,6 +1,6 @@
 [project]
 name = "memecoin-sniper"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-hosted Solana memecoin sniper: Jito bundles, copy trading, Telegram control"
 requires-python = ">=3.10"
 dependencies = [
