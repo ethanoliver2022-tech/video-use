@@ -1,0 +1,29 @@
+[project]
+name = "memecoin-sniper"
+version = "0.1.0"
+description = "Solana-funded memecoin sniper with multi-chain launch scanning"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=12",
+    "solders>=0.21",
+    "base58>=2.1",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+sniper = "sniper.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["sniper", "sniper.scanners", "sniper.execution"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

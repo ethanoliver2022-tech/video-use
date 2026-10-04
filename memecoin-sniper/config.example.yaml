@@ -1,0 +1,60 @@
+# Copy to config.yaml and tune. Secrets go in .env, not here.
+
+trading:
+  buy_amount_sol: 0.05          # per snipe
+  max_open_positions: 3
+  slippage_pct: 20              # memecoins move fast; too low = failed buys
+  priority_fee_sol: 0.0005      # raise to land faster in congested blocks
+  min_sol_reserve: 0.03         # always keep this for sell fees + rent
+  daily_loss_limit_sol: 0.5     # stops new entries for the rest of the UTC day
+  cooldown_after_loss_seconds: 60
+
+discovery:
+  pumpfun_new_tokens: true      # brand-new pump.fun launches (fastest feed)
+  pumpfun_migrations: false     # tokens graduating to an AMM
+  geckoterminal_networks: [solana, base, bsc, eth]   # non-solana = alerts only
+  geckoterminal_poll_seconds: 20
+  dexscreener_profiles: true
+  dexscreener_poll_seconds: 30
+  max_candidate_age_seconds: 1800
+
+filters:
+  require_mint_revoked: true
+  require_freeze_revoked: true
+  max_top10_holder_pct: 30
+  max_creator_initial_buy_pct: 8
+  min_liquidity_usd: 8000
+  max_fdv_usd: 2000000
+  use_rugcheck: true
+  rugcheck_reject_danger: true
+  name_blocklist: [test, rug, scam]
+  creator_blocklist: []         # wallets you've seen rug before
+
+exits:
+  take_profit:                  # sell_pct is % of the ORIGINAL bag
+    - {at_pct: 40,  sell_pct: 40}
+    - {at_pct: 100, sell_pct: 30}
+    - {at_pct: 250, sell_pct: 20}
+  stop_loss_pct: 25
+  trailing_activate_pct: 30
+  trailing_stop_pct: 20
+  max_hold_seconds: 900
+  stale_seconds: 120
+  exit_on_dev_sell: true
+  kol_wallets: []               # add KOL wallet addresses; we sell into their buys
+  kol_buy_sell_pct: 50
+  sell_pressure_window: 20
+  sell_pressure_ratio: 0.75
+  sell_pressure_min_trades: 12
+
+notify:
+  telegram: false               # needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
+  alert_other_chains: true
+
+endpoints:
+  # Public RPC is rate-limited and slow. Set SOLANA_RPC_URL in .env to a paid
+  # endpoint (Helius, Triton, QuickNode...) before going live.
+  rpc_url: https://api.mainnet-beta.solana.com
+  jupiter_api: https://lite-api.jup.ag/swap/v1
+
+data_dir: data
