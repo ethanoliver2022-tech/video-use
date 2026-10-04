@@ -17,7 +17,14 @@ Buttons = list[list[tuple[str, str]]]  # rows of (label, callback_data)
 def keyboard(buttons: Optional[Buttons]) -> Optional[dict]:
     if not buttons:
         return None
-    return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
+    return {"inline_keyboard": [[_button(t, d) for t, d in row] for row in buttons]}
+
+
+def _button(text: str, data: str) -> dict:
+    """http(s) targets become link buttons, everything else a callback (max 64 bytes)."""
+    if data.startswith(("https://", "http://")):
+        return {"text": text, "url": data}
+    return {"text": text, "callback_data": data[:64]}
 
 
 class Notifier:

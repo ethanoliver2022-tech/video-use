@@ -15,11 +15,12 @@ from .config import Config, TakeProfitLevel
 class Setting:
     key: str            # "section.field"
     label: str
-    kind: str           # float | int | bool | tp | wallets
+    kind: str           # float | int | bool | tp | wallets | words | choice
     lo: float = 0.0
     hi: float = 1e9
     unit: str = ""
     help: str = ""
+    options: tuple = ()  # for kind == "choice"
 
 
 SETTINGS: list[Setting] = [
@@ -38,6 +39,22 @@ SETTINGS: list[Setting] = [
     Setting("exits.max_hold_seconds", "Max hold", "int", 10, 86400 * 7, "s"),
     Setting("exits.exit_on_dev_sell", "Exit on dev sell", "bool"),
     Setting("exits.kol_wallets", "KOL wallets", "wallets", help="comma-separated addresses, or 'none'"),
+    Setting("exits.sell_initials_at_pct", "Sell initials at", "float", 0, 100000, "%",
+            help="profit % at which to take your SOL back, e.g. 100 = at 2x; 0 = off"),
+    Setting("exits.moonbag_pct", "Moonbag", "float", 0, 50, "%",
+            help="% of the original bag to keep after taking profit; 0 = off"),
+    Setting("exits.moonbag_trailing_pct", "Moonbag trailing", "float", 5, 99, "%"),
+    Setting("exits.moonbag_max_hold_hours", "Moonbag max hold", "float", 1, 24 * 30, "h"),
+    # snipers
+    Setting("discovery.auto_snipe", "Snipe mode", "choice", options=("all", "targeted", "off"),
+            help="all = any launch passing filters; targeted = watched devs + keywords only"),
+    Setting("discovery.snipe_keywords", "Keywords", "words",
+            help="comma-separated words to match in name/ticker, or 'none'"),
+    Setting("discovery.dev_watchlist", "Dev watchlist", "wallets",
+            help="comma-separated dev wallets whose next launch to buy instantly, or 'none'"),
+    Setting("discovery.dev_snipe_sol", "Dev snipe size", "float", 0, 100, "SOL",
+            help="0 = your normal buy size"),
+    Setting("discovery.dev_snipe_skip_filters", "Dev snipes skip filters", "bool"),
     # entry / filters
     Setting("discovery.pumpfun_new_tokens", "Snipe new launches", "bool"),
     Setting("discovery.pumpfun_migrations", "Snipe migrations", "bool"),
@@ -60,15 +77,23 @@ SETTINGS: list[Setting] = [
 ]
 BY_KEY = {s.key: s for s in SETTINGS}
 GROUPS = {
+    "snipe": "🎯 Snipers",
     "trading": "💰 Trading",
-    "exits": "🎯 Exits",
+    "exits": "🚪 Exits",
     "entry": "🔍 Entry & filters",
     "speed": "⚡ Speed",
     "copytrade": "👥 Copy trade",
 }
 
 
+SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev_watchlist",
+              "discovery.dev_snipe_sol", "discovery.dev_snipe_skip_filters",
+              "discovery.pumpfun_new_tokens", "discovery.pumpfun_migrations"}
+
+
 def group_of(s: Setting) -> str:
+    if s.key in SNIPE_KEYS:
+        return "snipe"
     section = s.key.split(".")[0]
     return "entry" if section in ("entry", "filters", "discovery") else section
 
@@ -85,6 +110,10 @@ def format_value(s: Setting, v: Any) -> str:
         return ", ".join(f"+{lvl.at_pct:g}%→{lvl.sell_pct:g}%" for lvl in v) or "none"
     if s.kind == "wallets":
         return f"{len(v)} wallet(s)"
+    if s.kind == "words":
+        return ", ".join(v) if v else "none"
+    if s.kind == "choice":
+        return str(v)
     return f"{v:g}{s.unit}" if s.unit in ("%", "s") else f"{v:g} {s.unit}".strip()
 
 
@@ -114,6 +143,20 @@ def parse_value(s: Setting, raw: Any) -> Any:
         if sum(lvl.sell_pct for lvl in levels) > 100:
             raise ValueError("take-profit sells add up to more than 100%")
         return sorted(levels, key=lambda lvl: lvl.at_pct)
+    if s.kind == "choice":
+        v = str(raw).strip().lower()
+        if v not in s.options:
+            raise ValueError("choose one of: " + ", ".join(s.options))
+        return v
+    if s.kind == "words":
+        if isinstance(raw, list):
+            return [str(w) for w in raw]
+        if str(raw).strip().lower() in ("none", "off", ""):
+            return []
+        words = [w.strip() for w in str(raw).split(",") if w.strip()]
+        if any(len(w) < 2 for w in words):
+            raise ValueError("keywords need at least 2 characters")
+        return words
     if s.kind == "wallets":
         if isinstance(raw, list):
             return raw

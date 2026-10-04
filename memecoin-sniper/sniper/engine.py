@@ -37,9 +37,13 @@ QUOTE_GAP_SECONDS = 5        # poll on-chain / Jupiter when the trade stream has
 SELL_BACKOFF_MAX = 60        # seconds between retries of a failing sell
 WRITE_OFF_AFTER = 40         # failed sells (with backoff, ~30+ min) before giving a position up
 ALERTS_PER_HOUR = 20         # cap on "other chain" alerts so Telegram never gets flooded
+TRACKER_ALERTS_PER_HOUR = 60 # cap on wallet-tracker alerts
 SEEN_TTL = 3 * 3600          # forget candidates after this long (memory stays flat 24/7)
 CURVE_TTL = 15 * 60          # forget bonding-curve snapshots of tokens we don't hold
 ATA_RENT_SOL = 0.0025        # rent for a new token account, roughly
+ORDER_POLL_SECONDS = 3
+MAX_OPEN_ORDERS = 20
+USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
 class Engine:
@@ -87,7 +91,9 @@ class Engine:
         self._recent_sigs: deque[str] = deque(maxlen=5000)
         self._recent_sig_set: set[str] = set()
         self._alerts: deque[float] = deque()
+        self._tracker_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
+        self._orders_running: set[int] = set()
 
         saved_pause = self.store.get_setting("paused")
         self.paused = start_paused if saved_pause is None else saved_pause == "1"
@@ -115,13 +121,15 @@ class Engine:
         return LiveExecutor(self.cfg, kp, self.rpc, self.jupiter, self.http, sender)
 
     def _load_copy_wallets(self) -> None:
+        """Copy-mode wallets only while copy trading is on; alert-mode (tracked) wallets always."""
         self._copy.clear()
-        if not self.cfg.copytrade.enabled:
-            return
-        for w in self.cfg.copytrade.wallets:
-            self._copy[w.address] = w
+        enabled = self.cfg.copytrade.enabled
+        if enabled:
+            for w in self.cfg.copytrade.wallets:
+                self._copy[w.address] = w
         for w in self.store.copy_wallets():  # added from Telegram
-            self._copy[w["address"]] = CopyWallet(**w)
+            if enabled or w["mode"] == "alert":
+                self._copy[w["address"]] = CopyWallet(**w)
 
     def _set_curve(self, mint: str, curve: CurveState) -> None:
         self.curves[mint] = curve
@@ -140,12 +148,32 @@ class Engine:
             return
         if self.paused and not self.scan_only:
             return  # don't spend RPC calls (or Telegram alerts) while paused
+        if not self._targeted(c):
+            return
         if c.v_sol and c.v_tokens:
             self._set_curve(c.mint, CurveState(c.v_sol, c.v_tokens))
         try:
             self.queue.put_nowait(c)
         except asyncio.QueueFull:
             log.debug("candidate queue full, dropping %s", c.mint)
+
+    def _targeted(self, c: Candidate) -> bool:
+        """Apply the snipe mode. Tags dev-watchlist and keyword hits on the candidate."""
+        d = self.cfg.discovery
+        if c.chain != "solana":
+            return True  # other chains are alerts only; notify.alert_other_chains decides
+        if c.source == "pumpfun" and c.creator and c.creator in set(d.dev_watchlist):
+            c.trigger = "dev"
+            c.force = d.dev_snipe_skip_filters
+            c.buy_sol = d.dev_snipe_sol or None
+            return d.auto_snipe != "off"
+        text = f"{c.name} {c.symbol}".lower()
+        for word in d.snipe_keywords:
+            w = word.strip().lower()
+            if w and w in text:
+                c.trigger = f"keyword:{word.strip()}"
+                return d.auto_snipe != "off"
+        return d.auto_snipe == "all"
 
     async def worker(self) -> None:
         while True:
@@ -160,7 +188,7 @@ class Engine:
     async def handle_candidate(self, c: Candidate) -> Optional[str]:
         """Filter, confirm and buy. Returns a human-readable outcome."""
         tag = f"[{c.chain}] {c.symbol or '?'} {c.mint}"
-        if self.paused and c.source != "manual" and not self.scan_only:
+        if self.paused and c.source not in USER_SOURCES and not self.scan_only:
             return "paused"
         notes = ""
         if not c.force:
@@ -185,13 +213,14 @@ class Engine:
             notes += "; early flow confirmed"
         return await self.try_buy(c, notes)
 
-    def _alert_allowed(self) -> bool:
+    def _alert_allowed(self, q: Optional[deque] = None, per_hour: int = ALERTS_PER_HOUR) -> bool:
+        q = self._alerts if q is None else q
         now = time.time()
-        while self._alerts and now - self._alerts[0] > 3600:
-            self._alerts.popleft()
-        if len(self._alerts) >= ALERTS_PER_HOUR:
+        while q and now - q[0] > 3600:
+            q.popleft()
+        if len(q) >= per_hour:
             return False
-        self._alerts.append(now)
+        q.append(now)
         return True
 
     async def confirm_flow(self, c: Candidate) -> list[str]:
@@ -245,16 +274,26 @@ class Engine:
     def copy_wallets(self) -> list[CopyWallet]:
         return list(self._copy.values())
 
-    async def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0) -> None:
+    async def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0,
+                              mode: str = "copy") -> None:
         from solders.pubkey import Pubkey
         Pubkey.from_string(address)  # validates
+        if mode not in ("copy", "alert"):
+            raise ValueError("mode must be copy or alert")
         if not self.has_trade_stream:
-            raise ValueError("Copy trading needs a PumpPortal API key (PUMPPORTAL_API_KEY in .env).")
-        self.store.add_copy_wallet(address, label, buy_sol, True)
-        if not self.cfg.copytrade.enabled:
+            raise ValueError("Copy trading and wallet tracking need a PumpPortal API key "
+                             "(PUMPPORTAL_API_KEY in .env).")
+        self.store.add_copy_wallet(address, label, buy_sol, True, mode)
+        if mode == "copy" and not self.cfg.copytrade.enabled:
             await self.set_setting("copytrade.enabled", True)
-        self._copy[address] = CopyWallet(address, label, buy_sol, True)
+        self._copy[address] = CopyWallet(address, label, buy_sol, True, mode)
         await self.stream.watch_accounts([address])
+
+    async def set_wallet_mode(self, address: str, mode: str) -> None:
+        w = next((x for x in self.store.copy_wallets() if x["address"] == address), None)
+        if not w:
+            raise ValueError("wallet not found")
+        await self.add_copy_wallet(address, w["label"], w["buy_sol"], mode)
 
     async def remove_copy_wallet(self, address: str) -> bool:
         found = self._copy.pop(address, None) is not None
@@ -264,6 +303,9 @@ class Engine:
 
     async def handle_copy(self, msg: dict, leader: CopyWallet) -> None:
         mint = msg["mint"]
+        if leader.mode == "alert":
+            await self._wallet_alert(msg, leader)
+            return
         if msg.get("txType") != "buy" or mint in self.positions or mint in self._buying:
             return
         if self.paused or self.scan_only:
@@ -281,11 +323,26 @@ class Engine:
             await self.notifier.send(f"👥 {esc(name)} bought {mint[:8]}… — not copied: {esc(result)}",
                                      telegram=False)
 
+    async def _wallet_alert(self, msg: dict, w: CopyWallet) -> None:
+        side, mint = msg.get("txType"), msg["mint"]
+        if side not in ("buy", "sell"):
+            return
+        if not self._alert_allowed(self._tracker_alerts, TRACKER_ALERTS_PER_HOUR):
+            return
+        sol = float(msg.get("solAmount") or 0)
+        name = esc(w.label or w.address[:6])
+        icon = "🟢" if side == "buy" else "🔴"
+        buttons = [[(f"Buy {a:g}", f"b:{mint}:{a:g}") for a in (0.05, 0.1, 0.25)],
+                   [("🔍 Token card", f"tc:{mint}")]]
+        await self.notifier.send(f"🔔 {icon} <b>{name}</b> {'bought' if side == 'buy' else 'sold'} "
+                                 f"{sol:.3f} SOL of <code>{mint}</code>", buttons=buttons)
+
     # ---------- entries ----------
 
     async def risk_block(self, sol: float) -> Optional[str]:
         t = self.cfg.trading
-        open_n = sum(1 for p in self.positions.values() if not p.closed) + len(self._buying)
+        open_n = sum(1 for p in self.positions.values()   # moonbags don't take up a slot
+                     if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) + len(self._buying)
         if open_n >= t.max_open_positions:
             return "max open positions"
         if -self.store.realized_today() >= t.daily_loss_limit_sol:
@@ -326,7 +383,8 @@ class Engine:
             if fill.tokens <= 0:
                 await self.notifier.send(f"❌ buy {esc(c.symbol)} returned 0 tokens ({fill.signature})")
                 return "buy returned 0 tokens"
-            pos = Position(mint=c.mint, symbol=c.symbol or c.mint[:6], source=c.source,
+            source = c.source + (f"/{c.trigger.split(':')[0]}" if c.trigger else "")
+            pos = Position(mint=c.mint, symbol=c.symbol or c.mint[:6], source=source,
                            creator=c.creator, entry_price=fill.sol / fill.tokens,
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,
                            route=c.route, leader=c.leader,
@@ -338,8 +396,11 @@ class Engine:
 
         self.store.event("buy", c.mint, pos.symbol, source=c.source, sol=fill.sol,
                          tokens=fill.tokens, sig=fill.signature)
+        why = {"dev": "👀 watched dev launched", "limit": "📋 limit order"}.get(
+            c.trigger, f"🔑 {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("keyword") else "")
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
-                f"({self.mode}, {c.source}) {esc(notes)}\n<code>{c.mint}</code> {esc(c.url or '')}")
+                f"({self.mode}, {c.source}) {esc(why)} {esc(notes)}\n<code>{c.mint}</code> "
+                f"{esc(c.url or '')}")
         await self.notifier.send(text, buttons=[[("Sell 50%", f"s:{c.mint}:50"),
                                                  ("Sell 100%", f"s:{c.mint}:100")]])
         if c.route == "pump":
@@ -454,6 +515,10 @@ class Engine:
         async with lock:
             if pos.closed:
                 return "already closed"
+            if dec.tokens <= 0 and not dec.sell_all:  # bookkeeping only (e.g. TP above a moonbag)
+                exits.apply_fill(pos, dec, 0.0, 0.0, self.cfg.exits)
+                self.store.save_position(pos)
+                return "nothing to sell"
             curve = self.curves.get(pos.mint) if not pos.migrated else None
             try:
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
@@ -543,7 +608,7 @@ class Engine:
             return f"no open position for {esc(key)}"
         pct = min(max(pct, 1.0), 100.0)
         dec = exits._partial(pos, pos.tokens_remaining * pct / 100, "manual")
-        if pct >= 100:
+        if pct >= 100 or dec is None:
             dec = exits.ExitDecision(pos.tokens_remaining, True, "manual")
         return await self.execute_sell(pos, dec)
 
@@ -596,6 +661,131 @@ class Engine:
             f"<b>Copying:</b> {len(self._copy)} wallet(s)",
         ]
         return "\n".join(lines)
+
+    # ---------- limit orders ----------
+
+    async def price_of(self, mint: str) -> float:
+        """Current price in SOL per token: held position, else bonding curve, else Jupiter."""
+        pos = self.positions.get(mint)
+        if pos and not pos.closed and pos.last_price > 0:
+            return pos.last_price
+        try:
+            curve = await fetch_curve(self.rpc, mint)
+            if curve and not curve.complete and curve.price > 0:
+                self._set_curve(mint, CurveState(curve.v_sol, curve.v_tokens))
+                return curve.price
+        except Exception as e:
+            log.debug("curve lookup %s failed: %s", mint, e)
+        probe = 0.01
+        q = await self.jupiter.quote("So11111111111111111111111111111111111111112", mint, probe,
+                                     self.cfg.trading.slippage_pct)
+        tokens = await self.jupiter.out_ui(q)
+        if tokens <= 0:
+            raise ValueError("no price available")
+        return probe / tokens
+
+    async def place_limit_buy(self, mint: str, sol: float, change_pct: float,
+                              hours: float = 24.0) -> str:
+        from solders.pubkey import Pubkey
+        Pubkey.from_string(mint)
+        if not 0 < sol <= 100:
+            raise ValueError("amount must be between 0 and 100 SOL")
+        if change_pct == 0 or change_pct <= -99:
+            raise ValueError("change must be non-zero and above -99%")
+        if not 0 < hours <= 24 * 30:
+            raise ValueError("expiry must be between 0 and 720 hours")
+        if len(self.store.open_orders()) >= MAX_OPEN_ORDERS:
+            raise ValueError(f"at most {MAX_OPEN_ORDERS} open orders")
+        base = await self.price_of(mint)
+        trigger = base * (1 + change_pct / 100)
+        direction = "<=" if change_pct < 0 else ">="
+        oid = self.store.add_order(mint, "buy", sol, 0.0, trigger, direction, base,
+                                   time.time() + hours * 3600)
+        kind = "dips" if change_pct < 0 else "rises"
+        return (f"📋 Order #{oid}: buy {sol:g} SOL of <code>{mint}</code> if it {kind} "
+                f"{abs(change_pct):g}% (expires in {hours:g}h)")
+
+    async def place_limit_sell(self, key: str, pct: float, pnl_pct: float,
+                               hours: float = 24.0) -> str:
+        pos = self.find_position(key)
+        if not pos or pos.closed:
+            raise ValueError(f"no open position for {key}")
+        if not 0 < pct <= 100:
+            raise ValueError("sell % must be between 0 and 100")
+        if pnl_pct <= -100:
+            raise ValueError("profit target must be above -100%")
+        if not 0 < hours <= 24 * 30:
+            raise ValueError("expiry must be between 0 and 720 hours")
+        if len(self.store.open_orders()) >= MAX_OPEN_ORDERS:
+            raise ValueError(f"at most {MAX_OPEN_ORDERS} open orders")
+        trigger = pos.entry_price * (1 + pnl_pct / 100)
+        direction = ">=" if trigger >= pos.last_price else "<="
+        oid = self.store.add_order(pos.mint, "sell", 0.0, pct, trigger, direction, pos.entry_price,
+                                   time.time() + hours * 3600)
+        return (f"📋 Order #{oid}: sell {pct:g}% of {esc(pos.symbol)} at {pnl_pct:+g}% from entry "
+                f"(now {pos.pnl_pct:+.0f}%, expires in {hours:g}h)")
+
+    def cancel_order(self, order_id: int) -> bool:
+        return self.store.set_order_status(order_id, "cancelled")
+
+    async def order_loop(self) -> None:
+        while True:
+            await asyncio.sleep(ORDER_POLL_SECONDS)
+            await self.check_orders()
+
+    async def check_orders(self) -> None:
+        now = time.time()
+        prices: dict[str, float] = {}
+        for o in self.store.open_orders():
+            if o["id"] in self._orders_running:
+                continue
+            if now >= o["expires"]:
+                self.store.set_order_status(o["id"], "expired")
+                await self.notifier.send(f"⌛ Order #{o['id']} expired")
+                continue
+            if o["side"] == "sell":
+                pos = self.positions.get(o["mint"])
+                if not pos or pos.closed:
+                    self.store.set_order_status(o["id"], "cancelled")
+                    continue
+                price = pos.last_price
+            else:
+                if o["mint"] not in prices:
+                    try:
+                        prices[o["mint"]] = await self.price_of(o["mint"])
+                    except Exception as e:
+                        log.debug("order #%s price failed: %s", o["id"], e)
+                        continue
+                price = prices[o["mint"]]
+            hit = price <= o["trigger_price"] if o["direction"] == "<=" else price >= o["trigger_price"]
+            if hit:
+                self._orders_running.add(o["id"])
+                self._spawn(self._fill_order(o))
+
+    async def _fill_order(self, o: dict) -> None:
+        try:
+            if o["side"] == "buy":
+                c = Candidate(chain="solana", mint=o["mint"], source="limit", symbol=o["mint"][:6],
+                              buy_sol=o["sol"], trigger="limit",
+                              route="pump" if o["mint"].endswith("pump") else "jupiter")
+                result = await self.handle_candidate(c) or ""
+                ok = result.startswith("🟢")
+            else:
+                pos = self.positions.get(o["mint"])
+                if not pos or pos.closed:
+                    self.store.set_order_status(o["id"], "cancelled")
+                    return
+                dec = exits._partial(pos, pos.tokens_remaining * o["pct"] / 100, "limit sell")
+                if o["pct"] >= 100 or dec is None:
+                    dec = exits.ExitDecision(pos.tokens_remaining, True, "limit sell")
+                result = await self.execute_sell(pos, dec)
+                ok = result.startswith("🔴")
+            self.store.set_order_status(o["id"], "filled" if ok else "failed")
+            if not ok:
+                await self.notifier.send(f"⚠️ Order #{o['id']} triggered but didn't fill: "
+                                         f"{esc(result)}", logging.WARNING)
+        finally:
+            self._orders_running.discard(o["id"])
 
     # ---------- runtime reconfiguration (Telegram) ----------
 
@@ -708,10 +898,42 @@ class Engine:
             await asyncio.gather(*list(self._bg), return_exceptions=True)
 
     async def housekeeping(self) -> None:
-        """Keep memory flat for 24/7 operation."""
+        """Keep memory flat for 24/7 operation, and send the daily report."""
         while True:
             await asyncio.sleep(300)
             self.prune()
+            try:
+                await self.daily_report()
+            except Exception:
+                log.exception("daily report failed")
+
+    async def daily_report(self, now: Optional[float] = None) -> bool:
+        """Once per UTC day, report yesterday's results. Returns True if one was sent."""
+        from datetime import datetime, timedelta, timezone
+        from .stats import format_summary, summarize
+        now_dt = datetime.fromtimestamp(now or time.time(), timezone.utc)
+        today = now_dt.date().isoformat()
+        last = self.store.get_setting("last_report")
+        if last is None:  # first run: start counting from today
+            self.store.set_setting("last_report", today)
+            return False
+        if last == today:
+            return False
+        self.store.set_setting("last_report", today)
+        midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = (midnight - timedelta(days=1)).timestamp()
+        s = summarize(self.store, start, midnight.timestamp())
+        lines = [f"🗓 <b>Daily report</b> ({(midnight - timedelta(days=1)).date()}, {self.mode})"]
+        lines.append(f"<pre>{esc(format_summary(s))}</pre>")
+        if self.live:
+            try:
+                lines.append(f"Wallet: {await self.rpc.get_balance_sol(self.own_wallet):.4f} SOL")
+            except Exception:
+                pass
+        open_n = sum(1 for p in self.positions.values() if not p.closed)
+        lines.append(f"Open positions: {open_n}")
+        await self.notifier.send("\n".join(lines))
+        return True
 
     def prune(self, now: Optional[float] = None) -> None:
         now = now or time.time()
@@ -800,7 +1022,8 @@ class Engine:
             f"🚀 sniper starting in {mode} mode (preset {self.cfg.preset}){who}{paused}")
 
         loops = [("pumpportal", self.stream.run), ("exits", self.exit_loop),
-                 ("prices", self.price_poller), ("housekeeping", self.housekeeping)]
+                 ("prices", self.price_poller), ("housekeeping", self.housekeeping),
+                 ("orders", self.order_loop)]
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,
                                          d.geckoterminal_poll_seconds, self.on_candidate, self.http,

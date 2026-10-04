@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS blocklist (creator TEXT PRIMARY KEY, reason TEXT, ts 
 CREATE TABLE IF NOT EXISTS copy_wallets (
     address TEXT PRIMARY KEY, label TEXT, buy_sol REAL, copy_sells INTEGER);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY, mode TEXT, mint TEXT, side TEXT, sol REAL, pct REAL,
+    trigger_price REAL, direction TEXT, base_price REAL, created REAL, expires REAL,
+    status TEXT, note TEXT);
 """
 
 
@@ -40,15 +44,23 @@ class Store:
         self.db = sqlite3.connect(self.path, isolation_level=None)  # autocommit
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Upgrade databases created by older versions in place."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(copy_wallets)")}
+        if "mode" not in cols:  # v0.5: wallets can be copied or only tracked (alerts)
+            self.db.execute("ALTER TABLE copy_wallets ADD COLUMN mode TEXT DEFAULT 'copy'")
 
     # ---- ledger ----
     def event(self, event: str, mint: str = "", symbol: str = "", **data) -> None:
         self.db.execute("INSERT INTO events(mode, ts, event, mint, symbol, data) VALUES (?,?,?,?,?,?)",
                         (self.mode, time.time(), event, mint, symbol, json.dumps(data, default=str)))
 
-    def events(self, event: Optional[str] = None, since: float = 0) -> list[dict]:
-        q = "SELECT ts, event, mint, symbol, data FROM events WHERE mode = ? AND ts >= ?"
-        args: list = [self.mode, since]
+    def events(self, event: Optional[str] = None, since: float = 0,
+               until: float = float("inf")) -> list[dict]:
+        q = "SELECT ts, event, mint, symbol, data FROM events WHERE mode = ? AND ts >= ? AND ts < ?"
+        args: list = [self.mode, since, until if until != float("inf") else 1e18]
         if event:
             q += " AND event = ?"
             args.append(event)
@@ -108,13 +120,37 @@ class Store:
 
     # ---- copy wallets & runtime settings (editable from Telegram) ----
     def copy_wallets(self) -> list[dict]:
-        rows = self.db.execute("SELECT address, label, buy_sol, copy_sells FROM copy_wallets").fetchall()
-        return [{"address": a, "label": l, "buy_sol": b, "copy_sells": bool(c)} for a, l, b, c in rows]
+        rows = self.db.execute(
+            "SELECT address, label, buy_sol, copy_sells, mode FROM copy_wallets").fetchall()
+        return [{"address": a, "label": l, "buy_sol": b, "copy_sells": bool(c), "mode": m or "copy"}
+                for a, l, b, c, m in rows]
 
     def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0,
-                        copy_sells: bool = True) -> None:
-        self.db.execute("INSERT OR REPLACE INTO copy_wallets VALUES (?,?,?,?)",
-                        (address, label, buy_sol, int(copy_sells)))
+                        copy_sells: bool = True, mode: str = "copy") -> None:
+        self.db.execute("INSERT OR REPLACE INTO copy_wallets(address, label, buy_sol, copy_sells, mode)"
+                        " VALUES (?,?,?,?,?)", (address, label, buy_sol, int(copy_sells), mode))
+
+    # ---- limit orders ----
+    def add_order(self, mint: str, side: str, sol: float, pct: float, trigger_price: float,
+                  direction: str, base_price: float, expires: float, note: str = "") -> int:
+        cur = self.db.execute(
+            "INSERT INTO orders(mode, mint, side, sol, pct, trigger_price, direction, base_price,"
+            " created, expires, status, note) VALUES (?,?,?,?,?,?,?,?,?,?,'open',?)",
+            (self.mode, mint, side, sol, pct, trigger_price, direction, base_price, time.time(),
+             expires, note))
+        return int(cur.lastrowid)
+
+    def open_orders(self) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT id, mint, side, sol, pct, trigger_price, direction, base_price, created, expires,"
+            " note FROM orders WHERE mode = ? AND status = 'open' ORDER BY id", (self.mode,)).fetchall()
+        keys = ("id", "mint", "side", "sol", "pct", "trigger_price", "direction", "base_price",
+                "created", "expires", "note")
+        return [dict(zip(keys, r)) for r in rows]
+
+    def set_order_status(self, order_id: int, status: str) -> bool:
+        return self.db.execute("UPDATE orders SET status = ? WHERE id = ? AND status = 'open'",
+                               (status, order_id)).rowcount > 0
 
     def remove_copy_wallet(self, address: str) -> bool:
         return self.db.execute("DELETE FROM copy_wallets WHERE address = ?", (address,)).rowcount > 0

@@ -2,6 +2,7 @@ import asyncio
 import os
 import stat
 
+import httpx
 import pytest
 from solders.hash import Hash
 from solders.keypair import Keypair
@@ -274,8 +275,20 @@ async def test_paste_address_buy_card_and_copy_menu(tmp_path):
     async def fake_buy(c, sol, curve):
         return Fill(tokens=1000.0, sol=sol)
     h.eng.executor.buy = fake_buy
+    # no network in tests: market data unavailable, and the token fails the filters
+    h.eng.http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+
+    async def failing(c):
+        from sniper.models import SafetyReport
+        return SafetyReport(passed=False, reasons=["mint authority not revoked"])
+    h.eng.safety.evaluate = failing
+
+    async def no_curve(addr):
+        return None
+    h.eng.rpc.get_account_bytes = no_curve
 
     await h.text(MINT)
+    assert "Fails your filters" in h.sent[-1][0]
     assert f"b:{MINT}:0.05" in h.buttons() and f"bf:{MINT}:" in h.buttons()
     await h.tap(f"bf:{MINT}:0.25")
     assert h.eng.positions[MINT].sol_in == 0.25 and "BUY" in h.sent[-1][0]

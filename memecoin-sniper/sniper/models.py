@@ -34,6 +34,7 @@ class Candidate:
     leader: Optional[str] = None    # copy-trade wallet that triggered this, if any
     buy_sol: Optional[float] = None # per-candidate size override (copy trades, manual buys)
     force: bool = False             # manual buy: skip filters
+    trigger: str = ""               # why it was picked: "dev", "keyword:<word>", "limit", ...
 
     @property
     def on_bonding_curve(self) -> bool:
@@ -92,6 +93,7 @@ class Position:
     dev_sold: bool = False
     kol_bought: list[str] = field(default_factory=list)
     kol_exit_done: bool = False
+    initials_taken: bool = False
     migrated: bool = False
     dev_tokens: Optional[float] = None   # creator's balance at entry (RPC dev-sell detection)
     route: str = "jupiter"

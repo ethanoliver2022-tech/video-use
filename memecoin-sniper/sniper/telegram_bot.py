@@ -40,6 +40,9 @@ HELP = """<b>Everything is in the menu</b>, tap /menu.
 Shortcuts:
 • Paste a token address to get a buy card
 /positions to see open positions with sell buttons
+/orders to see limit orders
+/card &lt;mint&gt; for a token research card
+/track &lt;wallet&gt; [label] to get alerts when a wallet trades
 /buy &lt;mint&gt; [sol] [force]
 /sell &lt;mint|symbol&gt; [pct]
 /pause, /resume
@@ -191,7 +194,7 @@ class TelegramControl:
             self.pending = None
             await self.handle_command(text)
         elif ADDRESS_RE.match(text):
-            await self.token_card(text)
+            self._card(text)
         else:
             await self.main_menu()
 
@@ -230,6 +233,13 @@ class TelegramControl:
             await self.settings_menu()
         elif cmd == "/positions":
             await self.positions()
+        elif cmd == "/orders":
+            await self.orders_menu()
+        elif cmd == "/card" and args:
+            self._card(args[0])
+        elif cmd == "/track" and args:
+            await e.add_copy_wallet(args[0], args[1] if len(args) > 1 else "", 0.0, mode="alert")
+            await self.send(f"🔔 Tracking {html.escape(args[1] if len(args) > 1 else args[0])}")
         elif cmd == "/buy" and args:
             sol = float(args[1]) if len(args) > 1 and args[1] != "force" else None
             self._bg_reply(e.manual_buy(args[0], sol, force="force" in args))
@@ -282,6 +292,34 @@ class TelegramControl:
         elif head in ("b", "bf"):
             mint, _, sol = rest.partition(":")
             self._bg_reply(e.manual_buy(mint, float(sol) if sol else None, force=head == "bf"))
+        elif head == "tc":
+            self._card(rest)
+        elif head == "lb":
+            self._ask("limit_buy", rest)
+            await self.send("📋 <b>Limit buy</b>: send <code>&lt;SOL&gt; &lt;change %&gt; [hours]</code>\n"
+                            "e.g. <code>0.1 -30</code> buys 0.1 SOL if the price dips 30%,\n"
+                            "<code>0.1 +50 6</code> buys on a 50% breakout within 6 hours.",
+                            [[("✖️ Cancel", "x")]])
+        elif head == "ls":
+            self._ask("limit_sell", rest)
+            await self.send("📋 <b>Limit sell</b>: send <code>&lt;% of bag&gt; &lt;profit %&gt; [hours]</code>\n"
+                            "e.g. <code>50 +100</code> sells half at 2x,\n"
+                            "<code>100 -20</code> sells everything if it falls to -20% from entry.",
+                            [[("✖️ Cancel", "x")]])
+        elif data == "o":
+            await self.orders_menu(msg_id)
+        elif head == "oc":
+            ok = e.cancel_order(int(rest))
+            await self.send(f"Order #{rest} cancelled." if ok else f"Order #{rest} is no longer open.")
+            await self.orders_menu()
+        elif data == "sn":
+            await self.settings_group("snipe", msg_id)
+        elif head == "cm":
+            w = next((x for x in e.copy_wallets() if x.address == rest), None)
+            stored = {x["address"]: x for x in e.store.copy_wallets()}
+            current = (w.mode if w else stored.get(rest, {}).get("mode", "copy"))
+            await e.set_wallet_mode(rest, "alert" if current == "copy" else "copy")
+            await self.copy_menu(msg_id)
         elif head == "bc":
             self._ask("buy_custom", rest)
             await self.send("Send the amount of SOL to buy:", [[("✖️ Cancel", "x")]])
@@ -314,7 +352,8 @@ class TelegramControl:
             await self.copy_menu(msg_id)
         elif data == "c:add":
             self._ask("copy_add")
-            await self.send("Send the wallet to copy:\n<code>&lt;address&gt; [label] [sol per trade]</code>",
+            await self.send("Send the wallet:\n<code>&lt;address&gt; [label] [sol per trade] [track]</code>\n"
+                            "Add <code>track</code> at the end to only get alerts instead of copying.",
                             [[("✖️ Cancel", "x")]])
         elif data.startswith("c:rm:"):
             await e.remove_copy_wallet(data[5:])
@@ -366,6 +405,18 @@ class TelegramControl:
             elif kind == "copy_add":
                 await self.copy_command(["add", *text.split()])
                 await self.copy_menu()
+            elif kind == "limit_buy":
+                parts = text.replace("%", "").replace("SOL", "").split()
+                if len(parts) not in (2, 3):
+                    raise ValueError("send: <SOL> <change %> [hours], e.g. 0.1 -30")
+                hours = float(parts[2]) if len(parts) == 3 else 24.0
+                await self.send(await e.place_limit_buy(p["data"], float(parts[0]), float(parts[1]), hours))
+            elif kind == "limit_sell":
+                parts = text.replace("%", "").split()
+                if len(parts) not in (2, 3):
+                    raise ValueError("send: <% of bag> <profit %> [hours], e.g. 50 +100")
+                hours = float(parts[2]) if len(parts) == 3 else 24.0
+                await self.send(await e.place_limit_sell(p["data"], float(parts[0]), float(parts[1]), hours))
             elif kind == "buy_custom":
                 self._bg_reply(e.manual_buy(p["data"], float(text.replace("SOL", "").strip())))
         except Exception as ex:
@@ -389,6 +440,14 @@ class TelegramControl:
         open_n = sum(1 for p in e.positions.values() if not p.closed)
         lines.append(f"📊 Open {open_n}/{e.cfg.trading.max_open_positions} · today "
                      f"{e.store.realized_today():+.4f} SOL · buy {e.cfg.trading.buy_amount_sol:g} SOL")
+        d = e.cfg.discovery
+        snipe = {"all": "all launches passing filters",
+                 "targeted": f"targeted ({len(d.dev_watchlist)} devs, {len(d.snipe_keywords)} keywords)",
+                 "off": "off (manual, copy and limit orders only)"}.get(d.auto_snipe, d.auto_snipe)
+        lines.append(f"🎯 Auto-snipe: {snipe}")
+        orders = len(e.store.open_orders())
+        if orders:
+            lines.append(f"📋 {orders} open limit order(s)")
         if not e.has_trade_stream:
             lines.append("ℹ️ No PumpPortal key: prices use on-chain polling, and copy trading is off.")
         if "api.mainnet-beta.solana.com" in e.cfg.endpoints.rpc_url:
@@ -398,7 +457,8 @@ class TelegramControl:
         await self.show("\n".join(lines), [
             [toggle],
             [("💼 Wallet", "w"), ("📊 Positions", "p")],
-            [("⚙️ Settings", "set"), ("👥 Copy trade", "c")],
+            [("🎯 Snipers", "sn"), ("📋 Orders", "o")],
+            [("👥 Copy & track", "c"), ("⚙️ Settings", "set")],
             [("📈 Stats", "st"), switch],
             [("🔄 Refresh", "m")],
         ], msg_id)
@@ -531,29 +591,63 @@ class TelegramControl:
         if not open_pos:
             await self.send("No open positions.", [[("⬅️ Menu", "m")]])
             return
+        from . import exits
         for p in open_pos:
             value = p.tokens_remaining * p.last_price
+            tags = []
+            if exits.in_moonbag(p, self.engine.cfg.exits):
+                tags.append("🌙 moonbag")
+            if p.initials_taken:
+                tags.append("💰 initials out")
             await self.send(
-                f"<b>{html.escape(p.symbol)}</b> <code>{p.mint}</code>\n"
+                f"<b>{html.escape(p.symbol)}</b> <code>{p.mint}</code> {' · '.join(tags)}\n"
                 f"PnL {p.pnl_pct:+.0f}% · value {value:.4f} SOL · in {p.sol_in:.4f} · "
                 f"out {p.sol_out:.4f}\nPeak {((p.peak_price / p.entry_price) - 1) * 100:+.0f}% · "
                 f"via {html.escape(p.source)}",
                 buttons=[[("Sell 25%", f"s:{p.mint}:25"), ("Sell 50%", f"s:{p.mint}:50"),
-                          ("Sell 100%", f"s:{p.mint}:100")], [("🔄 Refresh", "refresh")]])
+                          ("Sell 100%", f"s:{p.mint}:100")],
+                         [("📋 Limit sell", f"ls:{p.mint}"), ("🔍 Card", f"tc:{p.mint}"),
+                          ("🔄 Refresh", "refresh")]])
 
     async def token_card(self, mint: str) -> None:
-        e = self.engine
-        held = e.positions.get(mint)
-        if held and not held.closed:
-            await self.positions()
+        from .token_card import build_card
+        text, buttons = await build_card(self.engine, mint)
+        await self.send(text, buttons)
+
+    def _card(self, mint: str) -> None:
+        """Building a card takes a few lookups: do it in the background."""
+        if not ADDRESS_RE.match(mint):
+            self.engine._spawn(self.send("That doesn't look like a token address."))
             return
-        amounts = [0.05, 0.1, 0.25, 0.5, 1.0]
-        await self.send(
-            f"🪙 <code>{mint}</code>\nhttps://dexscreener.com/solana/{mint}\n\n"
-            f"Buy runs your filters first ({'🔴 LIVE' if e.live else '📝 PAPER'}).",
-            [[(f"{a:g} SOL", f"b:{mint}:{a:g}") for a in amounts[:3]],
-             [(f"{a:g} SOL", f"b:{mint}:{a:g}") for a in amounts[3:]] + [("✏️ Custom", f"bc:{mint}")],
-             [(f"⚠️ Buy {e.cfg.trading.buy_amount_sol:g}, skip filters", f"bf:{mint}:")]])
+
+        async def run():
+            try:
+                await self.token_card(mint)
+            except Exception as e:
+                log.exception("token card failed")
+                await self.send(f"⚠️ couldn't build the card: {html.escape(str(e))}")
+        self.engine._spawn(run())
+
+    async def orders_menu(self, msg_id: Optional[int] = None) -> None:
+        orders = self.engine.store.open_orders()
+        if not orders:
+            await self.show("📋 <b>Limit orders</b>\n\nNone open. Create one from a token card "
+                            "(paste an address) or from a position (📋 Limit sell).",
+                            [[("⬅️ Menu", "m")]], msg_id)
+            return
+        lines, rows = ["📋 <b>Limit orders</b>"], []
+        now = time.time()
+        for o in orders:
+            left = max(0, (o["expires"] - now) / 3600)
+            change = (o["trigger_price"] / o["base_price"] - 1) * 100 if o["base_price"] else 0
+            if o["side"] == "buy":
+                what = f"buy {o['sol']:g} SOL at {change:+.0f}% from order price"
+            else:
+                what = f"sell {o['pct']:g}% at {change:+.0f}% from entry"
+            lines.append(f"#{o['id']} <code>{o['mint'][:8]}…</code> {what} · {left:.1f}h left")
+            rows.append([(f"✖️ Cancel #{o['id']}", f"oc:{o['id']}")])
+        rows.append([("⬅️ Menu", "m")])
+        await self.show("\n".join(lines), rows, msg_id)
 
     async def settings_menu(self, msg_id: Optional[int] = None) -> None:
         e = self.engine
@@ -579,6 +673,12 @@ class TelegramControl:
             await self.engine.set_setting(s.key, not cur)
             await self.settings_group(group_of(s), msg_id)
             return
+        if s.kind == "choice":  # cycle through the options
+            nxt = s.options[(s.options.index(cur) + 1) % len(s.options)] if cur in s.options \
+                else s.options[0]
+            await self.engine.set_setting(s.key, nxt)
+            await self.settings_group(group_of(s), msg_id)
+            return
         self._ask("edit", s.key)
         hint = s.help or (f"{s.lo:g} to {s.hi:g} {s.unit}".strip() if s.kind in ("float", "int") else "")
         await self.send(f"<b>{s.label}</b>: currently {html.escape(format_value(s, cur))}\n"
@@ -599,15 +699,25 @@ class TelegramControl:
         e = self.engine
         wallets = e.copy_wallets()
         status = "✅ on" if e.cfg.copytrade.enabled else "❌ off"
-        lines = [f"👥 <b>Copy trading</b> ({status})"]
+        lines = [f"👥 <b>Copy trading & wallet tracker</b> (copying {status})",
+                 "👥 copy = mirror their buys · 🔔 track = just alert me"]
         if not e.has_trade_stream:
             lines.append("Needs a PumpPortal API key: add PUMPPORTAL_API_KEY to .env on the "
                          "server and restart.")
         rows = []
-        for w in wallets:
-            lines.append(f"• {html.escape(w.label or '-')} <code>{w.address}</code> · "
-                         f"{w.buy_sol or e.cfg.trading.buy_amount_sol:g} SOL")
-            rows.append([(f"🗑 {w.label or w.address[:8]}", f"c:rm:{w.address}")])
+        stored = {x["address"]: x for x in e.store.copy_wallets()}
+        shown = {w.address: w for w in wallets}
+        for addr, x in stored.items():  # also list copy wallets while copying is off
+            if addr not in shown:
+                from .config import CopyWallet
+                shown[addr] = CopyWallet(**x)
+        for w in shown.values():
+            icon = "🔔" if w.mode == "alert" else "👥"
+            size = "" if w.mode == "alert" else f" · {w.buy_sol or e.cfg.trading.buy_amount_sol:g} SOL"
+            lines.append(f"{icon} {html.escape(w.label or '-')} <code>{w.address}</code>{size}")
+            rows.append([(f"{'👥 Copy' if w.mode == 'alert' else '🔔 Track only'}", f"cm:{w.address}"),
+                         (f"🗑 {w.label or w.address[:8]}", f"c:rm:{w.address}")])
+        wallets = list(shown.values())
         if not wallets:
             lines.append("No wallets yet.")
         toggle_idx = next(i for i, s in enumerate(SETTINGS) if s.key == "copytrade.enabled")
@@ -620,10 +730,15 @@ class TelegramControl:
         if not args or args[0] == "list":
             await self.copy_menu()
         elif args[0] == "add" and len(args) >= 2:
-            label = args[2] if len(args) > 2 else ""
-            sol = float(args[3]) if len(args) > 3 else 0.0
-            await e.add_copy_wallet(args[1], label, sol)
-            await self.send(f"👥 Copying {html.escape(label or args[1])}")
+            rest = args[1:]
+            mode = "copy"
+            if rest[-1].lower() in ("track", "alert"):
+                mode, rest = "alert", rest[:-1]
+            label = rest[1] if len(rest) > 1 else ""
+            sol = float(rest[2]) if len(rest) > 2 else 0.0
+            await e.add_copy_wallet(rest[0], label, sol, mode=mode)
+            await self.send(f"{'🔔 Tracking' if mode == 'alert' else '👥 Copying'} "
+                            f"{html.escape(label or rest[0])}")
         elif args[0] in ("rm", "remove") and len(args) >= 2:
             ok = await e.remove_copy_wallet(args[1])
             await self.send("Removed." if ok else "Not found.")

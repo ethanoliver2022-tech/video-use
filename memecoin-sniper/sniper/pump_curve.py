@@ -17,6 +17,7 @@ from solders.pubkey import Pubkey
 
 PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 TOKEN_DECIMALS = 6
+INITIAL_REAL_TOKENS = 793_100_000  # tokens sold along the curve before it graduates
 _LAYOUT = struct.Struct("<QQQQQ?")  # starts after the 8-byte discriminator
 
 
@@ -26,6 +27,14 @@ class CurveInfo:
     v_tokens: float     # tokens (UI units)
     complete: bool      # True once the token has graduated off the curve
     creator: Optional[str] = None
+    real_tokens: float = 0.0  # tokens still for sale on the curve
+
+    @property
+    def progress_pct(self) -> float:
+        """How far along the bonding curve the token is (100% = graduates)."""
+        if self.complete:
+            return 100.0
+        return max(0.0, min(100.0, (1 - self.real_tokens / INITIAL_REAL_TOKENS) * 100))
 
     @property
     def price(self) -> float:
@@ -41,13 +50,14 @@ def bonding_curve_address(mint: str) -> str:
 def parse_curve(data: bytes) -> Optional[CurveInfo]:
     if len(data) < 8 + _LAYOUT.size:
         return None
-    v_tok, v_sol, _real_tok, _real_sol, _supply, complete = _LAYOUT.unpack_from(data, 8)
+    v_tok, v_sol, real_tok, _real_sol, _supply, complete = _LAYOUT.unpack_from(data, 8)
     creator = None
     start = 8 + _LAYOUT.size
     if len(data) >= start + 32:
         creator = str(Pubkey.from_bytes(data[start:start + 32]))
     return CurveInfo(v_sol=v_sol / 1e9, v_tokens=v_tok / 10 ** TOKEN_DECIMALS,
-                     complete=bool(complete), creator=creator)
+                     complete=bool(complete), creator=creator,
+                     real_tokens=real_tok / 10 ** TOKEN_DECIMALS)
 
 
 async def fetch_curve(rpc, mint: str) -> Optional[CurveInfo]:

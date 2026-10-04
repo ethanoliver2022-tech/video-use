@@ -24,6 +24,7 @@ class CopyWallet:
     label: str = ""
     buy_sol: float = 0.0        # 0 = use trading.buy_amount_sol
     copy_sells: bool = True     # exit when they exit
+    mode: str = "copy"          # "copy" = mirror their buys, "alert" = just tell me
 
 
 @dataclass
@@ -63,6 +64,11 @@ class DiscoveryConfig:
     dexscreener_profiles: bool = True
     dexscreener_poll_seconds: int = 30
     max_candidate_age_seconds: int = 1800  # ignore anything older than this
+    auto_snipe: str = "all"                # all | targeted (watchlist + keywords only) | off
+    snipe_keywords: list[str] = field(default_factory=list)  # match in name / ticker
+    dev_watchlist: list[str] = field(default_factory=list)   # buy these devs' next launch
+    dev_snipe_sol: float = 0.0             # size for watched-dev snipes (0 = buy_amount_sol)
+    dev_snipe_skip_filters: bool = True    # you trust these devs: skip filters for speed
 
 
 @dataclass
@@ -117,6 +123,10 @@ class ExitConfig:
     sell_pressure_window: int = 20          # last N trades
     sell_pressure_ratio: float = 0.75       # exit if >= this share of window are sells
     sell_pressure_min_trades: int = 12
+    sell_initials_at_pct: float = 0.0       # e.g. 100 = at 2x, sell enough to get your SOL back
+    moonbag_pct: float = 0.0                # keep this % of the original bag after taking profit
+    moonbag_trailing_pct: float = 50.0      # the moonbag's own (wide) trailing stop
+    moonbag_max_hold_hours: float = 24.0
 
 
 @dataclass
@@ -175,7 +185,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "filters": {"max_creator_initial_buy_pct": 15, "max_top10_holder_pct": 45,
                     "min_socials": 0, "max_creator_launches_24h": 10, "min_liquidity_usd": 3000},
         "exits": {"stop_loss_pct": 35, "trailing_activate_pct": 50, "trailing_stop_pct": 30,
-                  "max_hold_seconds": 1800,
+                  "max_hold_seconds": 1800, "sell_initials_at_pct": 100, "moonbag_pct": 10,
                   "take_profit": [{"at_pct": 100, "sell_pct": 50}, {"at_pct": 400, "sell_pct": 30}]},
     },
     "balanced": {},

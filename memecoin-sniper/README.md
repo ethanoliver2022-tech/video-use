@@ -19,17 +19,35 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 📡 **Multi-RPC broadcast** | Every transaction goes to all of your RPCs and Jito regions at the same time. | "Turbo mode" |
 | 💸 **Auto priority fee** | Pays a percentile of the network's recent priority fees, with a floor and a cap. | "Auto fee" |
 | 🎯 **Multi-chain discovery** | pump.fun launches and graduations (live websocket), plus new pools on Solana, Base, BSC and ETH from GeckoTerminal and DexScreener. | Photon/BullX "new pairs" |
+| 🎯 **Targeted snipers** | Three modes: snipe every launch that passes your filters, only *targeted* launches, or off. Targeted means a watchlist of devs whose next pump.fun launch is bought instantly, plus keywords matched in the name or ticker. | Banana Gun / Maestro "dev sniper", Trojan "auto-snipe" |
 | 👥 **Copy trading** | Mirrors buys from wallets you follow, can follow their sells out, and sets a size per wallet. Wallets can be added or removed live from Telegram. | GMGN/Trojan copy trade |
+| 🔔 **Wallet tracker** | Alerts you when a tracked wallet buys or sells, with one-tap Buy and Token-card buttons, without copying anything. Switch any wallet between track and copy with one tap. | GMGN / Cielo wallet tracking |
+| 📋 **Limit orders** | Buy on a dip or a breakout, or sell at a profit or a custom stop. They expire on their own, survive restarts, and are created and cancelled from Telegram. | Trojan / Photon / BullX limit orders |
+| 🔍 **Token card** | Paste any address to get price, market cap, liquidity, volume, % change, buys vs sells, age, bonding-curve progress, dev holdings, and a verdict from your own filters, with buy and limit buttons. | Photon / Axiom token page |
 | 🔍 **Early-flow confirmation** | Watches the first N seconds of trading before buying. It catches bundled launches (several wallets buying identical sizes), whale-dominated launches, dev dumps and thin interest. | Axiom/BullX "bundle checker" |
 | 🧠 **Dev reputation** | Records every pump.fun launch and rejects serial launchers. Devs who dumped on you are blocklisted automatically, and the blocklist persists. | GMGN "dev history" |
 | 🌐 **Socials check** | Reads the token metadata, can require Twitter/Telegram/website links, and rejects copycats that reuse another launch's socials. | Photon "socials filter" |
 | 🍯 **Honeypot check** | Quotes a buy and then a sell before entering. A token that can't be sold, or loses too much on the round trip, is rejected. | "Honeypot / tax check" |
 | 🛡 **On-chain rug filters** | Rejects tokens where mint or freeze authority isn't revoked, or with dangerous Token-2022 extensions. Also checks top-10 *wallet* concentration (curve/LP vaults excluded), dev buy size and RugCheck flags. | Standard on all paid bots |
 | 📈 **Smart exits** | Exits on: dev sells, copied wallet sells, stop loss, breakeven stop after the first take-profit, trailing stop, sell pressure, KOL buys, a take-profit ladder, max hold time, or a token going quiet. | "Auto sell", "trailing stop" |
+| 💰 **Sell initials** | At a target gain (for example 2x), sells just enough to get your SOL back, so the rest rides for free. | Trojan / BullX "sell initials" |
+| 🌙 **Moonbag** | After taking profit, keeps a slice (for example 10%) that ignores time and stale exits. It still leaves on a dev dump, its own wide trailing stop, or a max hold, and doesn't use up a position slot. | BullX / Photon "moonbag" |
 | 📱 **Telegram-first** | The whole bot runs from a chat: wallet, deposit, withdraw, paper/live, every setting, presets, copy trading, manual trades, stats. | Trojan/BonkBot UI |
 | 💾 **Restart-safe** | Positions, settings, copy wallets and reputation data are stored in SQLite. Open positions are reloaded after a restart and checked against the wallet. | Hosted bots |
 | 🎚 **Presets** | `degen`, `balanced` or `safe`, each with one-line overrides. | "Strategy presets" |
-| 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source. | GMGN PnL cards |
+| 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source (including dev snipes, keyword snipes and limit orders). A daily report arrives in Telegram every morning (UTC). | GMGN PnL cards |
+
+### Where it beats the paid bots
+
+- **No fee on your trades.** Paid bots typically take around 1% of every buy and
+  sell. This bot charges nothing on top of network, Jito, pump.fun and PumpPortal costs.
+- **Your key never leaves your server.** Hosted bots hold your private key on
+  their servers.
+- **Every rule is visible and adjustable.** Filters and exits are plain settings,
+  not a black box, and the stats show which rule makes or loses you money.
+- **Filters stack.** Dev reputation, socials reuse, bundle detection, honeypot
+  round-trip, Token-2022 checks and RugCheck all run on every automatic buy.
+- **Paper mode with the same logic.** Test any strategy risk-free before going live.
 
 ## Run it all from Telegram
 
@@ -110,12 +128,20 @@ trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 | Change any setting | ⚙️ Settings → category → tap a setting (on/off toggles flip instantly, numbers ask for a value) |
 | Switch strategy | ⚙️ Settings → 🎚 Presets → degen / balanced / safe (your custom settings still win) |
 | Sell | 📊 Positions → Sell 25% / 50% / 100%, or use the buttons on any buy alert |
-| Buy a token yourself | Paste its address into the chat → pick an amount (runs your filters; ⚠️ option skips them) |
-| Copy a wallet | 👥 Copy trade → ➕ Add wallet → `<address> [label] [sol]` |
+| Research a token | Paste its address: you get the full token card with a verdict from your filters |
+| Buy a token yourself | Token card → pick an amount (runs your filters; ⚠️ option skips them) |
+| Buy on a dip / breakout | Token card → 📋 Limit buy → `0.1 -30` (buy 0.1 SOL after a 30% dip) |
+| Take profit / custom stop | Position → 📋 Limit sell → `50 +100` (half at 2x) or `100 -20` |
+| See or cancel orders | 📋 Orders → ✖️ Cancel |
+| Snipe only certain devs or narratives | 🎯 Snipers → Snipe mode: targeted → set Dev watchlist / Keywords |
+| Get your SOL back at 2x, keep a moonbag | ⚙️ Settings → 🚪 Exits → Sell initials at `100`, Moonbag `10` |
+| Copy a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] [sol]` |
+| Just watch a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] track`, or `/track <address> [label]` |
 | Stop everything | ⏸ Pause sniping (open positions are still managed and exited) |
 
 Every change is saved on the server and survives restarts: wallet, settings,
-preset, paper/live mode, pause state, positions, copy wallets and the blocklist.
+preset, paper/live mode, pause state, positions, limit orders, copy and tracked
+wallets, and the blocklist.
 
 ### Security
 
@@ -197,6 +223,18 @@ Built to run unattended:
 - **Secrets stay out of messages.** RPC URLs and the bot token never appear in
   logs or Telegram errors, and token names are escaped so they can't inject links.
 
+## Not included (and why)
+
+- **Trading on Base / BSC / ETH.** You fund the bot with SOL. Trading EVM chains
+  would mean bridging to ETH or BNB first, and a bridge takes minutes, which is
+  far too slow for sniping. Those chains stay alert-only.
+- **X/Twitter monitoring.** Watching KOL tweets needs X's paid API, which costs
+  far more than the bot itself.
+- **A web dashboard / charts terminal.** Telegram covers control. For charts, the
+  token card links to DexScreener.
+- **Multi-wallet buying.** It only helps hide size, and it multiplies fees and key
+  management for a hot wallet that should stay small.
+
 ## Known limitations
 
 - Copy trading sees pump.fun and PumpSwap trades from PumpPortal, and needs a
@@ -206,12 +244,12 @@ Built to run unattended:
   learning while paused).
 - No web dashboard; Telegram is the UI.
 - EVM chains are alert-only (capped at 20 alerts an hour).
-- The trading code has been tested offline (73 tests) and the Docker image has
+- The trading code has been tested offline (94 tests) and the Docker image has
   been built and run, but it hasn't placed real trades against mainnet yet.
   Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 73 tests, no network needed
+pip install -e '.[dev]' && pytest     # 94 tests, no network needed
 ```

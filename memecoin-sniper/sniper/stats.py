@@ -6,8 +6,8 @@ from collections import defaultdict
 from .store import Store
 
 
-def summarize(store: Store, since: float = 0) -> dict:
-    closes = store.events("close", since)
+def summarize(store: Store, since: float = 0, until: float = float("inf")) -> dict:
+    closes = store.events("close", since, until)
     pnls = [float(c.get("pnl_sol", 0)) for c in closes]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]

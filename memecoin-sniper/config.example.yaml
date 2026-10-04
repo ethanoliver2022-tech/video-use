@@ -35,6 +35,11 @@ discovery:
   pumpfun_migrations: false
   geckoterminal_networks: [solana, base, bsc, eth]   # non-Solana = alerts only
   dexscreener_profiles: true
+  auto_snipe: all               # all | targeted (dev watchlist + keywords only) | off
+  snipe_keywords: []            # e.g. [trump, pepe] matched in name / ticker
+  dev_watchlist: []             # dev wallets whose next pump.fun launch to buy instantly
+  dev_snipe_sol: 0              # size for watched-dev snipes (0 = buy_amount_sol)
+  dev_snipe_skip_filters: true
 
 copytrade:                      # needs PUMPPORTAL_API_KEY in .env
   enabled: false
@@ -94,3 +99,7 @@ data_dir: data
 #   kol_wallets: []
 #   kol_buy_sell_pct: 50
 #   sell_pressure_ratio: 0.75
+#   sell_initials_at_pct: 0     # e.g. 100 = at 2x, sell enough to get your SOL back
+#   moonbag_pct: 0              # keep e.g. 10% of the bag after taking profit
+#   moonbag_trailing_pct: 50
+#   moonbag_max_hold_hours: 24
