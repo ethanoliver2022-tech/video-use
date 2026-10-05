@@ -24,6 +24,7 @@ def _malformed(method: str) -> RpcError:
     return RpcError(f"{method}: malformed response from the RPC node")
 
 
+CONFIRM_POLL_SECONDS = 0.4  # ~one slot: fills (and the exits after them) are seen sooner
 CONFIRM_EVIDENCE_SECONDS = 15  # a 'not found' must be this recent to mean 'never landed'
 
 
@@ -166,7 +167,7 @@ class SolanaRpc:
                 seen = True
             elif res is not None:
                 last_unseen = loop.time()
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(CONFIRM_POLL_SECONDS)  # about one slot
         # "Didn't land" only when the node answered, near the end of the blockhash's
         # life, that it has never seen it. Polls failing, or a processed-but-unconfirmed
         # status, leave the outcome unknown: callers then check the wallet instead.
@@ -175,7 +176,7 @@ class SolanaRpc:
         return False
 
     async def get_transaction(self, signature: str) -> Optional[dict]:
-        for _ in range(15):
+        for _ in range(30):  # every 0.5s for up to 15s
             try:
                 res = await self.call(
                 "getTransaction",
@@ -187,7 +188,7 @@ class SolanaRpc:
                 res = None
             if res:
                 return res
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
         return None
 
 

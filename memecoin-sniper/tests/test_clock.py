@@ -131,7 +131,8 @@ async def test_priority_fee_cache_survives_clock_steps(monkeypatch):
     await s.priority_fee()
     assert len(calls) == 1  # still cached (10s)
     s._fee_cache = (s._fee_cache[0], s._fee_cache[1] - 11)
-    await s.priority_fee()
+    assert await s.priority_fee() == f1  # stale: answered at once, refreshed in the background
+    await s._fee_refresh
     assert len(calls) == 2  # refreshed despite the clock being an hour behind
 
 

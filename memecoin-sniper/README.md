@@ -16,7 +16,7 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | | What it does | Paid-bot equivalent |
 |---|---|---|
 | ⚡ **Jito bundles** | The swap and a validator tip go out as one atomic bundle. It can't be sandwiched, gets block priority, and if the swap fails you don't pay. | Trojan/BonkBot "MEV protection", Banana Gun "anti-rug" |
-| 📡 **Multi-RPC broadcast** | Every transaction goes to all of your RPCs and Jito regions at the same time. | "Turbo mode" |
+| 📡 **Multi-region broadcast** | Every bundle goes to all five Jito regions (NY, Amsterdam, Frankfurt, Tokyo, SLC) at once, plus any extra RPCs you add. | "Turbo mode" |
 | 💸 **Auto priority fee** | Pays a percentile of the network's recent priority fees, with a floor and a cap. | "Auto fee" |
 | 🎯 **Multi-chain discovery** | pump.fun launches and graduations (live websocket), plus new pools on Solana, Base, BSC and ETH from GeckoTerminal and DexScreener. | Photon/BullX "new pairs" |
 | 🎯 **Targeted snipers** | Three modes: snipe every launch that passes your filters, only *targeted* launches, or off. Targeted means a watchlist of devs whose next pump.fun launch is bought instantly, plus keywords matched in the name or ticker. | Banana Gun / Maestro "dev sniper", Trojan "auto-snipe" |
@@ -29,7 +29,7 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 🌐 **Socials check** | Reads the token metadata, can require Twitter/Telegram/website links, and rejects copycats that reuse another launch's socials. | Photon "socials filter" |
 | 🍯 **Honeypot check** | Quotes a buy and then a sell before entering. A token that can't be sold, or loses too much on the round trip, is rejected. | "Honeypot / tax check" |
 | 🛡 **On-chain rug filters** | Rejects tokens where mint or freeze authority isn't revoked, or with dangerous Token-2022 extensions. Also checks top-10 *wallet* concentration (curve/LP vaults excluded), dev buy size and RugCheck flags. | Standard on all paid bots |
-| 📈 **Smart exits** | Exits on: dev sells, copied wallet sells, stop loss, breakeven stop after the first take-profit, trailing stop, sell pressure, KOL buys, a take-profit ladder, max hold time, or a token going quiet. | "Auto sell", "trailing stop" |
+| 📈 **Smart exits** | Exits on: dev sells, copied wallet sells, stop loss, breakeven stop after the first take-profit, trailing stop, sell pressure, KOL buys, a take-profit ladder, max hold time, a token going quiet, or (optional) the moment it migrates off the curve. | "Auto sell", "trailing stop", Axiom "auto-sell on migration" |
 | 💰 **Sell initials** | At a target gain (for example 2x), sells just enough to get your SOL back, so the rest rides for free. | Trojan / BullX "sell initials" |
 | 🌙 **Moonbag** | After taking profit, keeps a slice (for example 10%) that ignores time and stale exits. It still leaves on a dev dump, its own wide trailing stop, or a max hold, and doesn't use up a position slot. | BullX / Photon "moonbag" |
 | 📱 **Telegram-first** | The whole bot runs from a chat: wallet, deposit, withdraw, paper/live, every setting, presets, copy trading, manual trades, stats. | Trojan/BonkBot UI |
@@ -54,6 +54,26 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
   Paper fills pay what live trades pay: price impact, pump.fun's fee, the priority
   fee, the Jito tip and PumpPortal's fee. What paper can't show is latency: live, you
   sometimes fill a little later (and higher) than the price paper uses.
+
+### How fast is it?
+
+What a snipe waits on, from the launch message to the transaction leaving:
+the pump.fun launch arrives on PumpPortal's websocket, the filters run (in
+memory and SQLite, plus at most 0.7s for the optional copycat-socials check;
+nothing when socials aren't checked), PumpPortal builds the transaction (one
+HTTP round trip), and it's signed locally and sent to all five Jito regions at
+once. The wallet balance and the priority fee are kept fresh in the background,
+so neither costs a round trip on the buy itself. Fills are polled every 0.4s.
+
+The fastest paid bots are still a little quicker at the very first block: they
+build pump.fun transactions themselves instead of asking PumpPortal (saving that
+round trip, roughly 50–200ms), read the chain through Yellowstone gRPC or
+ShredStream on servers next to the validators, and some pay for private relays.
+That matters most for a block-0 snipe of a hyped launch; for everything after
+the first second (the confirmation window, copy trades, exits) the difference
+is small. To get as close as possible: a paid RPC (Helius, Triton, QuickNode), a
+server in Frankfurt or New York near PumpPortal and Jito, and a higher
+`jito_tip_sol` when you're competing for the first block.
 
 ## Run it all from Telegram
 

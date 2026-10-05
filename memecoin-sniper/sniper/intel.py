@@ -92,7 +92,8 @@ async def _resolves_public(uri: str) -> bool:
     return bool(infos) and all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
 
 
-async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -> Optional[dict]:
+async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "",
+                         deadline: float = METADATA_DEADLINE) -> Optional[dict]:
     if not uri:
         return None
     via_gateway = bool(gateway and "/ipfs/" in uri)
@@ -116,7 +117,7 @@ async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -
         data = json.loads(bytes(body))
         return data if isinstance(data, dict) else None
     try:
-        return await asyncio.wait_for(read(), METADATA_DEADLINE)
+        return await asyncio.wait_for(read(), deadline)
     except Exception as e:
         log.debug("metadata fetch failed for %s: %s", uri[:100], e)
     return None

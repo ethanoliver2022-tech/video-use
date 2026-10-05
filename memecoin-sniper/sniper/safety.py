@@ -16,7 +16,7 @@ import httpx
 from solders.pubkey import Pubkey
 
 from .config import FilterConfig
-from .intel import extract_socials, fetch_metadata
+from .intel import METADATA_DEADLINE, extract_socials, fetch_metadata
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, SafetyReport
 from .solana_rpc import SolanaRpc
 
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .store import Store
 
 log = logging.getLogger(__name__)
+FAST_SOCIALS_DEADLINE = 0.7  # seconds the optional copycat check may add to a snipe
 
 # Token-2022 extensions that let the issuer take or lock your tokens.
 DANGEROUS_EXTENSIONS = {
@@ -181,10 +182,15 @@ class SafetyChecker:
     async def _socials(self, c: Candidate, r: SafetyReport) -> None:
         if not (self.cfg.min_socials or self.cfg.reject_reused_socials):
             return
-        meta = await fetch_metadata(self.http, c.uri or "", self.ipfs_gateway)
+        # socials required: wait for the metadata. Only the copycat check: it's a soft filter,
+        # so a slow IPFS gateway must not cost the snipe its first blocks
+        deadline = METADATA_DEADLINE if self.cfg.min_socials else FAST_SOCIALS_DEADLINE
+        meta = await fetch_metadata(self.http, c.uri or "", self.ipfs_gateway, deadline)
         if meta is None:
             if self.cfg.min_socials:
                 r.fail("metadata unavailable")
+            else:
+                r.notes.append("socials not checked (metadata slow)")
             return
         socials = extract_socials(meta)
         r.notes.append(f"{len(socials)} socials")

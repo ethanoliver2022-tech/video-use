@@ -40,6 +40,8 @@ SETTINGS: list[Setting] = [
     Setting("exits.breakeven_after_first_tp", "Breakeven after TP", "bool"),
     Setting("exits.max_hold_seconds", "Max hold", "int", 10, 86400 * 7, "s"),
     Setting("exits.exit_on_dev_sell", "Exit on dev sell", "bool"),
+    Setting("exits.sell_on_migration", "Sell on migration", "bool",
+            help="sell everything the moment a token graduates off the pump.fun curve"),
     Setting("exits.kol_wallets", "KOL wallets", "wallets", help="comma-separated addresses, or 'none'"),
     Setting("exits.sell_initials_at_pct", "Sell initials at", "float", 0, 100000, "%",
             help="profit % at which to take your SOL back, e.g. 100 = at 2x; 0 = off"),

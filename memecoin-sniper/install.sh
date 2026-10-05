@@ -7,7 +7,6 @@ set -euo pipefail
 REPO="${SNIPER_REPO:-https://github.com/ethanoliver2022-tech/video-use.git}"
 BRANCH="${SNIPER_BRANCH:-claude/memecoin-sniping-bot-x4vgsq}"
 DIR="${SNIPER_DIR:-/opt/sniper}"
-JITO_REGION="${SNIPER_JITO:-frankfurt}"   # ny | amsterdam | frankfurt | tokyo | slc
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
@@ -67,7 +66,6 @@ fi
 
 if [ ! -f config.yaml ]; then
   cp config.example.yaml config.yaml
-  sed -i "s#^    - https://mainnet.block-engine.jito.wtf#    - https://${JITO_REGION}.mainnet.block-engine.jito.wtf#" config.yaml
 fi
 
 # mount config.yaml into the container (kept out of the main compose file so a

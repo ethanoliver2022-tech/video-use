@@ -18,6 +18,7 @@ import logging
 import random
 import time
 from collections import OrderedDict
+from typing import Optional
 
 import httpx
 from solders.keypair import Keypair
@@ -63,6 +64,9 @@ def fee_from_samples(samples: list[int], percentile: float, cu: int = TYPICAL_SW
     return vals[idx] * cu / 1e6 / 1e9
 
 
+FEE_CACHE_SECONDS = 10
+
+
 class TxSender:
     def __init__(self, cfg: SpeedConfig, rpc: SolanaRpc, http: httpx.AsyncClient,
                  default_priority_fee):
@@ -70,6 +74,7 @@ class TxSender:
         self.cfg, self.rpc, self.http = cfg, rpc, http
         self._default_fee = default_priority_fee
         self._fee_cache: tuple[float, float] = (0.0, float("-inf"))  # (value, monotonic time)
+        self._fee_refresh: Optional[asyncio.Future] = None
         self._extra: tuple[tuple[str, ...], list[SolanaRpc]] = ((), [])
         # swap signature -> its bundle's tip signature; oldest evicted (in-flight are newest)
         self.tip_sigs: OrderedDict[str, str] = OrderedDict()
@@ -91,8 +96,15 @@ class TxSender:
         if not self.cfg.auto_priority_fee:
             return self.default_fee
         value, at = self._fee_cache
-        if time.monotonic() - at < 10:
+        if time.monotonic() - at < FEE_CACHE_SECONDS:
             return value
+        if at != float("-inf"):  # stale: answer now, refresh in the background (trades never wait)
+            if self._fee_refresh is None or self._fee_refresh.done():
+                self._fee_refresh = asyncio.ensure_future(self._fetch_fee())
+            return value
+        return await self._fetch_fee()  # the very first estimate
+
+    async def _fetch_fee(self) -> float:
         try:
             res = await self.rpc.call("getRecentPrioritizationFees", [[]])
             fee = fee_from_samples([r["prioritizationFee"] for r in res or []],
@@ -115,7 +127,8 @@ class TxSender:
             while len(self.tip_sigs) > 1000:
                 self.tip_sigs.popitem(last=False)
             bundle = [base64.b64encode(raw).decode(), base64.b64encode(bytes(tip)).decode()]
-            jobs += [self._send_bundle(url, bundle) for url in self.cfg.jito_block_engines]
+            engines = dict.fromkeys(u.rstrip("/") for u in self.cfg.jito_block_engines)  # dedupe
+            jobs += [self._send_bundle(url, bundle) for url in engines]
         if not use_jito or self.cfg.jito_also_send_rpc:
             jobs += [r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]]
         results = await asyncio.gather(*jobs, return_exceptions=True)

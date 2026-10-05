@@ -55,6 +55,8 @@ CLOCK_JUMP_SECONDS = 30  # wall clock moved this much more than real elapsed tim
 # candidates are handled concurrently: a confirmation window (e.g. 6s) waits inside a worker,
 # so there must be enough of them for a launch burst (they're cheap coroutines)
 CANDIDATE_WORKERS = 32
+BALANCE_REFRESH_SECONDS = 2   # live wallet balance kept fresh in the background
+BALANCE_CACHE_SECONDS = 3     # a buy uses it if no newer than this (and no buy finished since)
 PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fill
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
@@ -132,6 +134,9 @@ class Engine:
         self._sell_next_try: dict[str, float] = {}
         self._buying: dict[str, float] = {}       # mint -> SOL, buys in flight
         self._buys_finished = 0                   # bumps when a buy leaves _buying
+        # (SOL, monotonic time, _buys_finished when read): the wallet balance, refreshed in
+        # the background so buys don't wait on an RPC round trip
+        self._bal_cache: Optional[tuple[float, float, int]] = None
         self.buy_lock = asyncio.Lock()
         self.last_loss_at: Optional[float] = None  # monotonic clock
         self._recent_sigs: deque[str] = deque(maxlen=5000)
@@ -158,6 +163,7 @@ class Engine:
         return self.stream.trades_enabled
 
     def _build_executor(self, live: bool) -> Executor:
+        self._bal_cache = None  # belongs to the previous wallet / mode
         if not live:
             self.own_wallet = ""
             return PaperExecutor(self.jupiter, self.cfg.trading.slippage_pct, self.cfg)
@@ -457,9 +463,14 @@ class Engine:
         sol = c.buy_sol or self.cfg.trading.buy_amount_sol
         bal = None
         done_before = self._buys_finished
-        if self.live:  # the slow RPC read happens outside the lock: buys never queue on it
+        cached = self._bal_cache
+        if (self.live and cached and cached[2] == done_before
+                and time.monotonic() - cached[1] < BALANCE_CACHE_SECONDS):
+            bal = cached[0]  # kept fresh in the background: no RPC round trip on a snipe
+        elif self.live:  # the slow RPC read happens outside the lock: buys never queue on it
             try:
                 bal = await self.rpc.get_balance_sol(self.own_wallet)
+                self._bal_cache = (bal, time.monotonic(), done_before)
             except Exception as e:  # can't verify funds: don't buy blind
                 log.info("skip %s %s: balance unreadable (%s)", c.symbol, c.mint, e)
                 return f"skipped: couldn't check the wallet balance ({esc(str(e)[:80])})"
@@ -608,6 +619,17 @@ class Engine:
                            "swap_sol": c.buy_sol or self.cfg.trading.buy_amount_sol}
         self._save_pending(pending)
 
+    async def balance_loop(self) -> None:
+        while True:
+            if self.live and self.own_wallet:
+                done = self._buys_finished
+                try:
+                    bal = await self.rpc.get_balance_sol(self.own_wallet)
+                    self._bal_cache = (bal, time.monotonic(), done)
+                except Exception as e:
+                    log.debug("balance refresh failed: %s", e)
+            await asyncio.sleep(BALANCE_REFRESH_SECONDS)
+
     async def reconcile_loop(self) -> None:
         while True:
             await asyncio.sleep(RECONCILE_SECONDS)
@@ -713,6 +735,9 @@ class Engine:
         pos = self.positions.get(mint)
         if pos and not pos.closed and not pos.migrated:
             pos.migrated = True
+            if self.cfg.exits.sell_on_migration:  # runs in the websocket loop: don't wait here
+                self._spawn(self.execute_sell(
+                    pos, exits.ExitDecision(pos.tokens_remaining, True, "migrated")))
             self.store.save_position(pos)
             # runs inside the websocket loop: never wait on Telegram here
             self._spawn(self.notifier.send(f"🎓 {esc(pos.symbol)} graduated off the bonding curve"))
@@ -1289,6 +1314,7 @@ class Engine:
             raise ValueError(f"that would leave {left / 1e9:.6f} SOL, below Solana's minimum of "
                              f"{MIN_RENT_LAMPORTS / 1e9:.6f}. Send a bit less, or use 'all'.")
         tx = transfer_tx(kp, to, lamports, await self.rpc.get_latest_blockhash())
+        self._bal_cache = None  # the balance is about to change
         sol = lamports / 1e9
         sig = str(tx.signatures[0])
         try:
@@ -1476,7 +1502,8 @@ class Engine:
 
         loops = [("pumpportal", self.stream.run), ("exits", self.exit_loop),
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
-                 ("orders", self.order_loop), ("reconcile", self.reconcile_loop)]
+                 ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
+                 ("balance", self.balance_loop)]
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,
                                          d.geckoterminal_poll_seconds, self.on_candidate, self.http,

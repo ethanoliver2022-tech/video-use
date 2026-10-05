@@ -43,7 +43,10 @@ class SpeedConfig:
     jito_enabled: bool = True
     jito_tip_sol: float = 0.0005
     jito_block_engines: list[str] = field(
-        default_factory=lambda: ["https://mainnet.block-engine.jito.wtf"]
+        # every region at once, like the fastest paid bots: whichever leader is next, a nearby
+        # block engine has the bundle (identical bundles can only land once)
+        default_factory=lambda: [f"https://{r}.mainnet.block-engine.jito.wtf"
+                                 for r in ("ny", "amsterdam", "frankfurt", "tokyo", "slc")]
     )
     jito_also_send_rpc: bool = False       # faster landing, but gives up sandwich protection
     broadcast_rpcs: list[str] = field(default_factory=list)  # extra RPCs to fan out to
@@ -122,6 +125,7 @@ class ExitConfig:
     max_hold_seconds: int = 900
     stale_seconds: int = 120                # no price update for this long -> exit
     exit_on_dev_sell: bool = True
+    sell_on_migration: bool = False        # sell everything when the token leaves the curve
     kol_wallets: list[str] = field(default_factory=list)
     kol_buy_sell_pct: float = 50.0          # sell this % of remaining into the first KOL buy
     sell_pressure_window: int = 20          # last N trades

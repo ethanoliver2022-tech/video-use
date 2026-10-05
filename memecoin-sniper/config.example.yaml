@@ -18,12 +18,12 @@ trading:
 speed:
   jito_enabled: true            # swap + tip as one bundle: MEV/sandwich protection + priority
   jito_tip_sol: 0.0005
-  jito_block_engines:           # add the region closest to you for lower latency
-    - https://mainnet.block-engine.jito.wtf
-    # - https://ny.mainnet.block-engine.jito.wtf
-    # - https://amsterdam.mainnet.block-engine.jito.wtf
-    # - https://frankfurt.mainnet.block-engine.jito.wtf
-    # - https://tokyo.mainnet.block-engine.jito.wtf
+  jito_block_engines:           # sent to every region at once (fastest landing)
+    - https://ny.mainnet.block-engine.jito.wtf
+    - https://amsterdam.mainnet.block-engine.jito.wtf
+    - https://frankfurt.mainnet.block-engine.jito.wtf
+    - https://tokyo.mainnet.block-engine.jito.wtf
+    - https://slc.mainnet.block-engine.jito.wtf
   jito_also_send_rpc: false     # true = lands more often, but loses sandwich protection
   broadcast_rpcs: []            # extra RPC URLs to fan every transaction out to
   auto_priority_fee: true
@@ -105,6 +105,7 @@ data_dir: data
 #   max_hold_seconds: 900
 #   stale_seconds: 120
 #   exit_on_dev_sell: true
+#   sell_on_migration: false   # sell everything the moment the token graduates off the curve
 #   kol_wallets: []
 #   kol_buy_sell_pct: 50
 #   sell_pressure_ratio: 0.75
