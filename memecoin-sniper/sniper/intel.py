@@ -27,8 +27,10 @@ def normalize_social(url: str) -> str:
 
 def extract_socials(meta: dict) -> list[str]:
     out = []
+    ext = meta.get("extensions")  # token metadata is written by the token's creator: trust nothing
+    ext = ext if isinstance(ext, dict) else {}
     for key in SOCIAL_KEYS:
-        val = meta.get(key) or (meta.get("extensions") or {}).get(key)
+        val = meta.get(key) or ext.get(key)
         if isinstance(val, str) and "." in val:
             out.append(normalize_social(val))
     return out

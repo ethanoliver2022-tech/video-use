@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import math
 import logging
 import time
 from typing import TYPE_CHECKING, Optional
 
-from .models import PUMP_TOTAL_SUPPLY, Candidate
+from .models import PUMP_TOTAL_SUPPLY, Candidate, num
 from .pump_curve import fetch_curve
 
 if TYPE_CHECKING:
@@ -23,7 +24,12 @@ esc = html.escape
 BUY_AMOUNTS = (0.05, 0.1, 0.25, 0.5, 1.0)
 
 
-def _usd(v: Optional[float]) -> str:
+def _d(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def _usd(v) -> str:
+    v = num(v, allow_zero=True)
     if v is None:
         return "n/a"
     for div, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
@@ -34,12 +40,14 @@ def _usd(v: Optional[float]) -> str:
 
 def _pct(v) -> str:
     try:
-        return f"{float(v):+.1f}%"
+        v = float(v)
     except (TypeError, ValueError):
         return "n/a"
+    return f"{v:+.1f}%" if math.isfinite(v) else "n/a"
 
 
-def _age(created_ms: Optional[float]) -> str:
+def _age(created_ms) -> str:
+    created_ms = num(created_ms)
     if not created_ms:
         return "n/a"
     s = max(0, time.time() - created_ms / 1000)
@@ -58,7 +66,7 @@ async def _dexscreener(engine: "Engine", mint: str) -> Optional[dict]:
     pairs = [p for p in (resp.json() or []) if isinstance(p, dict)]
     if not pairs:
         return None
-    return max(pairs, key=lambda p: ((p.get("liquidity") or {}).get("usd") or 0))
+    return max(pairs, key=lambda p: num(_d(p.get("liquidity")).get("usd")) or 0)
 
 
 async def build_card(engine: "Engine", mint: str) -> tuple[str, list]:
@@ -71,13 +79,15 @@ async def build_card(engine: "Engine", mint: str) -> tuple[str, list]:
 
     pair, curve = await asyncio.gather(safe(_dexscreener(engine, mint)),
                                        safe(fetch_curve(engine.rpc, mint)))
-    base = (pair or {}).get("baseToken") or {}
-    name, symbol = base.get("name") or "", base.get("symbol") or mint[:6]
+    pair = pair or {}
+    base = _d(pair.get("baseToken"))
+    name = base.get("name") if isinstance(base.get("name"), str) else ""
+    symbol = base.get("symbol") if isinstance(base.get("symbol"), str) and base["symbol"] else mint[:6]
     route = "pump" if (curve and not curve.complete) or mint.endswith("pump") else "jupiter"
     cand = Candidate(chain="solana", mint=mint, source="manual", symbol=symbol, name=name,
                      creator=curve.creator if curve else None, route=route,
-                     liquidity_usd=((pair or {}).get("liquidity") or {}).get("usd"),
-                     fdv_usd=(pair or {}).get("marketCap") or (pair or {}).get("fdv"))
+                     liquidity_usd=num(_d(pair.get("liquidity")).get("usd"), allow_zero=True),
+                     fdv_usd=num(pair.get("marketCap")) or num(pair.get("fdv")))
     report = await safe(engine.safety.evaluate(cand))
 
     dev_pct = None
@@ -88,17 +98,17 @@ async def build_card(engine: "Engine", mint: str) -> tuple[str, list]:
 
     lines = [f"🪙 <b>{esc(name or symbol)}</b> (${esc(symbol)})", f"<code>{mint}</code>", ""]
     if pair:
-        vol = pair.get("volume") or {}
-        chg = pair.get("priceChange") or {}
-        tx = (pair.get("txns") or {}).get("h1") or {}
+        vol, chg = _d(pair.get("volume")), _d(pair.get("priceChange"))
+        tx = _d(_d(pair.get("txns")).get("h1"))
         lines += [
-            f"💲 Price {_usd(float(pair['priceUsd'])) if pair.get('priceUsd') else 'n/a'} · "
-            f"MC {_usd(pair.get('marketCap') or pair.get('fdv'))}",
-            f"💧 Liquidity {_usd((pair.get('liquidity') or {}).get('usd'))} · "
+            f"💲 Price {_usd(pair.get('priceUsd'))} · "
+            f"MC {_usd(num(pair.get('marketCap')) or pair.get('fdv'))}",
+            f"💧 Liquidity {_usd(_d(pair.get('liquidity')).get('usd'))} · "
             f"Vol 1h {_usd(vol.get('h1'))} · 24h {_usd(vol.get('h24'))}",
             f"📈 5m {_pct(chg.get('m5'))} · 1h {_pct(chg.get('h1'))} · 24h {_pct(chg.get('h24'))}",
-            f"🔁 1h trades: {tx.get('buys', 0)} buys / {tx.get('sells', 0)} sells · "
-            f"age {_age(pair.get('pairCreatedAt'))} · {esc(pair.get('dexId') or '?')}",
+            f"🔁 1h trades: {num(tx.get('buys'), True) or 0:.0f} buys / "
+            f"{num(tx.get('sells'), True) or 0:.0f} sells · "
+            f"age {_age(pair.get('pairCreatedAt'))} · {esc(pair['dexId'] if isinstance(pair.get('dexId'), str) else '?')}",
         ]
     else:
         lines.append("No DEX pair data yet (brand new, or not indexed).")

@@ -32,7 +32,9 @@ def summarize(store: Store, since: float = 0, until: float = float("inf")) -> di
 
 
 def _bucket(reason: str) -> str:
-    """'stop loss (-27%)' -> 'stop loss'."""
+    """'stop loss (-27%)' -> 'stop loss', 'KOL buy 7xKXtg…' -> 'KOL buy'."""
+    if reason.startswith("KOL buy"):
+        return "KOL buy"
     return reason.split(" (")[0].split(" +")[0]
 
 

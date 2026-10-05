@@ -1,6 +1,7 @@
 """Hostile external data: malformed / adversarial payloads from every outside service
 must never crash the bot or corrupt prices and positions."""
 import json
+import re
 import logging
 import math
 import random
@@ -160,3 +161,60 @@ async def test_rugcheck_garbage_never_crashes_safety():
         r = SafetyReport(passed=True)
         await chk._rugcheck(Candidate(chain="solana", mint="M", source="x"), r)
     await http.aclose()
+
+
+def test_socials_parser_survives_creator_controlled_metadata():
+    from sniper.intel import extract_socials
+    rng = random.Random(5)
+    for _ in range(3000):
+        meta = {k: rng.choice(WEIRD + ["https://x.com/a", "t.me/b"]) for k in
+                ("twitter", "telegram", "website") if rng.random() < 0.6}
+        if rng.random() < 0.5:
+            meta["extensions"] = rng.choice(WEIRD + [{"twitter": weird(rng)}])
+        out = extract_socials(meta)
+        assert all(isinstance(s, str) for s in out)
+
+
+async def test_token_card_survives_garbage_dexscreener(tmp_path):
+    from sniper import token_card
+    rng = random.Random(6)
+    eng = engine(tmp_path)
+
+    def handler(req):
+        pair = {k: weird(rng) for k in ("priceUsd", "marketCap", "fdv", "pairCreatedAt", "dexId")}
+        for k in ("liquidity", "volume", "priceChange", "txns", "baseToken"):
+            pair[k] = rng.choice([weird(rng), {"usd": weird(rng), "h1": weird(rng),
+                                               "m5": weird(rng), "name": weird(rng),
+                                               "symbol": weird(rng), "buys": weird(rng)}])
+        body = rng.choice([[pair], [pair, weird(rng)], weird(rng)])
+        return httpx.Response(200, text=json.dumps(body, allow_nan=True))
+    real_http = eng.http
+    eng.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def verdict(c):  # safety has its own fuzz tests; keep this one offline
+        from sniper.models import SafetyReport
+        r = SafetyReport(passed=rng.random() < 0.5, notes=["2 socials"])
+        if not r.passed:
+            r.reasons.append("liquidity too low")
+        return r
+    eng.safety.evaluate = verdict
+
+    async def rpc_down(*a, **k):
+        from sniper.solana_rpc import RpcError
+        raise RpcError("rpc down")
+    eng.rpc.call = rpc_down
+
+    async def no_curve(*a):
+        return None
+    token_card.fetch_curve = no_curve
+    try:
+        for _ in range(500):
+            text, buttons = await token_card.build_card(eng, str(Keypair().pubkey()))
+            body = text.lower().split("</code>", 1)[1]  # past the (creator-chosen) name line
+            bad = re.findall(r"(?:\$|[+-])(?:nan|inf)|(?:nan|inf)%", body)
+            assert not bad, text
+    finally:
+        from sniper.pump_curve import fetch_curve
+        token_card.fetch_curve = fetch_curve
+    await eng.http.aclose()
+    await real_http.aclose()
