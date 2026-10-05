@@ -16,6 +16,7 @@ import httpx
 from solders.pubkey import Pubkey
 
 from .config import FilterConfig
+from .execution.executors import JupiterBusy
 from .intel import METADATA_DEADLINE, extract_socials, fetch_metadata
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, SafetyReport
 from .solana_rpc import SolanaRpc
@@ -205,10 +206,13 @@ class SafetyChecker:
         """Quote SOL -> token -> SOL. No sell route, or a huge round-trip loss, means
         a honeypot, a heavy tax or liquidity too thin to get out."""
         try:
-            buy_q = await self.jupiter.quote(SOL_MINT, c.mint, self.probe_sol, 50)
+            buy_q = await self.jupiter.quote(SOL_MINT, c.mint, self.probe_sol, 50, urgent=False)
             tokens = await self.jupiter.out_ui(buy_q)
-            sell_q = await self.jupiter.quote(c.mint, SOL_MINT, tokens, 50)
+            sell_q = await self.jupiter.quote(c.mint, SOL_MINT, tokens, 50, urgent=False)
             back = await self.jupiter.out_ui(sell_q)
+        except JupiterBusy:  # couldn't verify it can be sold: don't buy blind
+            r.fail("honeypot check skipped: Jupiter busy with trades")
+            return
         except Exception as e:
             r.fail(f"no sell route ({e})")
             return

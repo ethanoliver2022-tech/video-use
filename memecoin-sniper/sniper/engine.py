@@ -34,6 +34,7 @@ esc = html.escape
 
 PRICE_POLL_SECONDS = 2
 QUOTE_GAP_SECONDS = 5        # poll on-chain / Jupiter when the trade stream has been quiet this long
+JUPITER_PRICE_SECONDS = 6    # at most one Jupiter price quote per position this often (rate limits)
 SELL_BACKOFF_MAX = 60        # seconds between retries of a failing sell
 SELL_FAST_RETRIES = 10       # the first retries come quickly (2, 4, 8, 10, 10... seconds)
 MAX_SELL_SLIPPAGE = 50.0     # failed sells retry with more slippage, up to this
@@ -147,6 +148,7 @@ class Engine:
         self._bg: set[asyncio.Task] = set()
         self._orders_running: set[int] = set()
         self._curve_misses: dict[str, int] = {}
+        self._quoted_at: dict[str, float] = {}  # mint -> monotonic time of its last price quote
 
         saved_pause = self.store.get_setting("paused")
         self.paused = start_paused if saved_pause is None else saved_pause == "1"
@@ -810,7 +812,9 @@ class Engine:
                         pos.dev_tokens = dev
                     elif dev < pos.dev_tokens * 0.99:
                         pos.dev_sold = True
-            elif quiet and pos.tokens_remaining > 0:
+            elif (quiet and pos.tokens_remaining > 0 and time.monotonic()
+                  - self._quoted_at.get(pos.mint, float("-inf")) >= JUPITER_PRICE_SECONDS):
+                self._quoted_at[pos.mint] = time.monotonic()
                 out = await self.executor.quote_sell(pos.mint, pos.tokens_remaining)
                 if out:
                     pos.update_price(out / pos.tokens_remaining)
@@ -1012,6 +1016,7 @@ class Engine:
         self.sell_failures.pop(pos.mint, None)
         self._sell_next_try.pop(pos.mint, None)
         self._curve_misses.pop(pos.mint, None)
+        self._quoted_at.pop(pos.mint, None)
         self._spawn(self.notifier.send(  # callers may hold the sell lock: don't wait on Telegram
             f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
             f" — today {self.store.realized_today():+.4f} SOL"))
@@ -1108,8 +1113,8 @@ class Engine:
         except Exception as e:
             log.debug("curve lookup %s failed: %s", mint, e)
         probe = 0.01
-        q = await self.jupiter.quote(SOL_MINT, mint, probe,
-                                     self.cfg.trading.slippage_pct)
+        q = await self.jupiter.quote(SOL_MINT, mint, probe, self.cfg.trading.slippage_pct,
+                                     urgent=False)  # a price check, not a trade
         tokens = await self.jupiter.out_ui(q)
         if tokens <= 0:
             raise ValueError("no price available")

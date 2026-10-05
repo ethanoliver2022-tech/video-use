@@ -158,7 +158,7 @@ def build(tmp_path, rng, chain=None):
     ex._pumpportal_tx = pp
 
     class FakeJupiter:  # routes through the same simulated chain
-        async def quote(self, in_mint, out_mint, amount_ui, slippage, raw_amount=None):
+        async def quote(self, in_mint, out_mint, amount_ui, slippage, raw_amount=None, urgent=True):
             if in_mint.startswith("So111"):
                 return {"action": "buy", "mint": out_mint, "amount": amount_ui}
             amt = raw_amount / 1e6 if raw_amount is not None else amount_ui

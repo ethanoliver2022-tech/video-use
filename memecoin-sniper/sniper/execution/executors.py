@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
+import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -87,11 +90,81 @@ def _decimal_str(raw: int, decimals: int) -> str:
     return f"{whole}.{frac:0{decimals}d}".rstrip("0").rstrip(".") if decimals else str(whole)
 
 
+LITE_API_HOST = "lite-api.jup.ag"
+RETIRED_STATUS = (401, 403, 404, 410)  # what a retired endpoint answers
+JUPITER_WINDOW = 60.0       # Jupiter counts requests over a sliding minute
+BACKGROUND_SHARE = 0.5      # price checks / honeypot probes may use at most this much of it
+URGENT_MAX_WAIT = 10.0      # a trade waits at most this long for a free slot, then goes anyway
+
+
+class JupiterBusy(RuntimeError):
+    """Skipped a background Jupiter call to keep the rate limit free for trades."""
+
+
 class Jupiter:
-    def __init__(self, api: str, rpc: SolanaRpc, http: httpx.AsyncClient, api_key: str = ""):
+    def __init__(self, api: str, rpc: SolanaRpc, http: httpx.AsyncClient, api_key: str = "",
+                 requests_per_minute: Optional[int] = None):
         self.api, self.rpc, self.http = api, rpc, http
         self.headers = {"x-api-key": api_key} if api_key else {}
         self._decimals: dict[str, int] = {SOL_MINT: 9}
+        if requests_per_minute is None:  # JUPITER_RPM in .env: for paid plans with more
+            try:
+                requests_per_minute = int(os.getenv("JUPITER_RPM", "0") or 0)
+            except ValueError:
+                requests_per_minute = 0
+        self.rpm = max(0, requests_per_minute)
+        self._calls: deque[float] = deque()
+
+    def budget(self) -> int:
+        """Requests per minute Jupiter allows this setup (free key or lite-api: 60/min,
+        keyless api.jup.ag: 30/min)."""
+        if self.rpm:
+            return self.rpm
+        return 60 if self.headers or LITE_API_HOST in self.api else 30
+
+    async def _slot(self, urgent: bool) -> None:
+        """Trades (buys, sells) always come first: background calls only get part of the
+        budget and are skipped, never queued, when it's used up."""
+        give_up = time.monotonic() + URGENT_MAX_WAIT
+        while True:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] > JUPITER_WINDOW:
+                self._calls.popleft()
+            budget = self.budget()
+            limit = budget if urgent else max(1, int(budget * BACKGROUND_SHARE))
+            if len(self._calls) < limit or (urgent and now >= give_up):
+                self._calls.append(now)
+                return
+            if not urgent:
+                raise JupiterBusy("Jupiter rate limit reserved for trades right now")
+            await asyncio.sleep(min(0.25, max(0.01, give_up - now)))
+
+    async def _request(self, method: str, path: str, urgent: bool = True, **kw) -> httpx.Response:
+        await self._slot(urgent)
+        resp = await self._send(method, path, **kw)
+        for delay in ((0.5, 1.0) if urgent else ()):  # rate limited anyway: a trade tries again
+            if resp.status_code != 429:
+                break
+            await asyncio.sleep(delay)
+            resp = await self._send(method, path, **kw)
+        return resp
+
+    async def _send(self, method: str, path: str, **kw) -> httpx.Response:
+        """Jupiter is retiring the keyless lite-api. If it stops answering, move to api.jup.ag
+        (keyless there is slower but works) for good, instead of every trade failing."""
+        try:
+            resp = await self.http.request(method, f"{self.api}{path}", headers=self.headers, **kw)
+        except httpx.ConnectError:
+            if LITE_API_HOST not in self.api:
+                raise
+            resp = None
+        if LITE_API_HOST in self.api and (resp is None or resp.status_code in RETIRED_STATUS):
+            self.api = self.api.replace(LITE_API_HOST, "api.jup.ag")
+            log.warning("Jupiter's keyless lite-api didn't answer (%s): switched to %s. Add a "
+                        "free JUPITER_API_KEY to .env for faster quotes",
+                        "unreachable" if resp is None else resp.status_code, self.api)
+            resp = await self.http.request(method, f"{self.api}{path}", headers=self.headers, **kw)
+        return resp
 
     async def decimals(self, mint: str) -> int:
         if mint not in self._decimals:
@@ -104,11 +177,12 @@ class Jupiter:
         return self._decimals[mint]
 
     async def quote(self, in_mint: str, out_mint: str, amount_ui: float, slippage_pct: float,
-                    raw_amount: Optional[int] = None) -> dict:
+                    raw_amount: Optional[int] = None, urgent: bool = True) -> dict:
+        """urgent=False for background lookups (prices, safety probes): see _slot."""
         raw = raw_amount if raw_amount is not None else int(amount_ui * 10 ** await self.decimals(in_mint))
         if raw <= 0:
             raise ValueError("amount too small to quote")
-        resp = await self.http.get(f"{self.api}/quote", headers=self.headers, params={
+        resp = await self._request("GET", "/quote", urgent, params={
             "inputMint": in_mint, "outputMint": out_mint, "amount": raw,
             "slippageBps": int(slippage_pct * 100), "restrictIntermediateTokens": "true",
         })
@@ -126,7 +200,7 @@ class Jupiter:
         return int(raw) / 10 ** await self.decimals(quote["outputMint"])
 
     async def swap_tx(self, quote: dict, user: str, priority_fee_sol: float) -> bytes:
-        resp = await self.http.post(f"{self.api}/swap", headers=self.headers, json={
+        resp = await self._request("POST", "/swap", json={
             "quoteResponse": quote,
             "userPublicKey": user,
             "wrapAndUnwrapSol": True,
@@ -171,7 +245,7 @@ class PaperExecutor:
         return Fill(tokens=tokens, sol=max(0.0, out - self._costs()))
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:
-        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct)
+        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct, urgent=False)
         return await self.jupiter.out_ui(q)
 
 
@@ -398,5 +472,6 @@ class LiveExecutor:
         return fill
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:
-        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct)
+        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct,
+                                     urgent=False)  # only prices the position
         return await self.jupiter.out_ui(q)

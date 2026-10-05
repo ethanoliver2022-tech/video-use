@@ -180,7 +180,7 @@ class FakeJupiter:
     def __init__(self, back_ratio):
         self.back_ratio = back_ratio
 
-    async def quote(self, i, o, amount, slip):
+    async def quote(self, i, o, amount, slip, urgent=True):
         return {"in": i, "amount": amount}
 
     async def out_ui(self, q):

@@ -130,7 +130,8 @@ in `.env` on the server, then run `docker compose up -d` to apply it.
 | `TELEGRAM_BOT_TOKEN` | The bot itself | Free |
 | `SOLANA_RPC_URL` | Fast, reliable trading. The public RPC is fine for paper testing but too slow and rate-limited for live trades | Helius and others have free tiers; paid plans for heavy use |
 | `PUMPPORTAL_API_KEY` | The live trade stream: instant prices, instant dev-dump detection, KOL and sell-pressure exits, bundle detection in the confirmation window, and **copy trading** | PumpPortal bills the wallet linked to your key per message received (0.01 SOL per 10,000 at the time of writing), and requires that wallet to hold at least 0.02 SOL. Check pumpportal.fun for current pricing |
-| `JUPITER_API_KEY` | Jupiter's supported API (`api.jup.ag`). The keyless API still works today but is being retired | Free key from portal.jup.ag |
+| `JUPITER_API_KEY` | Faster Jupiter quotes and swaps (`api.jup.ag`). Without it the bot uses the keyless API, and moves itself to `api.jup.ag` (slower, keyless) if Jupiter retires that | Free key from portal.jup.ag (recommended) |
+| `JUPITER_RPM` | Only on a paid Jupiter plan: its requests per minute. The bot paces Jupiter to your plan's limit and keeps it free for buys and sells first | Your Jupiter plan |
 
 Without a PumpPortal key the bot still runs fully: it reads pump.fun prices and
 graduations straight from the bonding curve on-chain, and detects dev dumps by

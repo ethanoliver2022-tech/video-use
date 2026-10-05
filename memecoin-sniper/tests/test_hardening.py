@@ -449,7 +449,7 @@ async def test_live_sell_falls_back_to_jupiter_only_when_building_fails():
     ex._pumpportal_tx = pp
 
     class J:
-        async def quote(self, i, o, amt, slip, raw_amount=None):
+        async def quote(self, i, o, amt, slip, raw_amount=None, urgent=True):
             calls.append(raw_amount)
             return {}
 

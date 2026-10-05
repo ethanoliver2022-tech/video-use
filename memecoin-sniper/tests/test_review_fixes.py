@@ -1104,3 +1104,87 @@ async def test_migration_of_a_held_token_is_not_bought_back(tmp_path):
                                      route="pump"))
     assert eng.queue.qsize() == 1
     await eng.http.aclose()
+
+
+async def test_jupiter_moves_off_the_retired_lite_api():
+    import httpx
+    from sniper.execution.executors import Jupiter
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        if req.url.host == "lite-api.jup.ag":
+            return httpx.Response(410, text="gone")
+        return httpx.Response(200, json={"outAmount": "5", "outputMint": "M"})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    jup = Jupiter("https://lite-api.jup.ag/swap/v1", None, http)
+    jup._decimals["M"] = 0
+    sol_mint = "So11111111111111111111111111111111111111112"
+    q = await jup.quote(sol_mint, "M", 1.0, 20)
+    assert q["outAmount"] == "5" and jup.api == "https://api.jup.ag/swap/v1"
+    await jup.quote(sol_mint, "M", 1.0, 20)
+    assert hosts == ["lite-api.jup.ag", "api.jup.ag", "api.jup.ag"]  # switched for good
+
+    def down(req):
+        if req.url.host == "lite-api.jup.ag":
+            raise httpx.ConnectError("no such host")
+        return httpx.Response(200, json={"swapTransaction": "AA=="})
+    jup2 = Jupiter("https://lite-api.jup.ag/swap/v1", None,
+                   httpx.AsyncClient(transport=httpx.MockTransport(down)))
+    assert await jup2.swap_tx({}, "U", 0.001) == b"\x00"
+
+    def keyed(req):  # a paid endpoint's errors are never "retired": no silent switch
+        return httpx.Response(403, text="bad key")
+    jup3 = Jupiter("https://api.jup.ag/swap/v1", None,
+                   httpx.AsyncClient(transport=httpx.MockTransport(keyed)), "k")
+    with pytest.raises(RuntimeError, match="403"):
+        await jup3.swap_tx({}, "U", 0.001)
+    await http.aclose()
+
+
+async def test_jupiter_keeps_its_rate_limit_for_trades():
+    import httpx
+    from sniper.execution.executors import Jupiter, JupiterBusy
+    calls = []
+
+    def handler(req):
+        calls.append(req.url.path)
+        return httpx.Response(200, json={"outAmount": "5", "outputMint": "M"})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    jup = Jupiter("https://lite-api.jup.ag/swap/v1", None, http, requests_per_minute=10)
+    jup._decimals["M"] = 0
+    sol = "So11111111111111111111111111111111111111112"
+    for _ in range(5):  # background lookups get half the budget...
+        await jup.quote(sol, "M", 1.0, 20, urgent=False)
+    with pytest.raises(JupiterBusy):  # ...then are skipped, not queued
+        await jup.quote(sol, "M", 1.0, 20, urgent=False)
+    for _ in range(5):  # trades still have the rest, at once
+        await jup.quote(sol, "M", 1.0, 20)
+    assert len(calls) == 10
+    await http.aclose()
+
+
+async def test_rate_limited_trade_quote_is_retried():
+    import httpx
+    from sniper.execution.executors import Jupiter
+    answers = [429, 200]
+
+    def handler(req):
+        code = answers.pop(0)
+        return httpx.Response(code, json={"outAmount": "5", "outputMint": "M"})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    jup = Jupiter("https://api.jup.ag/swap/v1", None, http, "key")
+    jup._decimals["M"] = 0
+    q = await jup.quote("So11111111111111111111111111111111111111112", "M", 1.0, 20)
+    assert q["outAmount"] == "5" and not answers
+    await http.aclose()
+
+
+def test_jupiter_budget_matches_the_plan(monkeypatch):
+    from sniper.execution.executors import Jupiter
+    monkeypatch.delenv("JUPITER_RPM", raising=False)
+    assert Jupiter("https://lite-api.jup.ag/swap/v1", None, None).budget() == 60
+    assert Jupiter("https://api.jup.ag/swap/v1", None, None).budget() == 30   # keyless
+    assert Jupiter("https://api.jup.ag/swap/v1", None, None, "k").budget() == 60
+    monkeypatch.setenv("JUPITER_RPM", "600")  # a paid plan
+    assert Jupiter("https://api.jup.ag/swap/v1", None, None, "k").budget() == 600
