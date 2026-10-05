@@ -43,7 +43,24 @@ CURVE_TTL = 15 * 60          # forget bonding-curve snapshots of tokens we don't
 ATA_RENT_SOL = 0.0025        # rent for a new token account, roughly
 ORDER_POLL_SECONDS = 3
 MAX_OPEN_ORDERS = 20
+CURVE_MISSES_BEFORE_MIGRATED = 5  # consecutive "no curve account" reads before giving up on it
+MIN_RENT_LAMPORTS = 890_880       # a SOL account can't be left between 0 and this
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
+
+
+def keyword_hit(text: str, keywords: list[str]) -> Optional[str]:
+    """Words of 4+ letters match anywhere ("trump" in "TRUMP2028"); shorter ones must be a
+    whole word, so "ai" matches "AI Agent" but not "pain" or "daisy"."""
+    import re
+    low = text.lower()
+    words = set(re.findall(r"[a-z0-9]+", low))
+    for kw in keywords:
+        k = kw.strip().lower()
+        if not k:
+            continue
+        if (len(k) >= 4 and k in low) or k in words:
+            return kw.strip()
+    return None
 
 
 class Engine:
@@ -94,6 +111,7 @@ class Engine:
         self._tracker_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
         self._orders_running: set[int] = set()
+        self._curve_misses: dict[str, int] = {}
 
         saved_pause = self.store.get_setting("paused")
         self.paused = start_paused if saved_pause is None else saved_pause == "1"
@@ -167,12 +185,10 @@ class Engine:
             c.force = d.dev_snipe_skip_filters
             c.buy_sol = d.dev_snipe_sol or None
             return d.auto_snipe != "off"
-        text = f"{c.name} {c.symbol}".lower()
-        for word in d.snipe_keywords:
-            w = word.strip().lower()
-            if w and w in text:
-                c.trigger = f"keyword:{word.strip()}"
-                return d.auto_snipe != "off"
+        kw = keyword_hit(f"{c.name} {c.symbol}", d.snipe_keywords)
+        if kw:
+            c.trigger = f"keyword:{kw}"
+            return d.auto_snipe != "off"
         return d.auto_snipe == "all"
 
     async def worker(self) -> None:
@@ -280,6 +296,8 @@ class Engine:
         Pubkey.from_string(address)  # validates
         if mode not in ("copy", "alert"):
             raise ValueError("mode must be copy or alert")
+        if not 0 <= buy_sol <= 100:
+            raise ValueError("size per trade must be between 0 and 100 SOL (0 = your buy size)")
         if not self.has_trade_stream:
             raise ValueError("Copy trading and wallet tracking need a PumpPortal API key "
                              "(PUMPPORTAL_API_KEY in .env).")
@@ -472,9 +490,16 @@ class Engine:
             if pos.route == "pump" and not pos.migrated:
                 if quiet or not self.has_trade_stream:
                     curve = await fetch_curve(self.rpc, pos.mint)
-                    if curve is None or curve.complete:
-                        await self.on_migration(pos.mint)  # graduated (or never on a curve)
+                    if curve is None:
+                        # A just-created account can lag on some RPC nodes; only after several
+                        # misses do we conclude the token isn't on a pump.fun curve at all.
+                        n = self._curve_misses[pos.mint] = self._curve_misses.get(pos.mint, 0) + 1
+                        if n >= CURVE_MISSES_BEFORE_MIGRATED:
+                            await self.on_migration(pos.mint)
+                    elif curve.complete:
+                        await self.on_migration(pos.mint)  # graduated
                     else:
+                        self._curve_misses.pop(pos.mint, None)
                         self._set_curve(pos.mint, CurveState(curve.v_sol, curve.v_tokens))
                         pos.update_price(curve.price)
                 if not self.has_trade_stream and pos.creator and self.cfg.exits.exit_on_dev_sell:
@@ -525,8 +550,9 @@ class Engine:
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
                                                 pump=pos.route == "pump", curve=curve)
             except NothingToSell:
+                pos.sol_out += self._estimate_value(pos)
                 pos.tokens_remaining, pos.closed = 0.0, True
-                pos.close_reason = "no tokens left in wallet"
+                pos.close_reason = "no tokens left in wallet (PnL estimated)"
                 self.store.save_position(pos)
                 await self._closed(pos)
                 return f"{esc(pos.symbol)}: nothing left in the wallet; position closed"
@@ -553,8 +579,9 @@ class Engine:
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, pos.mint)
                 if held <= 0:
+                    pos.sol_out += self._estimate_value(pos)
                     pos.tokens_remaining, pos.closed = 0.0, True
-                    pos.close_reason = "sold (confirmed late)"
+                    pos.close_reason = "sold (confirmed late, PnL estimated)"
                     self.store.save_position(pos)
                     await self._closed(pos)
                     return f"{esc(pos.symbol)}: the sell landed late; position closed"
@@ -576,6 +603,11 @@ class Engine:
                                      f"written off.{esc(where)}", logging.ERROR)
         return f"sell failed: {esc(str(err)[:300])}"
 
+    @staticmethod
+    def _estimate_value(pos: Position) -> float:
+        """Best guess of what tokens that left the wallet without a recorded fill sold for."""
+        return max(0.0, pos.tokens_remaining * pos.last_price * 0.97)
+
     async def _closed(self, pos: Position) -> None:
         pnl = pos.realized_pnl_sol
         if pnl < 0:
@@ -588,6 +620,7 @@ class Engine:
                          held_s=round(time.time() - pos.opened_at))
         self.sell_failures.pop(pos.mint, None)
         self._sell_next_try.pop(pos.mint, None)
+        self._curve_misses.pop(pos.mint, None)
         await self.notifier.send(f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
                                  f" — today {self.store.realized_today():+.4f} SOL")
         await self.stream.unwatch_token(pos.mint)
@@ -873,6 +906,10 @@ class Engine:
         lamports = bal_lamports - fee if amount is None else int(round(amount * 1e9))
         if lamports <= 0 or lamports + fee > bal_lamports:
             raise ValueError(f"balance is {bal:.6f} SOL")
+        left = bal_lamports - lamports - fee
+        if 0 < left < MIN_RENT_LAMPORTS:
+            raise ValueError(f"that would leave {left / 1e9:.6f} SOL, below Solana's minimum of "
+                             f"{MIN_RENT_LAMPORTS / 1e9:.6f}. Send a bit less, or use 'all'.")
         tx = transfer_tx(kp, to, lamports, await self.rpc.get_latest_blockhash())
         sig = await self.rpc.send_raw_transaction(bytes(tx))
         confirmed = await self.rpc.confirm(sig)

@@ -208,7 +208,8 @@ async def test_nothing_to_sell_closes_position(tmp_path):
     pos = pump_pos(opened_at=time.time() - 10_000)
     eng.positions["M"] = pos
     await eng.check_exit(pos)
-    assert pos.closed and pos.close_reason == "no tokens left in wallet"
+    assert pos.closed and pos.close_reason == "no tokens left in wallet (PnL estimated)"
+    assert pos.sol_out == pytest.approx(pos.entry_price * 1e6 * 0.97)  # not booked as -100%
     await eng.http.aclose()
 
 
@@ -520,3 +521,112 @@ def test_gecko_skips_quote_tokens_and_uses_the_real_token():
                                "id": "solana_EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}}}},
     ]}
     assert [c.mint for c in parse_gecko_pools("solana", payload)] == ["NEWMINT"]
+
+
+# ---------- third review pass ----------
+
+async def test_missing_curve_needs_several_misses_before_migrating(tmp_path):
+    eng = make_engine(tmp_path, api_key="")
+    mint = wallet()
+    pos = pump_pos(mint)
+    pos.last_update = time.time() - 60
+    eng.positions[mint] = pos
+
+    async def missing(addr):
+        return None
+    eng.rpc.get_account_bytes = missing
+    for _ in range(engine_mod.CURVE_MISSES_BEFORE_MIGRATED - 1):
+        await eng._poll_position(pos)
+    assert not pos.migrated  # a lagging RPC node doesn't flip a fresh token to "graduated"
+    await eng._poll_position(pos)
+    assert pos.migrated
+    await eng.http.aclose()
+
+
+def test_keyword_matching():
+    from sniper.engine import keyword_hit
+    assert keyword_hit("TRUMP2028 coin", ["trump"]) == "trump"
+    assert keyword_hit("AI Agent", ["ai"]) == "ai"
+    assert keyword_hit("pain daisy", ["ai"]) is None       # no substring hits for short words
+    assert keyword_hit("Pepe on Sol", ["  ", "pepe"]) == "pepe"
+
+
+async def test_withdraw_refuses_unrentable_remainder(tmp_path):
+    eng = make_engine(tmp_path)
+    eng.wallet.create()
+
+    async def bal(_):
+        return 1.0
+    eng.rpc.get_balance_sol = bal
+    with pytest.raises(ValueError, match="minimum"):
+        await eng.withdraw(wallet(), 0.9995)  # would leave ~0.0005 SOL
+    await eng.http.aclose()
+
+
+async def test_copy_wallet_size_validated(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    with pytest.raises(ValueError, match="between 0 and 100"):
+        await eng.add_copy_wallet(wallet(), "x", -5)
+    await eng.http.aclose()
+
+
+async def test_pumpportal_slippage_is_a_whole_percent_of_at_least_one():
+    cfg = load_config(None)
+    cfg.trading.slippage_pct = 0.5
+    sent = {}
+
+    class Http:
+        async def post(self, url, data):
+            sent.update(data)
+            return httpx.Response(200, content=b"tx")
+    ex = LiveExecutor(cfg, Keypair(), FakeRpc(), jupiter=None, http=Http(), sender=FakeSender())
+    await ex._pumpportal_tx("buy", "M", 0.1, True)
+    assert sent["slippage"] == 1
+
+
+async def test_telegram_deletes_pasted_private_keys_and_parses_copy_add(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    tg = TelegramControl(eng, "T", "5", eng.http)
+    calls, sent = [], []
+
+    async def api(method, **p):
+        calls.append((method, p))
+        return {"message_id": 1}
+    tg.api = api
+
+    async def capture(text, buttons=None, chat_id=None):
+        sent.append(text)
+    eng.notifier.telegram = capture
+    key = str(Keypair())  # base58 secret, 87-88 chars
+    await tg.handle_update({"message": {"chat": {"id": 5}, "text": key, "message_id": 77}})
+    assert ("deleteMessage", {"chat_id": "5", "message_id": 77}) in calls
+    assert "private key" in sent[-1]
+    assert eng.wallet.keypair() is None  # not imported by accident
+
+    w = wallet()
+    await tg.handle_update({"message": {"chat": {"id": 5}, "text": f"/copy add {w} 0.25",
+                                        "message_id": 78}})
+    cw = eng.copy_wallets()[0]
+    assert cw.buy_sol == 0.25 and cw.label == ""  # a number is a size, not a label
+    await eng.http.aclose()
+
+
+async def test_telegram_ignores_backlog_from_while_offline(tmp_path):
+    eng = make_engine(tmp_path)
+    tg = TelegramControl(eng, "T", "5", eng.http)
+    calls = []
+
+    async def api(method, **p):
+        calls.append((method, p))
+        if method == "getUpdates" and p.get("offset") == -1:
+            return [{"update_id": 41, "callback_query": {"data": "b:X:1"}}]
+        return []
+    tg.api = api
+
+    async def capture(*a, **k):
+        pass
+    eng.notifier.telegram = capture
+    await tg._drop_backlog()
+    assert tg.offset == 42  # the queued "Buy" tap is skipped, never executed
+    assert ("getUpdates", {"offset": 42, "timeout": 0}) in calls
+    await eng.http.aclose()

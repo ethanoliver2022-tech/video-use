@@ -17,7 +17,6 @@ import base64
 import logging
 import random
 import time
-from typing import Optional
 
 import httpx
 from solders.keypair import Keypair

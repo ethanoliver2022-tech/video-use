@@ -461,7 +461,6 @@ async def test_telegram_snipers_orders_and_tracking(tmp_path):
     flat = [d for row in sent[-1][1] for _, d in row]
     assert "sn" in flat and "o" in flat
     await tap("sn")
-    idx = next(i for i, d in enumerate(flat) if d == "sn")
     labels = [label for row in sent[-1][1] for label, _ in row]
     assert any(label.startswith("Snipe mode: all") for label in labels)
     mode_idx = [i for i, s in enumerate(__import__("sniper.settings", fromlist=["SETTINGS"]).SETTINGS)

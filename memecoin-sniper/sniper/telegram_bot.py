@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+SECRET_RE = re.compile(r"^([1-9A-HJ-NP-Za-km-z]{80,90}|\[\s*\d+(\s*,\s*\d+){63}\s*\])$")
 PENDING_TTL = 300
 EXPORT_TTL = 60
 MAX_PAIR_ATTEMPTS = 10   # wrong codes before the pairing code is replaced
@@ -47,7 +48,7 @@ Shortcuts:
 /sell &lt;mint|symbol&gt; [pct]
 /pause, /resume
 /setbuy &lt;sol&gt;
-/copy list | add &lt;wallet&gt; [label] [sol] | rm &lt;wallet&gt;
+/copy list | add &lt;wallet&gt; [label] [sol] [track] | rm &lt;wallet&gt;
 /withdraw &lt;address&gt; &lt;sol|all&gt;
 /block &lt;creator&gt;
 /stats"""
@@ -58,7 +59,7 @@ WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
 1. 💼 <b>Wallet</b> → create a new wallet (or import one)
 2. Send SOL to the deposit address shown
 3. ▶️ <b>Start sniping</b> in 📝 PAPER mode first to see how it trades
-4. When you're happy, tap 🔁 <b>Go LIVE</b>
+4. When you're happy, tap 🔴 <b>Go LIVE</b>
 
 Use a dedicated wallet holding only what you can afford to lose."""
 
@@ -133,6 +134,7 @@ class TelegramControl:
                     ("settings", "Settings"), ("stats", "Performance"), ("help", "Help")]])
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
+        await self._drop_backlog()
         backoff = 5.0
         while True:
             try:
@@ -152,6 +154,24 @@ class TelegramControl:
                     log.warning("telegram poll failed: %s (retry in %.0fs)", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    async def _drop_backlog(self) -> None:
+        """Ignore taps and commands sent while the bot was down. Running a "Buy" tapped an
+        hour ago, or re-running one handled just before a crash, would be dangerous."""
+        for _ in range(3):
+            try:
+                last = await self.api("getUpdates", offset=-1, timeout=0)
+                if last:
+                    self.offset = last[-1]["update_id"] + 1
+                    await self.api("getUpdates", offset=self.offset, timeout=0)  # confirm
+                    log.info("ignored Telegram updates sent while the bot was offline")
+                    if self.owner:
+                        await self.send("ℹ️ Restarted. Anything tapped while I was offline was "
+                                        "ignored for safety: tap /menu to continue.")
+                return
+            except Exception as e:
+                log.debug("backlog drop failed: %s", e)
+                await asyncio.sleep(2)
 
     # ---------- routing ----------
 
@@ -183,6 +203,14 @@ class TelegramControl:
             await self._try_pair(chat, text)
             return
         if chat != self.owner:
+            return
+        if SECRET_RE.match(text) and not (self.pending and self.pending["kind"] == "import"):
+            try:
+                await self.api("deleteMessage", chat_id=self.owner, message_id=msg.get("message_id"))
+            except Exception:
+                pass
+            await self.send("🔐 That looked like a private key, so I deleted it. To import a "
+                            "wallet use 💼 Wallet → 📥 Import, then send it.")
             return
         if self.pending and not text.startswith("/"):
             if time.time() > self.pending["expires"]:
@@ -431,7 +459,7 @@ class TelegramControl:
         kp = e.wallet.keypair()
         mode = "🔴 LIVE" if e.live else "📝 PAPER"
         state = "⏸ paused" if e.paused else "▶️ sniping"
-        lines = [f"🎯 <b>Memecoin Sniper</b>", f"{mode} · {state} · preset <b>{e.cfg.preset}</b>"]
+        lines = ["🎯 <b>Memecoin Sniper</b>", f"{mode} · {state} · preset <b>{e.cfg.preset}</b>"]
         if kp:
             bal = await self._balance(str(kp.pubkey()))
             lines.append(f"💼 <code>{kp.pubkey()}</code>\n💰 {bal}")
@@ -671,7 +699,10 @@ class TelegramControl:
         cur = get_value(self.engine.cfg, s.key)
         if s.kind == "bool":
             await self.engine.set_setting(s.key, not cur)
-            await self.settings_group(group_of(s), msg_id)
+            if s.key == "copytrade.enabled":
+                await self.copy_menu(msg_id)
+            else:
+                await self.settings_group(group_of(s), msg_id)
             return
         if s.kind == "choice":  # cycle through the options
             nxt = s.options[(s.options.index(cur) + 1) % len(s.options)] if cur in s.options \
@@ -734,8 +765,12 @@ class TelegramControl:
             mode = "copy"
             if rest[-1].lower() in ("track", "alert"):
                 mode, rest = "alert", rest[:-1]
-            label = rest[1] if len(rest) > 1 else ""
-            sol = float(rest[2]) if len(rest) > 2 else 0.0
+            label, sol = "", 0.0
+            for tok in rest[1:]:
+                try:
+                    sol = float(tok.replace("SOL", ""))
+                except ValueError:
+                    label = tok
             await e.add_copy_wallet(rest[0], label, sol, mode=mode)
             await self.send(f"{'🔔 Tracking' if mode == 'alert' else '👥 Copying'} "
                             f"{html.escape(label or rest[0])}")

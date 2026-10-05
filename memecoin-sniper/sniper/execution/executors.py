@@ -150,7 +150,7 @@ class LiveExecutor:
             "mint": mint,
             "amount": amount,
             "denominatedInSol": "true" if in_sol else "false",
-            "slippage": int(self.cfg.trading.slippage_pct),
+            "slippage": max(1, round(self.cfg.trading.slippage_pct)),
             "priorityFee": await self.sender.priority_fee(),
             "pool": "auto",
         })

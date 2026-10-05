@@ -71,7 +71,6 @@ def test_take_profit_ladder_folds_levels():
 
 
 def test_partial_leaving_dust_becomes_full_exit():
-    cfg = ExitConfig(take_profit=[])
     p = pos(tokens_remaining=30)
     d = exits._partial(p, 20, "x")
     assert d.sell_all and d.tokens == 30

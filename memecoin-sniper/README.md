@@ -222,6 +222,12 @@ Built to run unattended:
 - **Memory stays flat** however long it runs, and nothing polls while paused.
 - **Secrets stay out of messages.** RPC URLs and the bot token never appear in
   logs or Telegram errors, and token names are escaped so they can't inject links.
+  A private key pasted into the chat outside the import flow is deleted at once.
+- **Nothing runs twice after a restart.** Buttons tapped or commands sent while
+  the bot was offline are ignored on startup, so an old "Buy" tap never fires late.
+- **No false "graduated" calls.** A brand-new token whose bonding curve an RPC
+  node hasn't indexed yet keeps being priced from the curve, instead of being
+  written off as dead.
 
 ## Not included (and why)
 
@@ -244,12 +250,12 @@ Built to run unattended:
   learning while paused).
 - No web dashboard; Telegram is the UI.
 - EVM chains are alert-only (capped at 20 alerts an hour).
-- The trading code has been tested offline (94 tests) and the Docker image has
+- The trading code has been tested offline (101 tests) and the Docker image has
   been built and run, but it hasn't placed real trades against mainnet yet.
   Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 94 tests, no network needed
+pip install -e '.[dev]' && pytest     # 101 tests, no network needed
 ```
