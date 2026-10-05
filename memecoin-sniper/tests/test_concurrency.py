@@ -142,3 +142,33 @@ async def test_racing_actions_on_the_same_tokens_keep_books_balanced(tmp_path):
         total_sells += sells
         await eng.http.aclose()
     assert total_sells >= 30, total_sells
+
+
+async def test_a_failing_notification_never_breaks_a_sell(tmp_path):
+    import tests.test_chaos as chaos
+    eng = chaos.build(tmp_path, random.Random(1))
+    eng.cfg.trading.max_open_positions = 50
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.05, force=True)
+    assert m in eng.positions
+
+    class Boom:
+        async def post(self, *a, **k):
+            raise RuntimeError("event loop is closing")  # not an httpx error
+    from sniper.notify import Notifier
+    eng.notifier = Notifier(Boom(), "T", "1")
+    unwatched = []
+
+    async def unwatch(mint):
+        unwatched.append(mint)
+    eng.stream.unwatch_token = unwatch
+
+    async def sell(mint, tokens, sell_all, pump, curve, slippage_pct=None):
+        return Fill(tokens=tokens, sol=0.04, signature="S")
+    eng.executor.sell = sell
+    res = await eng.manual_sell(m, 100)
+    assert res.startswith("🔴"), res
+    assert eng.positions[m].closed
+    assert [c["mint"] for c in eng.store.events("close")] == [m]  # bookkeeping completed
+    assert unwatched == [m]
+    await eng.http.aclose()

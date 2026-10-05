@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
 from typing import Optional
 
 import httpx
 
 log = logging.getLogger("sniper")
+# a self-hosted Telegram Bot API server can be used instead of Telegram's own
+TELEGRAM_API = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
 
 Buttons = list[list[tuple[str, str]]]  # rows of (label, callback_data)
 
@@ -44,12 +47,23 @@ class Notifier:
 
     async def telegram(self, text: str, buttons: Optional[Buttons] = None,
                        chat_id: Optional[str] = None) -> None:
+        """Never raises: a notification failing must never interrupt trading (sells notify
+        before they finish their bookkeeping)."""
+        try:
+            await self._telegram(text, buttons, chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("telegram send failed: %r", e)
+
+    async def _telegram(self, text: str, buttons: Optional[Buttons] = None,
+                        chat_id: Optional[str] = None) -> None:
         payload = {"chat_id": chat_id or self.chat, "text": text[:4000],
                    "disable_web_page_preview": True, "parse_mode": "HTML"}
         markup = keyboard(buttons)
         if markup:
             payload["reply_markup"] = markup
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        url = f"{TELEGRAM_API}/bot{self.token}/sendMessage"
         async with self._lock:
             for _ in range(3):
                 try:
@@ -60,9 +74,9 @@ class Notifier:
                 if resp.status_code == 429:  # rate limited: wait as told, then retry
                     try:
                         wait = float(resp.json().get("parameters", {}).get("retry_after", 1))
-                    except ValueError:
+                    except (ValueError, TypeError, AttributeError):  # body isn't Telegram's JSON
                         wait = 1.0
-                    await asyncio.sleep(min(wait, 30))
+                    await asyncio.sleep(min(max(wait, 0.5), 30) if wait == wait else 1.0)
                     continue
                 if resp.status_code == 400 and "parse_mode" in payload:
                     payload.pop("parse_mode")   # bad HTML: resend as plain text

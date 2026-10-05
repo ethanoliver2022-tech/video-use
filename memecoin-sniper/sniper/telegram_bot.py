@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
+from .notify import TELEGRAM_API
 from .settings import BY_KEY, GROUPS, SETTINGS, format_value, get_value, group_of
 
 if TYPE_CHECKING:
@@ -84,7 +85,7 @@ class TelegramControl:
 
     async def api(self, method: str, **params):
         try:
-            resp = await self.http.post(f"https://api.telegram.org/bot{self.token}/{method}",
+            resp = await self.http.post(f"{TELEGRAM_API}/bot{self.token}/{method}",
                                         json=params, timeout=35)
         except httpx.HTTPError as e:
             raise TelegramError(f"{method}: {type(e).__name__}") from None
@@ -118,8 +119,6 @@ class TelegramControl:
         await self.send(text, buttons)
 
     async def run(self) -> None:
-        if self.pair_code:
-            log.warning("📱 Telegram not paired yet. Send this to your bot:  /start %s", self.pair_code)
         try:
             me = await self.api("getMe")
             log.info("telegram bot @%s ready", (me or {}).get("username", "?"))
@@ -136,6 +135,8 @@ class TelegramControl:
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
         await self._drop_backlog()
+        if self.pair_code:  # only now: a code sent from here on is never dropped as backlog
+            log.warning("📱 Telegram not paired yet. Send this to your bot:  /start %s", self.pair_code)
         backoff = 5.0
         while True:
             try:
