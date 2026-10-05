@@ -44,6 +44,19 @@ discovery:
   dev_watchlist: []             # dev wallets whose next pump.fun launch to buy instantly
   dev_snipe_sol: 0              # size for watched-dev snipes (0 = buy_amount_sol)
   dev_snipe_skip_filters: true
+  # Momentum scanner: Solana tokens pumping right now (free GeckoTerminal + DexScreener data,
+  # ~10-30s behind the chain). Switch on/off any time from Telegram's main menu (🚀 Momentum).
+  momentum_enabled: false
+  momentum_action: alert          # alert = just tell me | buy = also buy (filters still apply)
+  momentum_poll_seconds: 30
+  momentum_min_change_5m_pct: 25  # price up at least this much in the last 5 minutes
+  momentum_min_volume_5m_usd: 10000
+  momentum_min_buyers_5m: 25
+  momentum_min_buy_ratio: 1.5     # buys at least this many times sells
+  momentum_min_liquidity_usd: 10000
+  momentum_buy_sol: 0             # buy size in buy mode (0 = buy_amount_sol)
+  momentum_alerts_per_hour: 20
+  momentum_repeat_minutes: 120    # don't signal the same token again for this long
 
 copytrade:                      # needs PUMPPORTAL_API_KEY in .env
   enabled: false

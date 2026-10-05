@@ -76,6 +76,19 @@ class DiscoveryConfig:
     dev_watchlist: list[str] = field(default_factory=list)   # buy these devs' next launch
     dev_snipe_sol: float = 0.0             # size for watched-dev snipes (0 = buy_amount_sol)
     dev_snipe_skip_filters: bool = True    # you trust these devs: skip filters for speed
+    # momentum scanner: Solana tokens pumping right now (free GeckoTerminal + DexScreener
+    # data, ~10-30s behind the chain). Off until you switch it on (Telegram main menu).
+    momentum_enabled: bool = False
+    momentum_action: str = "alert"         # alert = tell me | buy = also buy (filters still run)
+    momentum_poll_seconds: int = 30
+    momentum_min_change_5m_pct: float = 25.0     # price up at least this much in 5 minutes
+    momentum_min_volume_5m_usd: float = 10_000.0
+    momentum_min_buyers_5m: int = 25
+    momentum_min_buy_ratio: float = 1.5          # buys at least this many times sells (5m)
+    momentum_min_liquidity_usd: float = 10_000.0 # enough to get back out
+    momentum_buy_sol: float = 0.0                # buy size in buy mode (0 = buy_amount_sol)
+    momentum_alerts_per_hour: int = 20
+    momentum_repeat_minutes: int = 120           # don't signal the same token again for this long
 
 
 @dataclass

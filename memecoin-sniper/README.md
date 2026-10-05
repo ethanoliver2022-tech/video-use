@@ -20,6 +20,7 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 💸 **Auto priority fee** | Pays a percentile of the network's recent priority fees, with a floor and a cap. | "Auto fee" |
 | 🎯 **Multi-chain discovery** | pump.fun launches and graduations (live websocket), plus new pools on Solana, Base, BSC and ETH from GeckoTerminal and DexScreener. | Photon/BullX "new pairs" |
 | 🎯 **Targeted snipers** | Three modes: snipe every launch that passes your filters, only *targeted* launches, or off. Targeted means a watchlist of devs whose next pump.fun launch is bought instantly, plus keywords matched in the name or ticker. | Banana Gun / Maestro "dev sniper", Trojan "auto-snipe" |
+| 🚀 **Momentum scanner** | On/off with one tap. Finds Solana tokens pumping right now (5-minute price rise, volume, more buyers than sellers, enough liquidity) from free GeckoTerminal + DexScreener data, and alerts you with buy buttons, or buys them itself through your normal filters and limits. | Photon / GMGN "trending", BullX "pump vision" |
 | 👥 **Copy trading** | Mirrors buys from wallets you follow, can follow their sells out, and sets a size per wallet. Wallets can be added or removed live from Telegram. | GMGN/Trojan copy trade |
 | 🔔 **Wallet tracker** | Alerts you when a tracked wallet buys or sells, with one-tap Buy and Token-card buttons, without copying anything. Switch any wallet between track and copy with one tap. | GMGN / Cielo wallet tracking |
 | 📋 **Limit orders** | Buy on a dip or a breakout, or sell at a profit or a custom stop. They expire on their own, survive restarts, and are created and cancelled from Telegram. | Trojan / Photon / BullX limit orders |
@@ -180,6 +181,7 @@ trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 | See or cancel orders | 📋 Orders → ✖️ Cancel |
 | Snipe only certain devs or narratives | 🎯 Snipers → Snipe mode: targeted → set Dev watchlist / Keywords |
 | Get your SOL back at 2x, keep a moonbag | ⚙️ Settings → 🚪 Exits → Sell initials at `100`, Moonbag `10` |
+| Catch tokens pumping right now | Main menu → 🚀 Momentum (one tap on/off, or `/momentum on`). Tune it in ⚙️ Settings → 🚀 Momentum; set "On a signal" to `buy` to have it buy too |
 | Copy a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] [sol]` |
 | Just watch a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] track`, or `/track <address> [label]` |
 | Stop everything | ⏸ Pause sniping (open positions are still managed and exited) |
@@ -326,6 +328,9 @@ Built to run unattended:
 
 ## Known limitations
 
+- The momentum scanner uses free data that runs about 10–30 seconds behind the chain,
+  so it catches pumps already in motion, not their first second. Buying into a pump means
+  buying from earlier buyers: keep momentum buys small, with a tight stop loss.
 - Copy trading sees pump.fun and PumpSwap trades from PumpPortal, and needs a
   PumpPortal API key. A followed wallet trading on other DEXes isn't seen.
 - Dev reputation only knows about launches seen while the bot was running.

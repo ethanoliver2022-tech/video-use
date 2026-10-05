@@ -52,6 +52,7 @@ Shortcuts:
 /copy list | add &lt;wallet&gt; [label] [sol] [track] | rm &lt;wallet&gt;
 /withdraw &lt;address&gt; &lt;sol|all&gt;
 /block &lt;creator&gt;
+/momentum on | off (tokens pumping right now)
 /stats"""
 
 WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
@@ -326,6 +327,12 @@ class TelegramControl:
         elif cmd == "/block" and args:
             e.store.block(args[0], "manual")
             await self.send(f"🚫 blocked {html.escape(args[0])}")
+        elif cmd == "/momentum":
+            if args and args[0].lower() in ("on", "off"):
+                await self.send("🚀 " + html.escape(await e.set_setting(
+                    "discovery.momentum_enabled", args[0].lower() == "on")))
+            else:
+                await self.settings_group("momentum")
         elif cmd == "/stats":
             await self.stats()
         else:
@@ -388,6 +395,9 @@ class TelegramControl:
         elif head == "bc":
             self._ask("buy_custom", rest)
             await self.send("Send the amount of SOL to buy:", [[("✖️ Cancel", "x")]])
+        elif data == "mo":  # one-tap on/off from the main menu
+            await e.set_setting("discovery.momentum_enabled", not e.cfg.discovery.momentum_enabled)
+            await self.main_menu(msg_id)
         elif data == "st":
             await self.stats()
         elif data == "w":
@@ -522,6 +532,9 @@ class TelegramControl:
                  "targeted": f"targeted ({len(d.dev_watchlist)} devs, {len(d.snipe_keywords)} keywords)",
                  "off": "off (manual, copy and limit orders only)"}.get(d.auto_snipe, d.auto_snipe)
         lines.append(f"🎯 Auto-snipe: {snipe}")
+        if d.momentum_enabled:
+            lines.append("🚀 Momentum scanner: on ("
+                         + ("auto-buy" if d.momentum_action == "buy" else "alerts") + ")")
         orders = len(e.store.open_orders())
         if orders:
             lines.append(f"📋 {orders} open limit order(s)")
@@ -540,7 +553,8 @@ class TelegramControl:
             [("🎯 Snipers", "sn"), ("📋 Orders", "o")],
             [("👥 Copy & track", "c"), ("⚙️ Settings", "set")],
             [("📈 Stats", "st"), switch],
-            [("🔄 Refresh", "m")],
+            [("🚀 Momentum: " + ("✅ on" if d.momentum_enabled else "off"), "mo"),
+             ("🔄 Refresh", "m")],
         ], msg_id)
 
     async def _balance(self, address: str) -> str:

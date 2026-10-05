@@ -22,6 +22,7 @@ from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
 from .notify import Notifier
 from .pump_curve import fetch_curve
 from .safety import SafetyChecker
+from .scanners.momentum import MomentumScanner, MomentumSignal, age_text
 from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
 from .scanners.pumpportal import PumpPortalStream, trade_price
 from .settings import (BY_KEY, apply_overrides, apply_setting, format_value, parse_value,
@@ -164,6 +165,8 @@ class Engine:
         self._orders_running: set[int] = set()
         self._curve_misses: dict[str, int] = {}
         self._quoted_at: dict[str, float] = {}  # mint -> monotonic time of its last price quote
+        self._momentum_seen: dict[str, float] = {}  # mint -> monotonic time it was last signalled
+        self._momentum_alerts: deque[float] = deque()
 
         saved_pause = self.store.get_setting("paused")
         self.paused = start_paused if saved_pause is None else saved_pause == "1"
@@ -495,6 +498,50 @@ class Engine:
                    [("🔍 Token card", f"tc:{mint}")]]
         await self.notifier.send(f"🔔 {icon} <b>{name}</b> {'bought' if side == 'buy' else 'sold'} "
                                  f"{sol:.3f} SOL of <code>{mint}</code>", buttons=buttons)
+
+    # ---------- momentum ----------
+
+    async def on_momentum(self, sig: MomentumSignal) -> None:
+        """A token pumping right now (from the momentum scanner): tell the owner, and in buy
+        mode also try to buy it through the normal filters and risk limits."""
+        import dataclasses
+        d = self.cfg.discovery
+        now = time.monotonic()
+        last = self._momentum_seen.get(sig.mint)
+        if last is not None and now - last < d.momentum_repeat_minutes * 60:
+            return  # already signalled: one message per run, not one every scan
+        held = self.positions.get(sig.mint)
+        if held and not held.closed:
+            return  # you're already in it
+        c = Candidate(chain="solana", mint=sig.mint, source="momentum", symbol=sig.symbol,
+                      name=sig.name, liquidity_usd=sig.liquidity_usd, fdv_usd=sig.market_cap_usd,
+                      route="pump" if sig.pump_route else "jupiter", url=sig.url,
+                      buy_sol=d.momentum_buy_sol or None, trigger="momentum")
+        # the name / creator blocklists apply to signals too (size limits only to buys)
+        if not self.safety.quick_check(dataclasses.replace(c, liquidity_usd=None, fdv_usd=None)):
+            return
+        if not self._alert_allowed(self._momentum_alerts, d.momentum_alerts_per_hour):
+            return
+        self._momentum_seen[sig.mint] = now
+        buying = d.momentum_action == "buy" and not self.paused and not self.scan_only
+        buyers = (f"{sig.buyers_5m} buyers" if sig.buyers_5m is not None
+                  else f"{sig.buys_5m} buys") + f" / {sig.sells_5m} sells"
+        mc = f" · MC ${sig.market_cap_usd:,.0f}" if sig.market_cap_usd else ""
+        note = (" — buying (filters running)" if buying else
+                " — buy mode is paused" if d.momentum_action == "buy" else "")
+        text = (f"🚀 <b>Momentum: {esc(sig.symbol)}</b> +{sig.change_5m:.0f}% in 5m{note}\n"
+                f"Vol 5m ${sig.volume_5m:,.0f} · {buyers} · liq ${sig.liquidity_usd or 0:,.0f}"
+                f"{mc} · age {age_text(sig.created_at)}\n<code>{sig.mint}</code>")
+        buttons = [[(f"Buy {a:g}", f"b:{sig.mint}:{a:g}") for a in (0.05, 0.1, 0.25)],
+                   [("🔍 Token card", f"tc:{sig.mint}"), ("📈 Chart", sig.url)]]
+        await self.notifier.send(text, buttons=buttons)
+        if buying:
+            self._spawn(self._momentum_buy(c))
+
+    async def _momentum_buy(self, c: Candidate) -> None:
+        result = await self.handle_candidate(c) or ""
+        if not result.startswith("🟢"):  # bought: the BUY message already went out
+            await self.notifier.send(f"🚀 {esc(c.symbol)} not bought: {result}")  # already escaped
 
     # ---------- entries ----------
 
@@ -1549,6 +1596,11 @@ class Engine:
             if mint not in held and now - ts > CURVE_TTL:
                 self.curves.pop(mint, None)
                 del self._curve_ts[mint]
+        repeat = self.cfg.discovery.momentum_repeat_minutes * 60
+        mono = time.monotonic()
+        for mint, ts in list(self._momentum_seen.items()):
+            if mono - ts > repeat:
+                del self._momentum_seen[mint]
         for mint in [m for m, p in self.positions.items() if p.closed]:
             lock = self.sell_locks.get(mint)
             if not (lock and lock.locked()):
@@ -1663,6 +1715,10 @@ class Engine:
             dex = DexScreenerScanner(e.dexscreener_api, d.dexscreener_poll_seconds,
                                      self.on_candidate, self.http, active=self._scanning)
             loops.append(("dexscreener", dex.run))
+        # always running, idle until switched on (Telegram main menu → 🚀 Momentum)
+        momentum = MomentumScanner(d, e.geckoterminal_api, e.dexscreener_api, self.http,
+                                   self.on_momentum)
+        loops.append(("momentum", momentum.run))
         loops += [(f"worker{i}", self.worker) for i in range(CANDIDATE_WORKERS)]
         if tg:
             loops.append(("telegram", tg.run))

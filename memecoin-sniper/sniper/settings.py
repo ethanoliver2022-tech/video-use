@@ -76,6 +76,20 @@ SETTINGS: list[Setting] = [
     Setting("speed.jito_tip_sol", "Jito tip", "float", 0.00001, 0.1, "SOL"),
     Setting("speed.auto_priority_fee", "Auto priority fee", "bool"),
     Setting("speed.max_priority_fee_sol", "Max priority fee", "float", 0, 0.1, "SOL"),
+    # momentum scanner
+    Setting("discovery.momentum_enabled", "Momentum scanner", "bool",
+            help="alert on Solana tokens pumping right now (free data, ~10-30s behind)"),
+    Setting("discovery.momentum_action", "On a signal", "choice", options=("alert", "buy"),
+            help="alert = just tell me; buy = also buy it (your filters and limits still apply)"),
+    Setting("discovery.momentum_min_change_5m_pct", "Min rise in 5 min", "float", 5, 10000, "%"),
+    Setting("discovery.momentum_min_volume_5m_usd", "Min 5-min volume", "float", 0, 1e9, "$"),
+    Setting("discovery.momentum_min_buyers_5m", "Min buyers in 5 min", "int", 0, 100000),
+    Setting("discovery.momentum_min_buy_ratio", "Min buys per sell", "float", 0.5, 100),
+    Setting("discovery.momentum_min_liquidity_usd", "Min liquidity", "float", 0, 1e9, "$"),
+    Setting("discovery.momentum_buy_sol", "Momentum buy size", "float", 0, 100, "SOL",
+            help="0 = your normal buy size"),
+    Setting("discovery.momentum_alerts_per_hour", "Max signals per hour", "int", 1, 500),
+    Setting("discovery.momentum_poll_seconds", "Check every", "int", 15, 3600, "s"),
     # copy trade
     Setting("copytrade.enabled", "Copy trading", "bool"),
     Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL"),
@@ -87,6 +101,7 @@ GROUPS = {
     "exits": "🚪 Exits",
     "entry": "🔍 Entry & filters",
     "speed": "⚡ Speed",
+    "momentum": "🚀 Momentum",
     "copytrade": "👥 Copy trade",
 }
 
@@ -99,6 +114,8 @@ SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev
 def group_of(s: Setting) -> str:
     if s.key in SNIPE_KEYS:
         return "snipe"
+    if s.key.startswith("discovery.momentum_"):
+        return "momentum"
     section = s.key.split(".")[0]
     return "entry" if section in ("entry", "filters", "discovery") else section
 
