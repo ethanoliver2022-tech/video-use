@@ -248,9 +248,12 @@ def load_config(path: str | os.PathLike | None = None, preset: str | None = None
             raise SystemExit(f"{path} is not valid YAML, fix it and restart:\n{e}") from None
         if not isinstance(raw, dict):
             raise SystemExit(f"{path} should contain settings like 'trading:', not {type(raw).__name__}")
-    name = preset or raw.get("preset", "balanced")
+    name = preset or raw.get("preset") or "balanced"  # a bare 'preset:' means the default
     if name not in PRESETS:
-        raise ValueError(f"unknown preset '{name}' (choose from {', '.join(PRESETS)})")
+        choices = ", ".join(PRESETS)
+        if preset:  # passed in by code
+            raise ValueError(f"unknown preset '{name}' (choose from {choices})")
+        raise SystemExit(f"unknown preset '{name}' in {path} (choose from {choices})")
     raw = _deep_merge(PRESETS[name], raw)
     raw["preset"] = name
     cfg: Config = _build(Config, raw)

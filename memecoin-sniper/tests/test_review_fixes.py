@@ -776,3 +776,207 @@ async def test_clock_step_shift_is_saved(tmp_path, monkeypatch):
     saved = [p for p in eng.store.open_positions() if p.mint == pos.mint][0]
     assert saved.opened_at > opened + 3000  # a restart keeps the corrected time
     await eng.http.aclose()
+
+
+# ---------- sixth review ----------
+
+async def test_full_exit_splits_proceeds_with_an_old_bag(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    mine = pos.tokens_remaining
+    eng._set_leftover(pos.mint, mine * 4)  # the wallet also holds 4x as many old tokens
+
+    async def sell(*a, **k):
+        return Fill(tokens=mine * 5, sol=1.0, signature="S", emptied=True)
+    eng.executor.sell = sell
+    await eng.manual_sell(pos.mint, 100)
+    assert abs(pos.sol_out - 0.2) < 1e-9  # only this position's fifth
+    assert eng._known_leftover(pos.mint) == 0
+    await eng.http.aclose()
+
+
+async def test_slow_buy_prices_never_delay_a_stop_order(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.update_price(pos.entry_price * 0.5)
+    gate = asyncio.Event()
+
+    async def slow_price(mint):
+        await gate.wait()
+    eng.price_of = slow_price
+    eng.store.add_order(str(Keypair().pubkey()), "buy", 0.1, 0, 1.0, ">=", 1.0, 1e12)
+    stop = eng.store.add_order(pos.mint, "sell", 0, 100, pos.entry_price * 0.8, "<=",
+                               pos.entry_price, 1e12)
+    task = asyncio.create_task(eng.check_orders())
+    await asyncio.sleep(0.05)
+    status = eng.store.db.execute("SELECT status FROM orders WHERE id = ?", (stop,)).fetchone()[0]
+    assert status != "open"  # triggered while the buy's price is still pending
+    gate.set()
+    await task
+    await eng.settle()
+    await eng.http.aclose()
+
+
+async def test_paper_buy_never_uses_a_stale_launch_curve(tmp_path, monkeypatch):
+    from sniper.execution.executors import CurveState
+    from sniper.models import Candidate
+    import sniper.engine as em
+    eng = engine(tmp_path)
+    m = str(Keypair().pubkey())
+    eng._set_curve(m, CurveState(30.0, 1.07e9))
+    eng._curve_ts[m] -= 600  # the launch snapshot, 10 minutes old
+    seen = []
+
+    async def buy(c, sol, curve):
+        seen.append(curve)
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+    eng.executor.buy = buy
+
+    class Fresh:
+        v_sol, v_tokens, complete = 600.0, 5.3e7, False
+    async def fetch(rpc, mint):
+        return Fresh()
+    monkeypatch.setattr(em, "fetch_curve", fetch)
+    await eng.try_buy(Candidate(chain="solana", mint=m, source="manual", route="pump", force=True))
+    assert seen and seen[0].v_sol == 600.0
+    await eng.http.aclose()
+
+
+async def test_withdraw_with_unknown_outcome_warns_not_to_retry(tmp_path):
+    from solders.hash import Hash
+    eng = engine(tmp_path)
+    eng.wallet.create()
+
+    async def bal(*a):
+        return 1.0
+    async def bh():
+        return Hash.new_unique()
+    async def send(raw):
+        return "SIG"
+    async def confirm(sig):
+        raise RpcError("couldn't confirm: outcome unknown")
+    eng.rpc.get_balance_sol, eng.rpc.get_latest_blockhash = bal, bh
+    eng.rpc.send_raw_transaction, eng.rpc.confirm = send, confirm
+    res = await eng.withdraw(str(Keypair().pubkey()), 0.1)
+    assert "before withdrawing again" in res and eng.store.events("withdraw")
+
+    async def expired(sig):
+        return False
+    eng.rpc.confirm = expired
+    res = await eng.withdraw(str(Keypair().pubkey()), 0.1)
+    assert "didn't go through" in res
+    await eng.http.aclose()
+
+
+def test_peer_address_check():
+    from sniper.intel import _peer_is_public
+
+    class Stream:
+        def __init__(self, ip):
+            self.ip = ip
+
+        def get_extra_info(self, k):
+            return (self.ip, 80)
+
+    class Resp:
+        def __init__(self, ip):
+            self.extensions = {"network_stream": Stream(ip)}
+    assert not _peer_is_public(Resp("169.254.169.254")) and not _peer_is_public(Resp("10.0.0.1"))
+    assert _peer_is_public(Resp("8.8.8.8"))
+
+
+async def test_garbage_tx_from_the_builder_is_a_plain_failure_not_uncertain():
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    from sniper.execution.executors import NotSent
+    from sniper.models import Candidate
+    ex, rpc = live_executor(load_config(None))
+
+    async def pp(*a, **k):
+        return b'{"error": "bad request"}'
+    ex._pumpportal_tx = pp
+
+    def bad_sign(unsigned):
+        raise ValueError("not a transaction")
+    ex._sign = bad_sign
+    with pytest.raises(NotSent):
+        await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+    assert ex.sender.sent == 0
+
+
+async def test_copy_reenters_after_a_closed_position(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.closed = True
+    calls = []
+
+    async def try_buy(c, notes=""):
+        calls.append(c.mint)
+        return "🟢"
+    eng.try_buy = try_buy
+    leader = CopyWallet(address=str(Keypair().pubkey()))
+    await eng.handle_copy({"mint": pos.mint, "txType": "buy", "solAmount": 5,
+                           "traderPublicKey": leader.address}, leader)
+    await eng.settle()
+    assert calls == [pos.mint]
+    await eng.http.aclose()
+
+
+async def test_migration_buy_is_marked_off_the_curve(tmp_path):
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+
+    async def buy(c, sol, curve):
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+    eng.executor.buy = buy
+    m = str(Keypair().pubkey())
+    await eng.try_buy(Candidate(chain="solana", mint=m, source="pumpfun-migration", route="pump",
+                                force=True))
+    assert eng.positions[m].migrated
+    await eng.http.aclose()
+
+
+async def test_take_profit_that_landed_while_down_is_not_taken_twice(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.update_price(pos.entry_price * 3)
+    dec = exits.evaluate(pos, eng.cfg.exits)
+    assert dec and dec.kind in ("tp", "initials") and not dec.sell_all
+    pos.pending_exit = {"reason": dec.reason, "tp_index": dec.tp_index, "kind": dec.kind}
+    eng.store.save_position(pos)  # crashed right after sending
+    left = pos.tokens_remaining - dec.tokens
+    eng.live = True
+
+    async def bal(*a, **k):
+        return left
+    eng.rpc.get_token_balance = bal
+    eng.positions.clear()
+    await eng.restore()
+    again = exits.evaluate(eng.positions[pos.mint], eng.cfg.exits)
+    assert again is None or again.kind != dec.kind or again.tp_index != dec.tp_index
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_adopted_buy_never_gets_a_zero_entry_price(tmp_path):
+    eng = engine(tmp_path)
+    eng.live = True
+    m = str(Keypair().pubkey())
+    from sniper.models import Candidate
+    eng._add_pending(Candidate(chain="solana", mint=m, source="manual", buy_sol=0.05), 0.0, 0.0)
+
+    async def held(*a, **k):
+        return 1000.0
+    eng.rpc.get_token_balance = held
+    await eng.reconcile_pending()
+    assert eng.positions[m].entry_price > 0 and eng.positions[m].sol_in > 0
+    eng.live = False
+    await eng.http.aclose()
+
+
+def test_bare_preset_key_means_default(tmp_path):
+    from sniper.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text("preset:\n")
+    assert load_config(str(p)).preset == "balanced"

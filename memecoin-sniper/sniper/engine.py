@@ -26,7 +26,7 @@ from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
 from .scanners.pumpportal import PumpPortalStream, trade_price
 from .settings import (BY_KEY, apply_overrides, apply_setting, format_value, parse_value,
                        to_storable, update_in_place)
-from .solana_rpc import SolanaRpc
+from .solana_rpc import RpcError, SolanaRpc
 from .store import Store
 
 log = logging.getLogger("sniper")
@@ -55,6 +55,7 @@ CLOCK_JUMP_SECONDS = 30  # wall clock moved this much more than real elapsed tim
 # candidates are handled concurrently: a confirmation window (e.g. 6s) waits inside a worker,
 # so there must be enough of them for a launch burst (they're cheap coroutines)
 CANDIDATE_WORKERS = 32
+PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fill
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
@@ -391,7 +392,9 @@ class Engine:
         if leader.mode == "alert":
             await self._wallet_alert(msg, leader)
             return
-        if msg.get("txType") != "buy" or mint in self.positions or mint in self._buying:
+        held = self.positions.get(mint)
+        if (msg.get("txType") != "buy" or (held and not held.closed)  # a closed one may re-enter
+                or mint in self._buying):
             return
         if self.paused or self.scan_only:
             return
@@ -477,7 +480,7 @@ class Engine:
                 tip = self._tip_estimate()
                 self._add_pending(c, sol + tip)
         try:
-            curve = self.curves.get(c.mint) if c.on_bonding_curve else None
+            curve = await self._paper_curve(c) if not self.live and c.on_bonding_curve else None
             try:
                 fill = await self.executor.buy(c, sol, curve)
             except NotLanded as e:
@@ -504,7 +507,7 @@ class Engine:
                 fill.sol = sol + self._tip_estimate()  # unreadable tx: we know what we sent
             if fill.tokens <= 0:  # confirmed but no tokens visible yet: let the reconciler decide
                 if self.live:
-                    self._add_pending(c, fill.sol, fill.pre)
+                    self._add_pending(c, fill.sol or sol + self._tip_estimate(), fill.pre)
                 await self.notifier.send(f"⏳ buy {esc(c.symbol)} confirmed but no tokens visible "
                                          f"yet ({fill.signature}); checking the wallet")
                 return "buy returned 0 tokens"
@@ -516,6 +519,7 @@ class Engine:
                            creator=c.creator, entry_price=min(sol, fill.sol) / fill.tokens,
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,
                            route=c.route, leader=c.leader,
+                           migrated=c.source == "pumpfun-migration",  # already off the curve
                            dev_tokens=c.creator_initial_buy_tokens or None)
             self.positions[c.mint] = pos
             self.store.save_position(pos)
@@ -551,6 +555,23 @@ class Engine:
         pending = self.pending_buys()
         if pending.pop(mint, None) is not None:
             self._save_pending(pending)
+
+    async def _paper_curve(self, c: Candidate) -> Optional[CurveState]:
+        """Paper fills price off the bonding curve: it must be current. A snapshot from the
+        launch minutes ago (a manual buy of a token that has since run) would fake a fill."""
+        curve = self.curves.get(c.mint)
+        if curve and time.time() - self._curve_ts.get(c.mint, 0) <= PAPER_CURVE_MAX_AGE:
+            return curve
+        try:
+            info = await fetch_curve(self.rpc, c.mint)
+        except Exception as e:
+            log.debug("curve refresh %s failed: %s", c.mint, e)
+            info = None
+        if info and not info.complete:
+            fresh = CurveState(info.v_sol, info.v_tokens)
+            self._set_curve(c.mint, fresh)
+            return fresh
+        return None  # no current curve: price it with a Jupiter quote instead
 
     def _tip_estimate(self) -> float:
         return self.cfg.speed.tip_sol()
@@ -616,13 +637,19 @@ class Engine:
                 self._save_pending(pending)
                 continue
             if held > 0:
+                # never a zero price: it would disable every exit (and divide by zero)
+                spent = num(info.get("sol")) or num(info.get("swap_sol")) \
+                    or self.cfg.trading.buy_amount_sol
+                swap = min(num(info.get("swap_sol")) or spent, spent)
+                info["sol"] = spent
                 tag = (info.get("trigger") or "").split(":")[0]
                 source = info["source"] + (f"/{tag}" if tag and tag != info["source"] else "")
                 pos = Position(mint=mint, symbol=info.get("symbol") or mint[:6], source=source,
                                creator=info.get("creator"),
-                               entry_price=min(info.get("swap_sol") or info["sol"], info["sol"]) / held,
+                               entry_price=swap / held,
                                tokens_initial=held, tokens_remaining=held, sol_in=info["sol"],
                                route=info.get("route", "jupiter"), leader=info.get("leader"),
+                               migrated=info.get("source") == "pumpfun-migration",
                                dev_tokens=info.get("dev_tokens"))
                 self.positions[mint] = pos
                 self.store.save_position(pos)
@@ -791,6 +818,10 @@ class Engine:
                 self.store.save_position(pos)
                 return "nothing to sell"
             curve = self.curves.get(pos.mint) if not pos.migrated else None
+            if self.live:
+                pos.pending_exit = {"reason": dec.reason, "tp_index": dec.tp_index,
+                                    "kind": dec.kind}
+                self.store.save_position(pos)
             try:
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
                                                 pump=pos.route == "pump", curve=curve,
@@ -809,6 +840,15 @@ class Engine:
             self._sell_next_try.pop(pos.mint, None)
             fill.sol = num(fill.sol, allow_zero=True) or 0.0  # a bad fill never corrupts the books
             fill.tokens = min(num(fill.tokens) or dec.tokens, pos.tokens_remaining)
+            leftover = self._known_leftover(pos.mint) if fill.emptied else 0.0
+            if leftover > 0 and fill.sol_known:
+                # "sell 100%" also sold the old written-off bag: only this position's share of
+                # the SOL is its own; the rest is booked as the old bag's (untracked) sale
+                mine = pos.tokens_remaining
+                share = mine / (mine + leftover) if mine + leftover > 0 else 1.0
+                self.store.event("sell", pos.mint, pos.symbol, reason="old bag (untracked)",
+                                 tokens=leftover, sol=fill.sol * (1 - share), sig=fill.signature)
+                fill.sol *= share
             if fill.emptied:
                 self._clear_leftover(pos.mint)  # "sell 100%" took any old bag with it
             if fill.emptied and not dec.sell_all:  # the wallet held less than the position
@@ -817,6 +857,7 @@ class Engine:
             if estimated:  # landed, but the tx couldn't be read: never book it as 0 SOL
                 fill.sol = self._estimate_value(pos, fill.tokens)
             exits.apply_fill(pos, dec, fill.tokens, fill.sol, self.cfg.exits)
+            pos.pending_exit = None
             self.store.save_position(pos)
             self.store.event("sell", pos.mint, pos.symbol, reason=dec.reason, tokens=fill.tokens,
                              sol=fill.sol, sig=fill.signature)
@@ -842,6 +883,7 @@ class Engine:
     async def _sell_failed(self, pos: Position, err: Exception,
                            dec: Optional[exits.ExitDecision] = None) -> str:
         """Never abandon a position on a transient failure: back off, reconcile, retry."""
+        pos.pending_exit = None  # handled here; the next attempt writes its own
         n = self.sell_failures[pos.mint] = self.sell_failures.get(pos.mint, 0) + 1
         wait = min(2 ** n, 10) if n < SELL_FAST_RETRIES else SELL_BACKOFF_MAX
         self._sell_next_try[pos.mint] = time.monotonic() + wait
@@ -1065,7 +1107,11 @@ class Engine:
     async def check_orders(self) -> None:
         now = time.time()
         prices: dict[str, float] = {}
-        for o in self.store.open_orders():
+        # protective sells first (no network needed), then buys with their prices fetched
+        # concurrently: a slow quote must never delay a stop-loss order
+        orders = sorted(self.store.open_orders(), key=lambda o: o["side"] != "sell")
+        fetched = False
+        for o in orders:
             if o["id"] in self._orders_running:
                 continue
             if now >= o["expires"]:
@@ -1081,12 +1127,18 @@ class Engine:
                     continue  # its last sell failed: same backoff as automatic exits
                 price = pos.last_price
             else:
+                if not fetched:
+                    fetched = True
+                    mints = sorted({b["mint"] for b in orders if b["side"] == "buy"})
+                    got = await asyncio.gather(*(self.price_of(m) for m in mints),
+                                               return_exceptions=True)
+                    for m, v in zip(mints, got):
+                        if isinstance(v, Exception) or num(v) is None:
+                            log.debug("order price for %s unavailable: %r", m, v)
+                        else:
+                            prices[m] = num(v)
                 if o["mint"] not in prices:
-                    try:
-                        prices[o["mint"]] = await self.price_of(o["mint"])
-                    except Exception as e:
-                        log.debug("order #%s price failed: %s", o["id"], e)
-                        continue
+                    continue
                 price = prices[o["mint"]]
             hit = price <= o["trigger_price"] if o["direction"] == "<=" else price >= o["trigger_price"]
             if hit and self.store.set_order_status(o["id"], "executing"):  # write-ahead
@@ -1173,7 +1225,9 @@ class Engine:
             self.executor.slippage_pct = self.cfg.trading.slippage_pct
 
     async def apply_preset(self, name: str) -> str:
-        from .config import load_config
+        from .config import PRESETS, load_config
+        if name not in PRESETS:  # never let load_config's startup exit end the running bot
+            raise ValueError(f"unknown preset {name!r}")
         new = load_config(self.config_path, preset=name)
         apply_overrides(new, self.store.overrides())
         update_in_place(self.cfg, new, skip={"private_key", "telegram_bot_token", "telegram_chat_id",
@@ -1235,12 +1289,24 @@ class Engine:
             raise ValueError(f"that would leave {left / 1e9:.6f} SOL, below Solana's minimum of "
                              f"{MIN_RENT_LAMPORTS / 1e9:.6f}. Send a bit less, or use 'all'.")
         tx = transfer_tx(kp, to, lamports, await self.rpc.get_latest_blockhash())
-        sig = await self.rpc.send_raw_transaction(bytes(tx))
-        confirmed = await self.rpc.confirm(sig)
         sol = lamports / 1e9
-        self.store.event("withdraw", to=to, sol=sol, sig=sig)
-        return (f"{'✅ Sent' if confirmed else '⏳ Submitted (not confirmed yet)'} {sol:.9f} SOL "
-                f"to {to}\nhttps://solscan.io/tx/{sig}")
+        sig = str(tx.signatures[0])
+        try:
+            await self.rpc.send_raw_transaction(bytes(tx))
+        except Exception as e:  # it may still have reached the network
+            raise ValueError(f"sending failed ({str(e)[:80]}). It may still go through: check "
+                             f"https://solscan.io/tx/{sig} before trying again") from None
+        try:
+            confirmed: Optional[bool] = await self.rpc.confirm(sig)
+        except RpcError:
+            confirmed = None  # outcome unknown
+        if confirmed is False:  # the blockhash expired without it landing: nothing was sent
+            return "❌ The withdrawal didn't go through; no SOL left the wallet. You can try again."
+        self.store.event("withdraw", to=to, sol=sol, sig=sig, confirmed=bool(confirmed))
+        if confirmed:
+            return f"✅ Sent {sol:.9f} SOL to {to}\nhttps://solscan.io/tx/{sig}"
+        return (f"⏳ Sent {sol:.9f} SOL to {to}, but it isn't confirmed yet. Check "
+                f"https://solscan.io/tx/{sig} before withdrawing again, or it could be sent twice.")
 
     # ---------- lifecycle ----------
 
@@ -1343,7 +1409,15 @@ class Engine:
                     bal = pos.tokens_remaining
                 if bal < pos.tokens_remaining * 0.999:  # a sell landed while we were down
                     sold = pos.tokens_remaining - max(bal, 0.0)
-                    pos.sol_out += self._estimate_value(pos, sold)
+                    if pos.pending_exit and bal > 0:  # book it as the exit it was (TP, ...)
+                        pe = pos.pending_exit
+                        exits.apply_fill(pos, exits.ExitDecision(
+                            sold, False, pe.get("reason", "sell"), pe.get("tp_index"),
+                            pe.get("kind", "")), sold, self._estimate_value(pos, sold),
+                            self.cfg.exits)
+                    else:
+                        pos.sol_out += self._estimate_value(pos, sold)
+                pos.pending_exit = None
                 if bal <= 0:
                     pos.tokens_remaining, pos.closed = 0.0, True
                     pos.close_reason = "sold before restart (PnL estimated)"

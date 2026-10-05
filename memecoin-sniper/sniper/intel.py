@@ -62,6 +62,17 @@ def _safe_url(uri: str) -> bool:
     return ip.is_global
 
 
+def _peer_is_public(resp) -> bool:
+    """The address actually connected to. Unknown (e.g. a proxy or test transport): allowed,
+    since the hostname was already checked."""
+    import ipaddress
+    try:
+        addr = resp.extensions["network_stream"].get_extra_info("server_addr")
+        return ipaddress.ip_address(addr[0]).is_global
+    except Exception:
+        return True
+
+
 async def _resolves_public(uri: str) -> bool:
     """A hostname must not lead to this machine or its private network either."""
     import ipaddress
@@ -95,6 +106,8 @@ async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -
         async with http.stream("GET", uri, timeout=2) as resp:
             if resp.status_code != 200:
                 return None
+            if not via_gateway and not _peer_is_public(resp):
+                return None  # DNS changed between our check and the connection (rebinding)
             body = bytearray()
             async for chunk in resp.aiter_bytes():
                 body += chunk

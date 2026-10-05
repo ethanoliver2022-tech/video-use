@@ -120,6 +120,9 @@ class Position:
     route: str = "jupiter"
     leader: Optional[str] = None
     leader_sold: bool = False
+    # write-ahead of the exit being executed, so a sell that lands while the bot is down is
+    # booked as that exit (its TP level / initials / KOL flag) when it restarts
+    pending_exit: Optional[dict] = None
     closed: bool = False
     close_reason: str = ""
 

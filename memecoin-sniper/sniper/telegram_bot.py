@@ -685,7 +685,7 @@ class TelegramControl:
             await self.send(
                 f"<b>{html.escape(p.symbol)}</b> <code>{p.mint}</code> {' · '.join(tags)}\n"
                 f"PnL {p.pnl_pct:+.0f}% · value {value:.4f} SOL · in {p.sol_in:.4f} · "
-                f"out {p.sol_out:.4f}\nPeak {((p.peak_price / p.entry_price) - 1) * 100:+.0f}% · "
+                f"out {p.sol_out:.4f}\nPeak {((p.peak_price / p.entry_price - 1) * 100) if p.entry_price else 0:+.0f}% · "
                 f"via {html.escape(p.source)}",
                 buttons=[[("Sell 25%", f"s:{p.mint}:25"), ("Sell 50%", f"s:{p.mint}:50"),
                           ("Sell 100%", f"s:{p.mint}:100")],

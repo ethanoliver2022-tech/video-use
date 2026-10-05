@@ -46,7 +46,7 @@ def main() -> None:
         return
 
     cfg = load_config(args.config, preset=args.preset)
-    if args.cmd == "bot" and not args.preset:
+    if args.cmd in ("bot", "run", "scan") and not args.preset:  # --preset on the CLI wins
         from .store import Store
         saved = Store(cfg.data_dir).get_setting("preset")  # chosen from Telegram earlier
         if saved and saved != cfg.preset:

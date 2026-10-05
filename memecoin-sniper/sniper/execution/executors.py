@@ -54,6 +54,10 @@ class NotLanded(RuntimeError):
     """The transaction expired without landing: safe to retry."""
 
 
+class NotSent(RuntimeError):
+    """Failed before anything reached the network: safe to treat as a plain failure."""
+
+
 class BuyUncertain(RuntimeError):
     """The buy may or may not have landed and the wallet can't tell us yet. The engine
     keeps watching the wallet so tokens that arrive late are never orphaned."""
@@ -207,7 +211,11 @@ class LiveExecutor:
         Raises NotLanded if the transaction expired without landing. Any other error
         after sending means the outcome is uncertain; callers reconcile with the wallet.
         """
-        sig = await self.sender.send(self._sign(unsigned), self.kp)
+        try:
+            signed = self._sign(unsigned)
+        except Exception as e:  # e.g. an error body instead of a transaction: nothing was sent
+            raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
+        sig = await self.sender.send(signed, self.kp)
         log.info("sent %s %s", side, sig)
         if not await self.rpc.confirm(sig):
             raise NotLanded(f"transaction {sig} expired without landing")
@@ -279,7 +287,7 @@ class LiveExecutor:
                 fill.tokens = max(0.0, fill.tokens - base)
             fill.pre = pre
             return fill
-        except (NotLanded, TxFailed):
+        except (NotLanded, TxFailed, NotSent):
             raise  # definitely didn't buy
         except Exception as e:
             # Outcome unknown (an RPC hiccup after sending). Never report "failed" here: the
