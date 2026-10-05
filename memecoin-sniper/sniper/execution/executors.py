@@ -146,6 +146,7 @@ class Jupiter:
             if resp.status_code != 429:
                 break
             await asyncio.sleep(delay)
+            self._calls.append(time.monotonic())  # every request Jupiter sees counts
             resp = await self._send(method, path, **kw)
         return resp
 
@@ -163,6 +164,7 @@ class Jupiter:
             log.warning("Jupiter's keyless lite-api didn't answer (%s): switched to %s. Add a "
                         "free JUPITER_API_KEY to .env for faster quotes",
                         "unreachable" if resp is None else resp.status_code, self.api)
+            self._calls.append(time.monotonic())
             resp = await self.http.request(method, f"{self.api}{path}", headers=self.headers, **kw)
         return resp
 

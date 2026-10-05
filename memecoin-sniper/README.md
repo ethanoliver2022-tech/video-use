@@ -88,12 +88,14 @@ copy trading.
 💼 7xKX…9fQ2
 💰 1.2500 SOL
 📊 Open 1/3 · today +0.0312 SOL · buy 0.05 SOL
+🎯 Auto-snipe: all launches passing filters
 
-[ ⏸ Pause sniping            ]
-[ 💼 Wallet   ][ 📊 Positions ]
-[ ⚙️ Settings ][ 👥 Copy trade]
-[ 📈 Stats    ][ 🔴 Go LIVE   ]
-[ 🔄 Refresh                  ]
+[ ⏸ Pause sniping                ]
+[ 💼 Wallet       ][ 📊 Positions ]
+[ 🎯 Snipers      ][ 📋 Orders    ]
+[ 👥 Copy & track ][ ⚙️ Settings  ]
+[ 📈 Stats        ][ 🔴 Go LIVE   ]
+[ 🔄 Refresh                      ]
 ```
 
 ### One-time setup (about 5 minutes)
@@ -271,9 +273,13 @@ Built to run unattended:
   the live trade stream never waits on a sell or on Telegram.
 - **Jito down or rate limited?** Transactions fall back to plain RPC, because
   getting out matters more than MEV protection.
+- **Jupiter's rate limit is kept for trades.** Price checks and safety probes only
+  ever use part of it, so buys and sells never get "rate limited". If Jupiter
+  retires its keyless API, the bot moves itself to the new one.
 - **Crashes restart themselves.** Each internal loop is supervised, and Docker
   restarts the whole bot if it ever exits. Positions reload on start.
-- **Memory stays flat** however long it runs, and nothing polls while paused.
+- **Memory and disk stay flat** however long it runs: old data is pruned, Docker
+  logs are capped, and nothing polls while paused.
 - **Secrets stay out of messages.** RPC URLs and the bot token never appear in
   logs or Telegram errors, and token names are escaped so they can't inject links.
   A private key pasted into the chat outside the import flow is deleted at once.
@@ -304,12 +310,12 @@ Built to run unattended:
   learning while paused).
 - No web dashboard; Telegram is the UI.
 - EVM chains are alert-only (capped at 20 alerts an hour).
-- The trading code has been tested offline (150+ tests, including crash, chaos, clock-jump and malformed-data fuzzing) and the Docker image has
+- The trading code has been tested offline (290+ tests, including crash, chaos, clock-jump and malformed-data fuzzing) and the Docker image has
   been built and run, but it hasn't placed real trades against mainnet yet.
   Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 150+ tests, no network needed
+pip install -e '.[dev]' && pytest     # 290+ tests, no network needed
 ```
