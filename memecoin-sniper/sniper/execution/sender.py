@@ -69,6 +69,7 @@ class TxSender:
         self.default_fee = default_priority_fee
         self._fee_cache: tuple[float, float] = (0.0, float("-inf"))  # (value, monotonic time)
         self.extra = [SolanaRpc(url, http) for url in cfg.broadcast_rpcs if url != rpc.url]
+        self.tip_sigs: dict[str, str] = {}  # swap signature -> its bundle's tip signature
 
     async def priority_fee(self) -> float:
         if not self.cfg.auto_priority_fee:
@@ -93,6 +94,9 @@ class TxSender:
         jobs = []
         if self.cfg.jito_enabled:
             tip = tip_transaction(payer, self.cfg.jito_tip_sol, tx.message.recent_blockhash)
+            if len(self.tip_sigs) > 1000:  # bounded: entries are normally read right away
+                self.tip_sigs.clear()
+            self.tip_sigs[sig] = str(tip.signatures[0])
             bundle = [base64.b64encode(raw).decode(), base64.b64encode(bytes(tip)).decode()]
             jobs += [self._send_bundle(url, bundle) for url in self.cfg.jito_block_engines]
         if not self.cfg.jito_enabled or self.cfg.jito_also_send_rpc:

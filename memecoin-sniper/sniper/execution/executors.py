@@ -74,6 +74,13 @@ class Executor(Protocol):
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]: ...
 
 
+def _decimal_str(raw: int, decimals: int) -> str:
+    """The exact on-chain amount as a plain decimal (never '1e-05', never past the
+    token's precision)."""
+    whole, frac = divmod(raw, 10 ** decimals)
+    return f"{whole}.{frac:0{decimals}d}".rstrip("0").rstrip(".") if decimals else str(whole)
+
+
 class Jupiter:
     def __init__(self, api: str, rpc: SolanaRpc, http: httpx.AsyncClient, api_key: str = ""):
         self.api, self.rpc, self.http = api, rpc, http
@@ -215,8 +222,28 @@ class LiveExecutor:
             if side == "buy":
                 tok = await self.rpc.get_token_balance(self.pubkey, mint)
         # the Jito tip is a separate transaction in the bundle: count it as a cost
-        sol = sol + self._tip() if side == "buy" else max(0.0, sol - self._tip())
+        tip = await self._tip_paid(sig)
+        sol = sol + tip if side == "buy" else max(0.0, sol - tip)
         return Fill(tokens=tok, sol=sol, signature=sig)
+
+    async def _tip_paid(self, sig: str) -> float:
+        """The tip only lands with its bundle. If the trade went through plain RPC instead
+        (fallback, or the RPC copy won the race) the tip was never paid."""
+        tips = getattr(self.sender, "tip_sigs", None)
+        if tips is None:
+            return self._tip()
+        tip_sig = tips.pop(sig, None)
+        if not tip_sig:
+            return 0.0  # no bundle was sent for this trade
+        try:
+            res = await self.rpc.call("getSignatureStatuses",
+                                      [[tip_sig], {"searchTransactionHistory": False}])
+            status = (res or {}).get("value", [None])[0]
+        except Exception:
+            return self._tip()  # can't tell: count it (conservative)
+        if isinstance(status, dict) and status.get("err") is None:
+            return self.cfg.speed.jito_tip_sol
+        return 0.0
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
         if cand.route == "pump":
@@ -258,7 +285,8 @@ class LiveExecutor:
         if pump:
             try:  # only *building* falls back; once a tx is sent we never send a second one
                 unsigned = await self._pumpportal_tx(
-                    "sell", mint, "100%" if sell_all else tokens, in_sol=False, slippage_pct=slippage)
+                    "sell", mint, "100%" if sell_all else _decimal_str(sell_raw, decimals),
+                    in_sol=False, slippage_pct=slippage)
             except Exception as e:
                 log.warning("pumpportal sell build failed (%s); using Jupiter", e)
         if unsigned is None:

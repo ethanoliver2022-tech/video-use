@@ -879,3 +879,62 @@ def test_wallet_replacement_is_atomic(tmp_path, monkeypatch):
     import os
     backups = [f for f in os.listdir(tmp_path) if f.startswith("wallet.key.bak-")]
     assert backups and all(os.stat(tmp_path / f).st_mode & 0o777 == 0o600 for f in backups)
+
+
+async def test_jito_tip_is_only_booked_when_its_bundle_landed(tmp_path):
+    from solders.keypair import Keypair as Kp
+    from sniper.config import load_config
+    from sniper.execution.executors import LiveExecutor
+    cfg = load_config("config.example.yaml")
+    cfg.speed.jito_enabled, cfg.speed.jito_tip_sol = True, 0.002
+
+    class Rpc:
+        status = {"confirmationStatus": "confirmed", "err": None}
+        fail = False
+
+        async def call(self, method, params=None):
+            if self.fail:
+                raise RuntimeError("rpc down")
+            return {"value": [self.status]}
+
+    class Sender:
+        tip_sigs = {}
+    rpc = Rpc()
+    ex = LiveExecutor(cfg, Kp(), rpc, None, None, Sender())
+    Sender.tip_sigs["S1"] = "T1"
+    assert await ex._tip_paid("S1") == 0.002            # bundle landed: tip paid
+    Sender.tip_sigs["S2"] = "T2"
+    rpc.status = None
+    assert await ex._tip_paid("S2") == 0.0              # RPC copy landed: no tip
+    assert await ex._tip_paid("S3") == 0.0              # no bundle sent at all
+    Sender.tip_sigs["S4"] = "T4"
+    rpc.fail = True
+    assert await ex._tip_paid("S4") == 0.002            # unknown: count it
+    assert not Sender.tip_sigs
+
+
+def test_sender_remembers_each_bundles_tip():
+    import asyncio
+    from solders.hash import Hash
+    from solders.keypair import Keypair as Kp
+    from solders.message import MessageV0
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+    from sniper.config import load_config
+    from sniper.execution.sender import TxSender
+    cfg = load_config("config.example.yaml")
+    cfg.speed.jito_enabled, cfg.speed.jito_also_send_rpc = True, False
+
+    class Rpc:
+        url = "x"
+    s = TxSender(cfg.speed, Rpc(), None, 0.0001)
+
+    async def bundle(url, b):
+        return "ok"
+    s._send_bundle = bundle
+    kp = Kp()
+    msg = MessageV0.try_compile(kp.pubkey(), [transfer(TransferParams(
+        from_pubkey=kp.pubkey(), to_pubkey=Kp().pubkey(), lamports=1))], [], Hash.new_unique())
+    tx = VersionedTransaction(msg, [kp])
+    sig = asyncio.run(s.send(tx, kp))
+    assert sig in s.tip_sigs and s.tip_sigs[sig] != sig
