@@ -16,6 +16,8 @@ from .config import EntryConfig
 log = logging.getLogger(__name__)
 
 SOCIAL_KEYS = ("twitter", "telegram", "website")
+PLACEHOLDER_HOSTS = {"twitter.com", "t.me", "pump.fun", "dexscreener.com"}
+GENERIC_X_PAGES = {"home", "explore", "i", "search", "notifications"}
 
 
 def normalize_social(url: str) -> str:
@@ -34,7 +36,15 @@ def extract_socials(meta: dict) -> list[str]:
     for key in SOCIAL_KEYS:
         val = meta.get(key) or ext.get(key)
         if isinstance(val, str) and "." in val:
-            out.append(normalize_social(val))
+            link = normalize_social(val)
+            # a bare "x.com" / "t.me" / launchpad link is a placeholder, not a social: it
+            # mustn't count, nor make every token that uses it look like a copycat
+            host, _, path = link.partition("/")
+            if not path and (key != "website" or host in PLACEHOLDER_HOSTS):
+                continue
+            if host == "twitter.com" and path in GENERIC_X_PAGES:
+                continue
+            out.append(link)
     return out
 
 

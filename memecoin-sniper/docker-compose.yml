@@ -3,6 +3,11 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env          # TELEGRAM_BOT_TOKEN (+ optional SOLANA_RPC_URL)
+    logging:                # runs 24/7: cap the logs so they never fill the disk
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./data:/app/data    # wallet key + database: back this folder up
       # - ./config.yaml:/app/config.yaml:ro   # optional

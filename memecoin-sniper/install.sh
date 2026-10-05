@@ -3,6 +3,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/ethanoliver2022-tech/video-use/claude/memecoin-sniping-bot-x4vgsq/memecoin-sniper/install.sh | sudo bash
 # Safe to re-run: it updates the code and keeps your .env, config and data.
 set -euo pipefail
+# The whole script is one block, so bash reads all of it before running anything: updating
+# replaces this very file (git reset), which must never change what's already running.
+{
 
 REPO="${SNIPER_REPO:-https://github.com/ethanoliver2022-tech/video-use.git}"
 BRANCH="${SNIPER_BRANCH:-claude/memecoin-sniping-bot-x4vgsq}"
@@ -119,3 +122,5 @@ echo "Useful commands (run in $DIR/memecoin-sniper):"
 echo "  docker compose logs -f --tail 50    # live logs"
 echo "  docker compose restart              # restart"
 echo "  sudo bash install.sh                # update to the latest version"
+exit 0
+}

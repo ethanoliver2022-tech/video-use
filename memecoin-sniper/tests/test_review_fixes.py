@@ -1188,3 +1188,15 @@ def test_jupiter_budget_matches_the_plan(monkeypatch):
     assert Jupiter("https://api.jup.ag/swap/v1", None, None, "k").budget() == 60
     monkeypatch.setenv("JUPITER_RPM", "600")  # a paid plan
     assert Jupiter("https://api.jup.ag/swap/v1", None, None, "k").budget() == 600
+
+
+def test_placeholder_socials_dont_count_or_look_reused():
+    from sniper.intel import extract_socials
+    assert extract_socials({"twitter": "https://x.com", "telegram": "t.me/",
+                            "website": "https://pump.fun"}) == []
+    assert extract_socials({"twitter": "https://x.com/home"}) == []
+    assert extract_socials({"twitter": "https://x.com/frogcoin", "telegram": "https://t.me/frogchat",
+                            "website": "frog.xyz"}) == ["twitter.com/frogcoin", "t.me/frogchat",
+                                                        "frog.xyz"]
+    assert extract_socials({"twitter": "https://twitter.com/foo/status/1?s=20"}) == [
+        "twitter.com/foo/status/1"]
