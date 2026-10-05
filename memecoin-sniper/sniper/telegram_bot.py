@@ -72,6 +72,7 @@ class TelegramControl:
         self.pair_failures = 0
         self.offset = 0
         self.pending: Optional[dict] = None
+        self.unhandled: list[str] = []
         engine.notifier.token = token
         engine.notifier.chat = self.owner
 
@@ -388,6 +389,9 @@ class TelegramControl:
             await self.copy_menu(msg_id)
         elif data == "wd!":
             await self.do_withdraw()
+        else:
+            self.unhandled.append(data)
+            log.warning("unhandled Telegram button: %s", data)
 
     def _bg_reply(self, coro) -> None:
         """Run a slow action (a trade can take ~90s to confirm) without freezing the chat;
@@ -573,8 +577,8 @@ class TelegramControl:
         from solders.pubkey import Pubkey
         Pubkey.from_string(address)
         sol = None if amount.lower() == "all" else float(amount)
-        if sol is not None and sol <= 0:
-            raise ValueError("amount must be positive")
+        if sol is not None and not (0 < sol < 1e9):  # also rejects nan / inf
+            raise ValueError("amount must be a positive number of SOL, or 'all'")
         self.pending = {"kind": "withdraw_confirm", "data": (address, sol),
                         "expires": time.time() + PENDING_TTL}
         open_n = sum(1 for p in self.engine.positions.values() if not p.closed)

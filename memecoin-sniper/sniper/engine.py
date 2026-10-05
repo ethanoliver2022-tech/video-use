@@ -51,6 +51,13 @@ MIN_RENT_LAMPORTS = 890_880       # a SOL account can't be left between 0 and th
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
+def _finite(*values: float) -> None:
+    import math
+    for v in values:
+        if not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError("please send a normal number")
+
+
 def keyword_hit(text: str, keywords: list[str]) -> Optional[str]:
     """Words of 4+ letters match anywhere ("trump" in "TRUMP2028"); shorter ones must be a
     whole word, so "ai" matches "AI Agent" but not "pain" or "daisy"."""
@@ -741,6 +748,7 @@ class Engine:
                               hours: float = 24.0) -> str:
         from solders.pubkey import Pubkey
         Pubkey.from_string(mint)
+        _finite(sol, change_pct, hours)
         if not 0 < sol <= 100:
             raise ValueError("amount must be between 0 and 100 SOL")
         if change_pct == 0 or change_pct <= -99:
@@ -763,6 +771,7 @@ class Engine:
         pos = self.find_position(key)
         if not pos or pos.closed:
             raise ValueError(f"no open position for {key}")
+        _finite(pct, pnl_pct, hours)
         if not 0 < pct <= 100:
             raise ValueError("sell % must be between 0 and 100")
         if pnl_pct <= -100:
@@ -914,6 +923,8 @@ class Engine:
         """Send SOL out of the hot wallet. amount=None sends everything minus the fee."""
         from solders.pubkey import Pubkey
         Pubkey.from_string(to)
+        if amount is not None:
+            _finite(amount)
         kp = self.wallet.keypair()
         if kp is None:
             raise ValueError("no wallet")

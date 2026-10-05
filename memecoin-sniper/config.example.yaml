@@ -28,6 +28,7 @@ speed:
   broadcast_rpcs: []            # extra RPC URLs to fan every transaction out to
   auto_priority_fee: true
   priority_fee_percentile: 75
+  min_priority_fee_sol: 0.0001
   max_priority_fee_sol: 0.003
 
 discovery:
@@ -35,6 +36,9 @@ discovery:
   pumpfun_migrations: false
   geckoterminal_networks: [solana, base, bsc, eth]   # non-Solana = alerts only
   dexscreener_profiles: true
+  geckoterminal_poll_seconds: 20
+  dexscreener_poll_seconds: 30
+  max_candidate_age_seconds: 1800   # ignore pools / launches older than this
   auto_snipe: all               # all | targeted (dev watchlist + keywords only) | off
   snipe_keywords: []            # e.g. [trump, pepe] matched in name / ticker
   dev_watchlist: []             # dev wallets whose next pump.fun launch to buy instantly
@@ -69,8 +73,13 @@ data_dir: data
 #   max_single_buyer_pct: 35
 #   max_identical_buys: 3
 #   max_market_cap_sol: 0
+#   min_net_flow_sol: 0         # early buys minus sells must exceed this
 #
 # filters:
+#   require_mint_revoked: true
+#   require_freeze_revoked: true
+#   use_rugcheck: true
+#   rugcheck_reject_danger: true
 #   max_top10_holder_pct: 30
 #   max_creator_initial_buy_pct: 8
 #   min_liquidity_usd: 8000
@@ -99,6 +108,8 @@ data_dir: data
 #   kol_wallets: []
 #   kol_buy_sell_pct: 50
 #   sell_pressure_ratio: 0.75
+#   sell_pressure_window: 20      # look at the last N trades
+#   sell_pressure_min_trades: 12  # need at least this many before judging
 #   sell_initials_at_pct: 0     # e.g. 100 = at 2x, sell enough to get your SOL back
 #   moonbag_pct: 0              # keep e.g. 10% of the bag after taking profit
 #   moonbag_trailing_pct: 50
