@@ -35,7 +35,8 @@ def main() -> None:
     # everything the bot writes (wallet key, backups, database with your trades and chat id)
     # is readable by its owner only
     os.umask(0o077)
-    # `docker stop` sends SIGTERM: turn it into a clean shutdown (positions are saved either way)
+    # `docker stop` sends SIGTERM: short commands just end; the bot itself shuts down cleanly
+    # through _until_stopped (never mid-way through booking a trade)
     signal.signal(signal.SIGTERM, _terminate)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
@@ -69,7 +70,7 @@ def main() -> None:
         eng = Engine(cfg, live=False, config_path=args.config, start_paused=True)
         eng.telegram_ui = True
         try:
-            asyncio.run(eng.run())
+            asyncio.run(_until_stopped(eng))
         except KeyboardInterrupt:
             pass
     elif args.cmd == "wallet":
@@ -86,14 +87,32 @@ def main() -> None:
             if input("Type 'yes' to trade real funds: ").strip().lower() != "yes":
                 sys.exit("aborted")
         try:
-            asyncio.run(Engine(cfg, live=live, scan_only=args.cmd == "scan",
-                               config_path=args.config).run())
+            asyncio.run(_until_stopped(Engine(cfg, live=live, scan_only=args.cmd == "scan",
+                                              config_path=args.config)))
         except KeyboardInterrupt:
             pass
 
 
 def _terminate(*_) -> None:
     raise KeyboardInterrupt
+
+
+async def _until_stopped(eng) -> None:
+    """Run the bot until `docker stop` (SIGTERM) or Ctrl+C. The signal is handled inside the
+    event loop: it cancels the run at its next await, so the bot never stops halfway through
+    booking a trade (a signal handler raising at an arbitrary line could split a sell from
+    its record)."""
+    loop = asyncio.get_running_loop()
+    me = asyncio.current_task()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, me.cancel)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass  # no loop signal support (Windows): the plain handlers still stop it
+    try:
+        await eng.run()
+    except asyncio.CancelledError:
+        logging.getLogger("sniper").info("stopped")
 
 
 async def _wallet(cfg) -> None:

@@ -1726,8 +1726,13 @@ class Engine:
         try:
             await asyncio.gather(*tasks)
         finally:
-            for t in tasks + list(self._bg):
+            running = tasks + list(self._bg)
+            for t in running:
                 t.cancel()
+            # let every task finish stopping (at an await, never mid-bookkeeping) before the
+            # connections close; one that won't stop can't hold shutdown hostage
+            if running:
+                await asyncio.wait(running, timeout=5)
             open_pos = [p for p in self.positions.values() if not p.closed]
             if open_pos:
                 log.warning("stopping with %d open position(s) — they resume on next start: %s",

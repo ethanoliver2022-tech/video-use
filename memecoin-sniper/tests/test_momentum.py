@@ -277,3 +277,40 @@ async def test_momentum_command_and_settings_page(tmp_path):
     with pytest.raises(ValueError):
         parse_value(BY_KEY["discovery.momentum_poll_seconds"], "1")  # would hammer the free API
     await h.close()
+
+
+# ---- max market cap, from Telegram ----
+
+def test_max_market_cap_setting_parses_like_a_human_types_it():
+    from sniper.settings import BY_KEY, format_value, parse_value
+    s = BY_KEY["filters.max_fdv_usd"]
+    assert parse_value(s, "500k") == 500_000 and parse_value(s, "$2M") == 2_000_000
+    assert parse_value(s, "1.5b") == 1_500_000_000 and parse_value(s, "3,000,000") == 3_000_000
+    assert format_value(s, 2_000_000.0) == "$2,000,000" and format_value(s, 0.0) == "no limit"
+    for bad, msg in (("abc", "send a number"), ("nan", "normal number"), ("-1", r"between \$0")):
+        with pytest.raises(ValueError, match=msg):
+            parse_value(s, bad)
+
+
+def test_market_cap_limit_and_zero_means_none():
+    from sniper.config import FilterConfig
+    from sniper.models import Candidate
+    from sniper.safety import static_checks
+    big = Candidate(chain="solana", mint=str(Keypair().pubkey()), source="momentum",
+                    liquidity_usd=1e6, fdv_usd=5e6)
+    assert not static_checks(big, FilterConfig(max_fdv_usd=2e6)).passed
+    assert static_checks(big, FilterConfig(max_fdv_usd=0)).passed       # no limit
+    assert static_checks(big, FilterConfig(max_fdv_usd=1e7)).passed
+
+
+async def test_max_market_cap_is_changed_from_telegram_and_kept(tmp_path):
+    h = Harness(tmp_path)
+    from sniper.settings import SETTINGS
+    idx = next(i for i, s in enumerate(SETTINGS) if s.key == "filters.max_fdv_usd")
+    await h.tap(f"e:{idx}")
+    assert "Max market cap" in h.last and "$2,000,000" in h.last
+    await h.text("10m")
+    assert h.eng.cfg.filters.max_fdv_usd == 10_000_000
+    assert h.eng.store.overrides()["filters.max_fdv_usd"] == 10_000_000  # survives restarts
+    assert any("$10,000,000" in t for t, _, _ in h.sent)
+    await h.close()

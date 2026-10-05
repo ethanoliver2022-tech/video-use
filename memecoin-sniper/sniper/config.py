@@ -109,7 +109,7 @@ class FilterConfig:
     max_top10_holder_pct: float = 30.0     # excludes program-owned accounts (curve / LP vaults)
     max_creator_initial_buy_pct: float = 8.0
     min_liquidity_usd: float = 8000.0      # for AMM pools (not pump.fun curve)
-    max_fdv_usd: float = 2_000_000.0
+    max_fdv_usd: float = 2_000_000.0      # skip tokens already worth more (AMM tokens); 0 = no cap
     use_rugcheck: bool = True
     rugcheck_reject_danger: bool = True
     honeypot_check: bool = True            # quote buy->sell round trip before entering

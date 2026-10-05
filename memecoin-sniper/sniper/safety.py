@@ -61,8 +61,8 @@ def static_checks(c: Candidate, f: FilterConfig) -> SafetyReport:
     else:
         if c.liquidity_usd is not None and c.liquidity_usd < f.min_liquidity_usd:
             r.fail(f"liquidity ${c.liquidity_usd:,.0f} < ${f.min_liquidity_usd:,.0f}")
-        if c.fdv_usd is not None and c.fdv_usd > f.max_fdv_usd:
-            r.fail(f"FDV ${c.fdv_usd:,.0f} already above ${f.max_fdv_usd:,.0f}")
+        if f.max_fdv_usd and c.fdv_usd is not None and c.fdv_usd > f.max_fdv_usd:  # 0 = no cap
+            r.fail(f"market cap ${c.fdv_usd:,.0f} already above ${f.max_fdv_usd:,.0f}")
     return r
 
 

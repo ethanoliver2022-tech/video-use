@@ -70,6 +70,9 @@ SETTINGS: list[Setting] = [
     Setting("filters.max_creator_launches_24h", "Max dev launches/24h", "int", 0, 1000,
             help="skip devs who launched more than this many tokens in 24h; 0 = off"),
     Setting("filters.min_liquidity_usd", "Min liquidity", "float", 0, 1e9, "$"),
+    Setting("filters.max_fdv_usd", "Max market cap", "float", 0, 1e12, "$",
+            help="skip tokens already worth more than this (traded tokens, incl. momentum "
+                 "buys; brand-new pump.fun launches aren't affected); 0 = no limit"),
     Setting("filters.honeypot_check", "Honeypot check", "bool"),
     # speed
     Setting("speed.jito_enabled", "Jito bundles", "bool"),
@@ -136,6 +139,10 @@ def format_value(s: Setting, v: Any) -> str:
         return ", ".join(v) if v else "none"
     if s.kind == "choice":
         return str(v)
+    if s.unit == "$":
+        if s.key == "filters.max_fdv_usd" and not v:
+            return "no limit"
+        return f"${v:,.0f}"
     return f"{v:g}{s.unit}" if s.unit in ("%", "s") else f"{v:g} {s.unit}".strip()
 
 
@@ -190,8 +197,20 @@ def parse_value(s: Setting, raw: Any) -> Any:
         for w in out:
             Pubkey.from_string(w)
         return out
-    num = float(str(raw).strip().rstrip("%").replace("SOL", "").replace("$", "").replace(",", ""))
+    text = str(raw).strip().rstrip("%").replace("SOL", "").replace("$", "").replace(",", "").strip()
+    scale = 1.0
+    if s.unit == "$" and text[-1:].lower() in ("k", "m", "b"):  # "500k", "2m": easy on a phone
+        scale = {"k": 1e3, "m": 1e6, "b": 1e9}[text[-1].lower()]
+        text = text[:-1]
+    try:
+        num = float(text) * scale
+    except ValueError:
+        raise ValueError("send a number" + (", e.g. 500k or 2m" if s.unit == "$" else "")) from None
+    if not math.isfinite(num):
+        raise ValueError("send a normal number")
     if not s.lo <= num <= s.hi:
+        if s.unit == "$":
+            raise ValueError(f"must be between ${s.lo:,.0f} and ${s.hi:,.0f}")
         raise ValueError(f"must be between {s.lo:g} and {s.hi:g}")
     return int(num) if s.kind == "int" else num
 

@@ -96,7 +96,7 @@ data_dir: data
 #   max_top10_holder_pct: 30
 #   max_creator_initial_buy_pct: 8
 #   min_liquidity_usd: 8000
-#   max_fdv_usd: 2000000
+#   max_fdv_usd: 2000000        # 0 = no cap (also settable in Telegram)
 #   honeypot_check: true
 #   max_roundtrip_loss_pct: 25
 #   min_socials: 0
