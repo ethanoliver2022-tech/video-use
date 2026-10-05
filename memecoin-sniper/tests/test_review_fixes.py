@@ -1121,9 +1121,14 @@ async def test_jupiter_moves_off_the_retired_lite_api():
     jup._decimals["M"] = 0
     sol_mint = "So11111111111111111111111111111111111111112"
     q = await jup.quote(sol_mint, "M", 1.0, 20)
-    assert q["outAmount"] == "5" and jup.api == "https://api.jup.ag/swap/v1"
+    assert q["outAmount"] == "5"                       # the failing request still got through
+    assert jup.api == "https://lite-api.jup.ag/swap/v1"  # one failure: no permanent switch
+    for _ in range(2):
+        await jup.quote(sol_mint, "M", 1.0, 20)
+    assert jup.api == "https://api.jup.ag/swap/v1"     # three in a row: moved for good
+    hosts.clear()
     await jup.quote(sol_mint, "M", 1.0, 20)
-    assert hosts == ["lite-api.jup.ag", "api.jup.ag", "api.jup.ag"]  # switched for good
+    assert hosts == ["api.jup.ag"]
 
     def down(req):
         if req.url.host == "lite-api.jup.ag":
@@ -1200,3 +1205,126 @@ def test_placeholder_socials_dont_count_or_look_reused():
                                                         "frog.xyz"]
     assert extract_socials({"twitter": "https://twitter.com/foo/status/1?s=20"}) == [
         "twitter.com/foo/status/1"]
+
+
+async def test_one_lite_api_hiccup_is_forgiven():
+    import httpx
+    from sniper.execution.executors import Jupiter
+    answers = [403, 200, 403, 200, 403, 200]   # lite fails, works, fails... never 3 in a row
+    hosts = []
+
+    def handler(req):
+        hosts.append(req.url.host)
+        code = answers.pop(0) if req.url.host == "lite-api.jup.ag" else 200
+        return httpx.Response(code, json={"outAmount": "5", "outputMint": "M"})
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    jup = Jupiter("https://lite-api.jup.ag/swap/v1", None, http)
+    jup._decimals["M"] = 0
+    for _ in range(4):
+        await jup.quote("So11111111111111111111111111111111111111112", "M", 1.0, 20)
+    assert "lite-api" in jup.api
+    await http.aclose()
+
+
+def test_sleep_clock_is_never_a_paused_monotonic(monkeypatch):
+    import sniper.engine as em
+    import sys
+    assert em._boottime() is not None if sys.platform.startswith("linux") else True
+    monkeypatch.delattr(em.time, "CLOCK_BOOTTIME", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert em._boottime() is None  # no sleep-aware clock: step correction is skipped
+
+
+async def test_copied_token_on_another_venue_routes_through_jupiter(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    eng.paused = False
+    seen = []
+
+    async def handle(c):
+        seen.append(c)
+        return "skipped"
+    eng.handle_candidate = handle
+    leader = CopyWallet(address=str(Keypair().pubkey()))
+    for pool in ("bonk", "pump", "pump-amm", None):
+        await eng.handle_copy({"txType": "buy", "mint": str(Keypair().pubkey()), "pool": pool,
+                               "solAmount": 5, "traderPublicKey": leader.address}, leader)
+    assert [c.route for c in seen] == ["jupiter", "pump", "pump", "pump"]
+    await eng.http.aclose()
+
+
+async def test_trades_of_a_non_pump_position_never_announce_a_graduation(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.route = "jupiter"
+    await eng.on_trade({"txType": "buy", "mint": pos.mint, "pool": "bonk", "solAmount": 1,
+                        "traderPublicKey": str(Keypair().pubkey()), "signature": "x1"})
+    assert not pos.migrated
+    pos.route = "pump"
+    await eng.on_trade({"txType": "buy", "mint": pos.mint, "pool": "pump-amm", "solAmount": 1,
+                        "traderPublicKey": str(Keypair().pubkey()), "signature": "x2"})
+    assert pos.migrated
+    await eng.settle()
+    await eng.http.aclose()
+
+
+async def test_every_failed_send_path_is_logged_not_left_unretrieved(caplog):
+    import gc
+    import logging
+    from tests.test_speed import _sender, _signed
+    s, rpc = _sender(["ok", "bad"])
+
+    async def bundle(engine, b):
+        if "bad" in engine:
+            raise RuntimeError("429 from bad")
+        return "ok"
+    s._send_bundle = bundle
+    tx, kp = _signed()
+    with caplog.at_level(logging.DEBUG):
+        await s.send(tx, kp)
+        await asyncio.sleep(0.01)
+        gc.collect()
+    assert "429 from bad" in caplog.text
+    assert "never retrieved" not in caplog.text
+
+
+async def test_sell_that_landed_leaving_dust_is_closed_and_counted(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.update_price(pos.entry_price * 0.5)          # a losing exit
+    eng.live, eng.own_wallet = True, "W"
+
+    async def sell(*a, **k):
+        raise RuntimeError("couldn't confirm: outcome unknown")
+    eng.executor.sell = sell
+
+    async def bal(*a, **k):
+        return pos.tokens_initial * 1e-7          # it landed: a few raw units of dust left
+    eng.rpc.get_token_balance = bal
+    before = eng.store.realized_today()
+    await eng.manual_sell(pos.mint, 100)
+    assert pos.closed
+    assert eng.store.events("close")                 # booked...
+    assert eng.store.realized_today() < before       # ...and counted toward the loss limit
+    eng.live = False
+    await eng.settle()
+    await eng.http.aclose()
+
+
+async def test_restart_after_a_sell_that_left_dust_closes_and_counts(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.pending_exit = {"reason": "take profit", "tp_index": 0, "kind": "tp"}
+    eng.store.save_position(pos)
+    eng.live, eng.own_wallet = True, "W"
+
+    async def bal(*a, **k):
+        return pos.tokens_initial * 1e-7
+    eng.rpc.get_token_balance = bal
+    eng.positions.clear()
+    await eng.restore()
+    assert pos.mint not in eng.positions or eng.positions[pos.mint].closed
+    assert [e for e in eng.store.events("close") if e["mint"] == pos.mint]
+    eng.live = False
+    await eng.settle()
+    await eng.http.aclose()

@@ -30,7 +30,10 @@ from .txguard import UnsafeTransaction, check_transaction
 
 log = logging.getLogger(__name__)
 
-SELL_ESCALATE_SECONDS = 2.5  # a sell bundle not confirmed by then also goes out through RPC
+# a sell bundle not confirmed by then also goes out through RPC (which gives up its sandwich
+# protection): fast for emergency exits (stop loss, dev dump), patient for the rest
+SELL_ESCALATE_SECONDS = 2.5
+SELL_ESCALATE_CALM_SECONDS = 10.0
 PREBUILT_MAX_AGE = 5.0  # seconds a transaction built ahead of the buy may be used for
 PUMP_FEE = 0.0125  # protocol + creator fee on the bonding curve, approx.
 PUMPPORTAL_FEE = 0.005     # PumpPortal's fee on trades it builds (paper estimate; see pumpportal.fun)
@@ -94,6 +97,7 @@ def _decimal_str(raw: int, decimals: int) -> str:
 
 LITE_API_HOST = "lite-api.jup.ag"
 RETIRED_STATUS = (401, 403, 404, 410)  # what a retired endpoint answers
+LITE_STRIKES = 3  # lite-api failures in a row before moving to api.jup.ag for good
 JUPITER_WINDOW = 60.0       # Jupiter counts requests over a sliding minute
 BACKGROUND_SHARE = 0.5      # price checks / honeypot probes may use at most this much of it
 URGENT_MAX_WAIT = 10.0      # a trade waits at most this long for a free slot, then goes anyway
@@ -116,6 +120,7 @@ class Jupiter:
                 requests_per_minute = 0
         self.rpm = max(0, requests_per_minute)
         self._calls: deque[float] = deque()
+        self._lite_strikes = 0  # lite-api failures in a row
 
     def budget(self) -> int:
         """Requests per minute Jupiter allows this setup (free key or lite-api: 60/min,
@@ -161,14 +166,22 @@ class Jupiter:
             if LITE_API_HOST not in self.api:
                 raise
             resp = None
-        if LITE_API_HOST in self.api and (resp is None or resp.status_code in RETIRED_STATUS):
-            self.api = self.api.replace(LITE_API_HOST, "api.jup.ag")
-            log.warning("Jupiter's keyless lite-api didn't answer (%s): switched to %s. Add a "
-                        "free JUPITER_API_KEY to .env for faster quotes",
-                        "unreachable" if resp is None else resp.status_code, self.api)
-            self._calls.append(time.monotonic())
-            resp = await self.http.request(method, f"{self.api}{path}", headers=self.headers, **kw)
-        return resp
+        if LITE_API_HOST not in self.api:
+            return resp
+        if resp is not None and resp.status_code not in RETIRED_STATUS:
+            self._lite_strikes = 0
+            return resp
+        # this request goes to api.jup.ag; only repeated failures move there for good (one
+        # Cloudflare hiccup mustn't halve the rate budget until the next restart)
+        self._lite_strikes += 1
+        fallback = self.api.replace(LITE_API_HOST, "api.jup.ag")
+        if self._lite_strikes >= LITE_STRIKES:
+            self.api = fallback
+            log.warning("Jupiter's keyless lite-api stopped answering (%s): switched to %s. "
+                        "Add a free JUPITER_API_KEY to .env for faster quotes",
+                        "unreachable" if resp is None else resp.status_code, fallback)
+        self._calls.append(time.monotonic())
+        return await self.http.request(method, f"{fallback}{path}", headers=self.headers, **kw)
 
     async def decimals(self, mint: str) -> int:
         if mint not in self._decimals:
@@ -285,14 +298,14 @@ class LiveExecutor:
         return self.cfg.speed.tip_sol()
 
     def _guard(self, tx: VersionedTransaction, max_sol_out: float, side: str = "buy",
-               swap_sol: float = 0.0) -> None:
+               swap_sol: float = 0.0, mint: Optional[str] = None) -> None:
         s = self.cfg.speed  # the priority fee may not exceed what you allow (plus margin)
         max_fee = 2 * max(s.max_priority_fee_sol, self.cfg.trading.priority_fee_sol) + 0.001
         # a pump.fun buy may pull at most the swap amount plus your slippage (plus margin)
         curve_cap = swap_sol * (1 + self.cfg.trading.slippage_pct / 100) * 1.05 + 0.01
         check_transaction(tx, self.kp.pubkey(), max_sol_out,
                           frozenset(self.cfg.extra_allowed_programs), max_fee, side,
-                          curve_cap if side == "buy" else 0.0)
+                          curve_cap if side == "buy" else 0.0, mint)
 
     def _check_unsigned(self, unsigned: bytes, max_sol_out: float, side: str = "sell") -> None:
         """Guard a built transaction before choosing it (raises UnsafeTransaction)."""
@@ -314,7 +327,8 @@ class LiveExecutor:
         return 0.01 + 0.02 * value_sol if value_sol else 0.05
 
     async def _submit(self, unsigned: bytes, mint: str, side: str,
-                      max_sol_out: float = 0.05, swap_sol: float = 0.0) -> Fill:
+                      max_sol_out: float = 0.05, swap_sol: float = 0.0,
+                      urgent: bool = False) -> Fill:
         """Sign, send, confirm and read back the real fill.
 
         Raises NotLanded if the transaction expired without landing. Any other error
@@ -326,7 +340,7 @@ class LiveExecutor:
             built = None  # not a transaction at all: signing it fails just below
         if built is not None:
             try:
-                self._guard(built, max_sol_out, side, swap_sol)
+                self._guard(built, max_sol_out, side, swap_sol, mint)
             except UnsafeTransaction as e:
                 log.error("refused to sign a %s for %s: %s", side, mint, e)
                 raise NotSent(f"🛡 refused to sign it: {e}") from e
@@ -341,7 +355,8 @@ class LiveExecutor:
         # also goes out through the RPCs. One signature can only land once: never a double sell.
         escalate = None
         if side == "sell" and hasattr(self.sender, "rebroadcast"):
-            escalate = asyncio.ensure_future(self._escalate(signed, sig))
+            escalate = asyncio.ensure_future(self._escalate(
+                signed, sig, SELL_ESCALATE_SECONDS if urgent else SELL_ESCALATE_CALM_SECONDS))
         try:
             landed = await self.rpc.confirm(sig)
         finally:
@@ -371,12 +386,11 @@ class LiveExecutor:
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
                     sol_known=readable)
 
-    async def _escalate(self, signed: VersionedTransaction, sig: str) -> None:
-        await asyncio.sleep(SELL_ESCALATE_SECONDS)
+    async def _escalate(self, signed: VersionedTransaction, sig: str, after: float) -> None:
+        await asyncio.sleep(after)
         try:
             if await self.sender.rebroadcast(signed):
-                log.info("sell %s not confirmed after %.1fs: also sent through RPC",
-                         sig, SELL_ESCALATE_SECONDS)
+                log.info("sell %s not confirmed after %.1fs: also sent through RPC", sig, after)
         except Exception as e:  # best effort: the bundle is still in flight
             log.debug("sell rebroadcast failed: %s", e)
 
@@ -479,7 +493,7 @@ class LiveExecutor:
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None,
-                   value_sol: Optional[float] = None) -> Fill:
+                   value_sol: Optional[float] = None, urgent: bool = False) -> Fill:
         slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
         # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
         # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
@@ -524,7 +538,7 @@ class LiveExecutor:
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        fill = await self._submit(unsigned, mint, "sell", self._sell_cap(value_sol))
+        fill = await self._submit(unsigned, mint, "sell", self._sell_cap(value_sol), urgent=urgent)
         if fill.tokens <= 0:
             fill.tokens = tokens
         fill.emptied = sell_all  # incl. a partial that asked for more than the wallet held

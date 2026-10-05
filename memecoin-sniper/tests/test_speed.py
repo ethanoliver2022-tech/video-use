@@ -128,6 +128,7 @@ async def test_buying_an_already_graduated_token_never_triggers_a_migration_sell
     m = str(Keypair().pubkey())
     await eng.manual_buy(m, 0.05, force=True)
     pos = eng.positions[m]
+    pos.route = "pump"                   # a pump.fun token, bought after it graduated
     assert not pos.seen_on_curve
     await eng.on_trade({"mint": m, "txType": "buy", "traderPublicKey": "x", "solAmount": 1,
                         "pool": "pump-amm", "signature": "s1"})  # trades on PumpSwap
@@ -264,13 +265,42 @@ async def test_confirmation_window_builds_the_buy_just_before_it_ends(tmp_path, 
     import sniper.engine as em
     monkeypatch.setattr(em, "PREBUILD_LEAD", 0.05)
     eng, ex, seen = await _live_engine(tmp_path, passing=True)
+    from sniper.intel import EarlyFlow
     eng.cfg.entry.confirm_seconds = 0.15
+    eng.cfg.entry.min_unique_buyers = 1
     c = _pump(str(Keypair().pubkey()))
-    task = asyncio.ensure_future(eng._window(c))
+    clean = EarlyFlow(creator=None)
+    for size in (0.4, 0.5, 0.6, 0.45):   # several real buyers, nobody dominating
+        clean.add({"txType": "buy", "traderPublicKey": str(Keypair().pubkey()), "solAmount": size})
+    task = asyncio.ensure_future(eng._window(c, clean))
     await asyncio.sleep(0.05)
     assert not ex.prepared               # not at the start of the window...
     await task
     assert ex.prepared == [c.mint]       # ...but before it ended
+    c2 = _pump(str(Keypair().pubkey()))  # nobody buying yet: failing its flow check, no build
+    await eng._window(c2, EarlyFlow(creator=None))
+    assert ex.prepared == [c.mint]
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_prebuild_counts_slots_like_the_buy_does(tmp_path):
+    """Moonbags don't take a slot for buys, so they must not stop the head-start build."""
+    eng, ex, seen = await _live_engine(tmp_path, passing=True)
+    eng.cfg.trading.max_open_positions = 1
+    eng.cfg.exits.moonbag_pct = 10
+    import time
+    from sniper.models import Position
+    bag = Position(mint=str(Keypair().pubkey()), symbol="BAG", source="x", creator=None,
+                   entry_price=1.0,
+                   tokens_initial=100.0, tokens_remaining=10.0, sol_in=0.1)
+    bag.tp_levels_hit.add(0)             # profit taken: only the moonbag is left
+    bag.opened_at = time.time()
+    eng.positions[bag.mint] = bag
+    c = _pump(str(Keypair().pubkey()))
+    eng._start_prebuild(c)
+    assert c.prebuilt is not None        # a slot is free for a buy, so build ahead
+    c.prebuilt.cancel()
     eng.live = False
     await eng.http.aclose()
 
@@ -407,20 +437,24 @@ def _esc_executor(confirm_after):
 async def test_slow_sell_bundle_is_also_sent_through_rpc(monkeypatch):
     import sniper.execution.executors as ex_mod
     monkeypatch.setattr(ex_mod, "SELL_ESCALATE_SECONDS", 0.05)
+    monkeypatch.setattr(ex_mod, "SELL_ESCALATE_CALM_SECONDS", 0.5)
+    ex = _esc_executor(confirm_after=0.2)
+    await ex._submit(b"not-a-tx", "M", "sell", urgent=True)
+    assert ex.sender.sent == 1 and ex.sender.rebroadcasts == 1  # same tx, a second way
     ex = _esc_executor(confirm_after=0.2)
     await ex._submit(b"not-a-tx", "M", "sell")
-    assert ex.sender.sent == 1 and ex.sender.rebroadcasts == 1  # same tx, a second way
+    assert ex.sender.rebroadcasts == 0   # a calm exit keeps its sandwich protection longer
 
 
 async def test_quick_sells_and_all_buys_stay_jito_only(monkeypatch):
     import sniper.execution.executors as ex_mod
     monkeypatch.setattr(ex_mod, "SELL_ESCALATE_SECONDS", 0.05)
     ex = _esc_executor(confirm_after=0.0)
-    await ex._submit(b"not-a-tx", "M", "sell")
+    await ex._submit(b"not-a-tx", "M", "sell", urgent=True)
     await asyncio.sleep(0.1)
     assert ex.sender.rebroadcasts == 0                   # landed in time
     ex = _esc_executor(confirm_after=0.2)
-    await ex._submit(b"not-a-tx", "M", "buy")
+    await ex._submit(b"not-a-tx", "M", "buy", urgent=True)
     assert ex.sender.rebroadcasts == 0                   # buys keep sandwich protection
 
 

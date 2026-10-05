@@ -246,3 +246,40 @@ def test_pumpswap_buy_wrapping_sol_up_to_slippage_is_allowed():
     ex._guard(ok, ex._buy_cap(0.1), "buy", 0.1)
     with pytest.raises(UnsafeTransaction):
         ex._guard(tx(sol(int(0.3 * 1e9))), ex._buy_cap(0.1), "buy", 0.1)
+
+
+MINT = str(Keypair().pubkey())
+
+
+def _buy_to(account):
+    """A pump.fun buy delivering the tokens to `account` (at the real position: associated_user)."""
+    accts = [Keypair().pubkey() for _ in range(5)] + [account, ME.pubkey()]
+    return ix(PUMP, PUMP_BUY + struct.pack("<QQ", 10**12, 100_000_000) + b"\x00", accts)
+
+
+def _my_ata(token_program=TOKEN):
+    return Pubkey.find_program_address([bytes(ME.pubkey()), bytes(token_program), bytes(P(MINT))],
+                                       ATA)[0]
+
+
+def test_buy_into_my_own_token_account_passes():
+    for program in (TOKEN, P("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")):  # classic, Token-2022
+        check_transaction(tx(budget(), _buy_to(_my_ata(program)), sol(500_000)), ME.pubkey(), 0.115,
+                          side="buy", max_curve_sol=0.2, mint=MINT)
+
+
+def test_buy_that_delivers_the_tokens_elsewhere_is_refused():
+    attacker_ata = Keypair().pubkey()
+    with pytest.raises(UnsafeTransaction, match="isn't this wallet's"):
+        check_transaction(tx(budget(), _buy_to(attacker_ata), sol(500_000)), ME.pubkey(), 0.115,
+                          side="buy", max_curve_sol=0.2, mint=MINT)
+
+
+def test_unreadable_transaction_is_refused_not_crashed():
+    from solders.message import MessageHeader, MessageV0 as M0
+    from solders.instruction import CompiledInstruction
+    good = tx(budget()).message
+    bad = M0(MessageHeader(1, 0, 1), list(good.account_keys),
+             good.recent_blockhash, [CompiledInstruction(99, b"\x00", bytes([0]))], [])
+    with pytest.raises(UnsafeTransaction, match="malformed"):
+        check_transaction(VersionedTransaction(bad, [ME]), ME.pubkey(), 0.1)

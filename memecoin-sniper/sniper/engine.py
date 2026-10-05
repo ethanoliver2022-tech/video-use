@@ -74,12 +74,19 @@ def _finite(*values: float) -> None:
             raise ValueError("please send a normal number")
 
 
-def _boottime() -> float:
-    """Seconds since boot, counting time suspended (Linux); monotonic elsewhere."""
-    try:
-        return time.clock_gettime(time.CLOCK_BOOTTIME)
-    except (AttributeError, OSError):
-        return time.monotonic()
+def _boottime() -> Optional[float]:
+    """Seconds on a clock that keeps counting while the machine sleeps (Linux BOOTTIME, macOS
+    MONOTONIC), or None where there's no such clock: then clock steps aren't corrected,
+    rather than a sleep being mistaken for one."""
+    import sys
+    for name in ("CLOCK_BOOTTIME",) + (("CLOCK_MONOTONIC",) if sys.platform == "darwin" else ()):
+        clock = getattr(time, name, None)
+        if clock is not None:
+            try:
+                return time.clock_gettime(clock)
+            except OSError:
+                pass
+    return None
 
 
 def keyword_hit(text: str, keywords: list[str]) -> Optional[str]:
@@ -315,13 +322,15 @@ class Engine:
         q.append(now)
         return True
 
-    async def _window(self, c: Candidate) -> None:
+    async def _window(self, c: Candidate, flow: Optional[EarlyFlow] = None) -> None:
         """Wait out the confirmation window, building the buy shortly before it ends so a
-        launch that passes is bought without waiting on PumpPortal."""
+        launch that passes is bought without waiting on PumpPortal. With the trade stream,
+        only if the early flow still looks clean (most launches don't: no wasted builds)."""
         wait = self.cfg.entry.confirm_seconds
         lead = min(PREBUILD_LEAD, wait)
         await asyncio.sleep(wait - lead)
-        self._start_prebuild(c)
+        if flow is not None and not flow.evaluate(self.cfg.entry):
+            self._start_prebuild(c)
         await asyncio.sleep(lead)
 
     def _start_prebuild(self, c: Candidate) -> None:
@@ -332,9 +341,8 @@ class Engine:
                 or c.route != "pump" or self.scan_only or c.mint in self._buying
                 or (c.mint in self.positions and not self.positions[c.mint].closed)):
             return
-        open_n = sum(1 for p in self.positions.values() if not p.closed) + len(self._buying)
-        if open_n >= self.cfg.trading.max_open_positions:
-            return  # it couldn't be bought anyway
+        if self._slots_used() >= self.cfg.trading.max_open_positions:
+            return  # it couldn't be bought anyway (the same rule the buy itself applies)
         sol = c.buy_sol or self.cfg.trading.buy_amount_sol
         task = asyncio.ensure_future(prepare(c, sol))
         task.add_done_callback(lambda t: t.cancelled() or t.exception())  # never "unretrieved"
@@ -347,7 +355,7 @@ class Engine:
         flow = self.flows[c.mint] = EarlyFlow(creator=c.creator)
         await self.stream.watch_token(c.mint)
         try:
-            await self._window(c)
+            await self._window(c, flow)
         finally:
             self.flows.pop(c.mint, None)
         problems = flow.evaluate(self.cfg.entry)
@@ -359,7 +367,7 @@ class Engine:
         """Without PumpPortal's paid trade stream: compare the bonding curve and the dev's
         balance before and after the window. Can't count unique buyers or spot bundles."""
         start_sol = c.v_sol
-        await self._window(c)
+        await asyncio.sleep(self.cfg.entry.confirm_seconds)
         try:
             curve = await fetch_curve(self.rpc, c.mint)
         except Exception as e:
@@ -379,6 +387,8 @@ class Engine:
         mcap = curve.price * PUMP_TOTAL_SUPPLY
         if self.cfg.entry.max_market_cap_sol and mcap > self.cfg.entry.max_market_cap_sol:
             problems.append(f"market cap already {mcap:.0f} SOL")
+        if not problems:
+            self._start_prebuild(c)  # built while the dev's balance is read
         if c.creator and c.creator_initial_buy_tokens:
             try:
                 dev = await self.rpc.get_token_balance(c.creator, c.mint)
@@ -456,10 +466,14 @@ class Engine:
             return
         if (num(msg.get("solAmount"), allow_zero=True) or 0.0) < self.cfg.copytrade.min_leader_buy_sol:
             return
-        c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6], route="pump",
+        pool = msg.get("pool")
+        pump = pool in (None, "", "pump", "pump-amm")  # pump.fun curve or PumpSwap
+        c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6],
+                      route="pump" if pump else "jupiter",  # other venues (LetsBonk...): Jupiter
                       leader=leader.address if leader.copy_sells else None,
                       buy_sol=leader.buy_sol or None, force=not self.cfg.copytrade.run_safety_checks,
-                      url=f"https://pump.fun/coin/{mint}")
+                      url=f"https://pump.fun/coin/{mint}" if pump
+                      else f"https://dexscreener.com/solana/{mint}")
         name = leader.label or leader.address[:6]
         log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint,
                  num(msg.get("solAmount"), allow_zero=True) or 0.0)
@@ -484,12 +498,15 @@ class Engine:
 
     # ---------- entries ----------
 
+    def _slots_used(self) -> int:
+        """Open positions (moonbags don't take up a slot) plus buys in flight or unconfirmed."""
+        return sum(1 for p in self.positions.values()
+                   if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
+            + len(set(self._buying) | set(self.pending_buys()))
+
     async def risk_block(self, sol: float, bal: Optional[float] = None) -> Optional[str]:
         t = self.cfg.trading
-        open_n = sum(1 for p in self.positions.values()   # moonbags don't take up a slot
-                     if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
-            + len(set(self._buying) | set(self.pending_buys()))  # in-flight buys are also pending
-        if open_n >= t.max_open_positions:
+        if self._slots_used() >= t.max_open_positions:
             return "max open positions"
         if t.daily_loss_limit_sol > 0 and -self.store.realized_today() >= t.daily_loss_limit_sol:
             return "daily loss limit hit"
@@ -823,10 +840,11 @@ class Engine:
         if not pos or pos.closed:
             return
         pool = msg.get("pool")
-        if pool == "pump" and not pos.migrated:
-            self._mark_on_curve(pos)
-        if isinstance(pool, str) and pool and pool != "pump" and not pos.migrated:  # trading on PumpSwap / an AMM now
-            await self.on_migration(mint)
+        if pos.route == "pump" and not pos.migrated:  # only pump.fun tokens can graduate
+            if pool == "pump":
+                self._mark_on_curve(pos)
+            elif isinstance(pool, str) and pool:  # trading on PumpSwap / an AMM now
+                await self.on_migration(mint)
         price = trade_price(msg)
         if price:
             pos.update_price(price)
@@ -890,14 +908,16 @@ class Engine:
 
     async def exit_loop(self) -> None:
         offset = time.time() - time.monotonic()
-        step_offset = time.time() - _boottime()
+        boot = _boottime()
+        step_offset = None if boot is None else time.time() - boot
         while True:
             # Position timestamps are wall-clock. A clock *step* (NTP fix, VM migration) moves
             # them all without any real time passing: shift them with it, or max-hold and
             # stale exits fire on healthy tokens. A suspend/resume is real time (max hold may
             # rightly expire), but prices weren't polled: give the feeds a fresh window.
-            new_step = time.time() - _boottime()
-            if abs(new_step - step_offset) > CLOCK_JUMP_SECONDS:
+            boot = _boottime()
+            new_step = None if boot is None or step_offset is None else time.time() - boot
+            if new_step is not None and abs(new_step - step_offset) > CLOCK_JUMP_SECONDS:
                 step = new_step - step_offset
                 log.warning("system clock stepped %+.0fs; shifting position timers", step)
                 for pos in self.positions.values():
@@ -951,8 +971,9 @@ class Engine:
                                     "kind": dec.kind}
                 self.store.save_position(pos)
             try:
-                extra = {"value_sol": dec.tokens * pos.last_price} \
-                    if isinstance(self.executor, LiveExecutor) else {}  # caps the tx guard
+                extra = {"value_sol": dec.tokens * pos.last_price,  # caps the tx guard
+                         "urgent": dec.reason.startswith(DANGER_EXITS)} \
+                    if isinstance(self.executor, LiveExecutor) else {}
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
                                                 pump=pos.route == "pump", curve=curve,
                                                 slippage_pct=self._sell_slippage(pos, dec),
@@ -1024,7 +1045,7 @@ class Engine:
                 if held <= 0:
                     self._clear_leftover(pos.mint)  # the wallet is empty: no old bag either
                 held = max(0.0, held - self._known_leftover(pos.mint))  # only this position's
-                if held <= 0:
+                if exits.is_dust(pos, held):  # all of it (bar dust) left the wallet
                     pos.sol_out += self._estimate_value(pos)
                     pos.tokens_remaining, pos.closed = 0.0, True
                     pos.close_reason = "sold (confirmed late, PnL estimated)"
@@ -1036,14 +1057,18 @@ class Engine:
                     done = exits.ExitDecision(sold, False, dec.reason if dec else "sell",
                                               dec.tp_index if dec else None, dec.kind if dec else "")
                     # marks the TP level / initials / KOL exit as done, so it isn't sold again
-                    exits.apply_fill(pos, done, sold, self._estimate_value(pos, sold),
-                                     self.cfg.exits)
+                    est = self._estimate_value(pos, sold)
+                    exits.apply_fill(pos, done, sold, est, self.cfg.exits)
                     self.store.save_position(pos)
+                    self.store.event("sell", pos.mint, pos.symbol, reason=f"{done.reason} (late)",
+                                     tokens=sold, sol=est, sig="landed-late")
                     self.sell_failures.pop(pos.mint, None)
                     self._sell_next_try.pop(pos.mint, None)
                     text = (f"🔴 SELL {esc(pos.symbol)} {sold:,.0f} — {esc(done.reason)}: it landed "
                             "late (PnL estimated)")
                     self._spawn(self.notifier.send(text))
+                    if pos.closed:  # booked, counted in today's PnL and the loss limit
+                        await self._closed(pos)
                     return text  # a real sell: callers (limit orders) must see it as filled
             except Exception as e:
                 log.debug("balance reconcile failed: %s", e)
@@ -1557,9 +1582,10 @@ class Engine:
                     bal = max(0.0, bal - self._known_leftover(pos.mint))  # only this position's
                 except Exception:
                     bal = pos.tokens_remaining
+                empty = exits.is_dust(pos, bal)  # all of it (bar dust) left the wallet
                 if bal < pos.tokens_remaining * 0.999:  # a sell landed while we were down
                     sold = pos.tokens_remaining - max(bal, 0.0)
-                    if pos.pending_exit and bal > 0:  # book it as the exit it was (TP, ...)
+                    if pos.pending_exit and not empty:  # book it as the exit it was (TP, ...)
                         pe = pos.pending_exit
                         exits.apply_fill(pos, exits.ExitDecision(
                             sold, False, pe.get("reason", "sell"), pe.get("tp_index"),
@@ -1568,9 +1594,9 @@ class Engine:
                     else:
                         pos.sol_out += self._estimate_value(pos, sold)
                 pos.pending_exit = None
-                if bal <= 0:
+                if empty or pos.closed:
                     pos.tokens_remaining, pos.closed = 0.0, True
-                    pos.close_reason = "sold before restart (PnL estimated)"
+                    pos.close_reason = pos.close_reason or "sold before restart (PnL estimated)"
                     self.store.save_position(pos)
                     await self._closed(pos)
                     continue

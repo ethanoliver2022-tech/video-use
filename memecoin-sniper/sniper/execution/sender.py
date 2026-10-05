@@ -170,14 +170,15 @@ class TxSender:
         try:
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                for t in done:
-                    if t.exception() is None:
-                        for p in pending:  # keep a reference until they finish; log failures
-                            self._inflight.add(p)
-                            p.add_done_callback(self._path_done)
-                        pending = set()
-                        return True, []
-                    errors.append(t.exception())
+                errors += [t.exception() for t in done if t.exception() is not None]
+                if len(errors) < len(done):  # at least one path accepted it
+                    for e in errors:
+                        log.debug("one submission path failed: %s", e)
+                    for p in pending:  # keep a reference until they finish; log failures
+                        self._inflight.add(p)
+                        p.add_done_callback(self._path_done)
+                    pending = set()
+                    return True, []
             return False, errors
         finally:
             for p in pending:  # only when we were cancelled ourselves

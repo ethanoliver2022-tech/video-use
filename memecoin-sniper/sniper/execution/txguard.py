@@ -11,9 +11,14 @@ anything a real swap never needs, so a hostile transaction is refused, not signe
   SOL, closing a temporary account back into the wallet): no transfers, approvals,
   authority changes, burns or freezes;
 - the SOL moved out by top-level transfers is capped to what the trade needs (the swap
-  amount on a buy, the PumpPortal fee on a sell), the priority fee to your maximum, and
-  the most SOL a pump.fun / PumpSwap buy may pull from inside the program to the swap
-  amount plus your slippage. A sell may not contain a buy at all.
+  amount plus slippage on a buy, the PumpPortal fee on a sell), the priority fee to your
+  maximum, and the most SOL a pump.fun / PumpSwap buy may pull from inside the program to
+  the swap amount plus your slippage. A sell may not contain a buy at all;
+- a pump.fun / PumpSwap buy must deliver the tokens to this wallet's own token account.
+
+What it can't fully rule out: a compromised builder routing one swap's *output* elsewhere
+on routes it can't read offline (e.g. Jupiter's internal accounts). That would cost at most
+that one trade, never the wallet, which is why the wallet should stay small.
 
 Programs a future pump.fun or PumpPortal update starts using can be allowed without a code
 change through EXTRA_ALLOWED_PROGRAMS in .env (a trusted file Telegram can't change).
@@ -21,6 +26,8 @@ change through EXTRA_ALLOWED_PROGRAMS in .env (a trusted file Telegram can't cha
 from __future__ import annotations
 
 import struct
+from functools import lru_cache
+from typing import Optional
 
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
@@ -34,6 +41,7 @@ PUMP_BUY = bytes.fromhex("66063d1201daebea")          # buy(amount, max_sol_cost
 PUMP_BUY_EXACT_SOL = bytes.fromhex("38fc74089edfcd5f")  # buy_exact_sol_in(sol_in, min_out)
 TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+ATA_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 
 ALLOWED_PROGRAMS = {
     SYSTEM,
@@ -82,11 +90,31 @@ def _lamports_out(data: bytes, kind: int) -> int:
     return 0
 
 
+@lru_cache(maxsize=4096)
+def _owner_atas(owner: str, mint: str) -> frozenset:
+    """The wallet's associated token accounts for `mint` (classic and Token-2022)."""
+    o, m = Pubkey.from_string(owner), Pubkey.from_string(mint)
+    return frozenset(Pubkey.find_program_address([bytes(o), bytes(Pubkey.from_string(p)), bytes(m)],
+                                                 ATA_PROGRAM)[0] for p in (TOKEN, TOKEN_2022))
+
+
 def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: float,
                       extra_programs: frozenset[str] = frozenset(),
                       max_fee_sol: float = 0.01, side: str = "buy",
-                      max_curve_sol: float = 0.0) -> None:
-    """Raise UnsafeTransaction unless `tx` looks like a swap for `owner`."""
+                      max_curve_sol: float = 0.0, mint: Optional[str] = None) -> None:
+    """Raise UnsafeTransaction unless `tx` looks like a swap for `owner`. A transaction the
+    guard can't even read (an out-of-range index, a truncated field...) is refused too."""
+    try:
+        _check(tx, owner, max_sol_out, extra_programs, max_fee_sol, side, max_curve_sol, mint)
+    except UnsafeTransaction:
+        raise
+    except Exception as e:
+        raise UnsafeTransaction(f"it's malformed ({type(e).__name__})") from None
+
+
+def _check(tx: VersionedTransaction, owner: Pubkey, max_sol_out: float,
+           extra_programs: frozenset[str], max_fee_sol: float, side: str,
+           max_curve_sol: float, mint: Optional[str]) -> None:
     msg = tx.message
     keys = list(msg.account_keys)  # program ids are always static keys, never from lookups
     if not keys or keys[0] != owner:
@@ -136,6 +164,13 @@ def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: floa
             if cost > max_curve_sol * 1e9:
                 raise UnsafeTransaction(f"its buy may spend up to {cost / 1e9:.4f} SOL, more "
                                         f"than this trade allows ({max_curve_sol:.4f})")
+            # the bought tokens must land in this wallet's own token account (checked when
+            # every account is readable here; lookup-table entries can't be resolved offline)
+            if mint and all(a < len(keys) for a in accts):
+                mine = _owner_atas(str(owner), mint)
+                if not any(keys[a] in mine for a in accts):
+                    raise UnsafeTransaction("its buy would deliver the tokens to an account "
+                                            "that isn't this wallet's")
         elif program == COMPUTE_BUDGET and data:
             try:
                 if data[0] == 2:    # SetComputeUnitLimit(u32)

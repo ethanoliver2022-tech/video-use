@@ -222,8 +222,15 @@ async def test_live_chaos(tmp_path, seed):
                 # no orphans: every token in the wallet is managed, or being watched
                 pending = eng.pending_buys()
                 for mint, bal in chain.tokens.items():
-                    if bal > 1e-6:
-                        pos = eng.positions.get(mint)
+                    pos = eng.positions.get(mint)
+                    # dust a full exit leaves behind (the bot's own rule: < a millionth of the
+                    # bag counts as sold out) isn't an orphan, even once the closed position
+                    # is no longer in memory after a restart
+                    row = eng.store.db.execute("SELECT data FROM positions WHERE mode = ? AND "
+                                               "mint = ?", (eng.mode, mint)).fetchone()
+                    initial = json.loads(row[0])["tokens_initial"] if row else 0.0
+                    dust = 2e-6 * initial
+                    if bal > max(1e-6, dust):
                         assert (pos and not pos.closed) or mint in pending, \
                             ("orphaned tokens", seed, step, mint, bal)
         # drain: a calm chain, and every position must end up fully sold

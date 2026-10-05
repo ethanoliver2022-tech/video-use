@@ -203,10 +203,13 @@ Who can do what:
   read the key, so use SSH keys (not passwords) and keep the server updated.
 - **Every swap is checked before it's signed.** Transactions built by PumpPortal or
   Jupiter must be paid for and signed only by your wallet, may only call known swap
-  programs, can't approve or hand over your tokens or wallet, and can't move out more
-  SOL than the trade needs. So even a compromised trading API couldn't use your
-  signature to drain the wallet: the bot refuses to sign it (a refused PumpPortal sell
-  goes through Jupiter instead, so exits still happen).
+  programs, can't approve or hand over your tokens or wallet, can't move out more
+  SOL than the trade needs, and a pump.fun buy must deliver the tokens to your own
+  account. So even a compromised trading API couldn't use your signature to drain the
+  wallet: the bot refuses to sign it (a refused PumpPortal sell goes through Jupiter
+  instead, so exits still happen). The most such an API could still misdirect is a
+  single trade's output on a route the bot can't fully read, which is one more reason
+  to keep the hot wallet small.
 - **Lock it down further from `.env`** (Telegram can't change these, so they hold
   even if someone got into your Telegram account):
   `WITHDRAW_ALLOWLIST=<your Phantom address>` allows withdrawals only there, and
@@ -289,9 +292,10 @@ Built to run unattended:
   the live trade stream never waits on a sell or on Telegram.
 - **Jito down or rate limited?** Transactions fall back to plain RPC, because
   getting out matters more than MEV protection. And a sell whose bundle isn't
-  confirmed within 2.5s (say the tip was below the going rate at a busy moment)
-  is also sent through your RPCs: the same signed transaction, so it can only
-  ever land once.
+  confirmed in time (say the tip was below the going rate at a busy moment) is also
+  sent through your RPCs: after 2.5s for emergency exits (stop loss, dev dump,
+  copied wallet sold), after 10s for the rest, which keep their sandwich protection
+  longer. It's the same signed transaction, so it can only ever land once.
 - **Jupiter's rate limit is kept for trades.** Price checks and safety probes only
   ever use part of it, so buys and sells never get "rate limited". If Jupiter
   retires its keyless API, the bot moves itself to the new one.

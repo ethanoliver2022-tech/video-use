@@ -147,6 +147,14 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
     return None
 
 
+DUST_LEFT = 1e-6  # less than this share of the original bag counts as sold out
+
+
+def is_dust(pos: Position, tokens: float) -> bool:
+    """A remainder too small to matter (a few raw units a full sell can leave behind)."""
+    return tokens <= pos.tokens_initial * DUST_LEFT
+
+
 def _partial(pos: Position, tokens: float, reason: str, keep: float = 0.0) -> Optional[ExitDecision]:
     """Sell `tokens`, but never into the moonbag (`keep`) and never leave dust."""
     sellable = max(0.0, pos.tokens_remaining - keep)
@@ -171,7 +179,7 @@ def apply_fill(pos: Position, dec: ExitDecision, tokens_sold: float, sol_receive
         pos.kol_exit_done = True
     if dec.kind == "initials":
         pos.initials_taken = True
-    if dec.sell_all or pos.tokens_remaining <= pos.tokens_initial * 1e-6:
+    if dec.sell_all or is_dust(pos, pos.tokens_remaining):
         pos.tokens_remaining = 0.0
         pos.closed = True
         pos.close_reason = dec.reason
