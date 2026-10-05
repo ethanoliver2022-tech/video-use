@@ -1015,23 +1015,27 @@ class Engine:
         return await self.apply_preset(self.cfg.preset)
 
     async def switch_mode(self, live: bool) -> str:
-        if live == self.live:
-            return f"Already in {self.mode.upper()} mode."
-        open_pos = [p for p in self.positions.values() if not p.closed]
-        if open_pos or self._buying or self.pending_buys():
-            n = len(open_pos) + len(self._buying) + len(self.pending_buys())
-            return f"Close your {n} open {self.mode} position(s) first (Positions → Sell 100%)."
-        self.executor = self._build_executor(live)  # raises if no wallet
-        for mint in list(self.positions):
-            await self.stream.unwatch_token(mint)
-        self.live, self.mode = live, "live" if live else "paper"
-        self.store.mode = self.mode
-        self.store.set_setting("mode", self.mode)
-        self.positions.clear()
-        self.sell_failures.clear()
-        self._sell_next_try.clear()
-        await self.restore()
-        return f"Switched to {self.mode.upper()} mode."
+        # Hold the buy lock for the whole switch: a buy starting halfway through would
+        # trade with one mode's executor while being booked in the other's ledger.
+        async with self.buy_lock:
+            if live == self.live:
+                return f"Already in {self.mode.upper()} mode."
+            open_pos = [p for p in self.positions.values() if not p.closed]
+            if open_pos or self._buying or self.pending_buys():
+                n = len(open_pos) + len(self._buying) + len(self.pending_buys())
+                return f"Close your {n} open {self.mode} position(s) first (Positions → Sell 100%)."
+            executor = self._build_executor(live)  # raises if no wallet
+            old = list(self.positions)
+            self.executor, self.live, self.mode = executor, live, "live" if live else "paper"
+            self.store.mode = self.mode
+            self.store.set_setting("mode", self.mode)
+            self.positions.clear()
+            self.sell_failures.clear()
+            self._sell_next_try.clear()
+            for mint in old:
+                await self.stream.unwatch_token(mint)
+            await self.restore()
+            return f"Switched to {self.mode.upper()} mode."
 
     async def withdraw(self, to: str, amount: Optional[float]) -> str:
         """Send SOL out of the hot wallet. amount=None sends everything minus the fee."""
