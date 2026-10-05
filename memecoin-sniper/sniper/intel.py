@@ -62,13 +62,32 @@ def _safe_url(uri: str) -> bool:
     return ip.is_global
 
 
+async def _resolves_public(uri: str) -> bool:
+    """A hostname must not lead to this machine or its private network either."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    host = urlsplit(uri).hostname or ""
+    try:
+        ipaddress.ip_address(host)
+        return True  # a literal address: _safe_url already judged it
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(
+            host, None, type=socket.SOCK_STREAM), 2)
+    except Exception:
+        return False
+    return bool(infos) and all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+
+
 async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -> Optional[dict]:
     if not uri:
         return None
     via_gateway = bool(gateway and "/ipfs/" in uri)
     if via_gateway:  # the user's own gateway (may well be local): trusted
         uri = gateway.rstrip("/") + "/ipfs/" + uri.split("/ipfs/", 1)[1]
-    if not via_gateway and not _safe_url(uri):
+    if not via_gateway and not (_safe_url(uri) and await _resolves_public(uri)):
         log.debug("metadata uri refused: %s", uri[:100])
         return None
 
@@ -87,16 +106,6 @@ async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -
         return await asyncio.wait_for(read(), METADATA_DEADLINE)
     except Exception as e:
         log.debug("metadata fetch failed for %s: %s", uri[:100], e)
-    return None
-    if gateway and "/ipfs/" in uri:
-        uri = gateway.rstrip("/") + "/ipfs/" + uri.split("/ipfs/", 1)[1]
-    try:
-        resp = await http.get(uri, timeout=2)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data if isinstance(data, dict) else None
-    except Exception as e:
-        log.debug("metadata fetch failed for %s: %s", uri, e)
     return None
 
 

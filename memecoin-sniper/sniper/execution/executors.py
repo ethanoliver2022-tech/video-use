@@ -146,8 +146,7 @@ class PaperExecutor:
     def _costs(self) -> float:
         if self.cfg is None:
             return 0.0
-        tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
-        return NETWORK_FEE_SOL + self.cfg.trading.priority_fee_sol + tip
+        return NETWORK_FEE_SOL + self.cfg.trading.priority_fee_sol + self.cfg.speed.tip_sol()
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
         if curve:
@@ -200,7 +199,7 @@ class LiveExecutor:
         return resp.content
 
     def _tip(self) -> float:
-        return self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+        return self.cfg.speed.tip_sol()
 
     async def _submit(self, unsigned: bytes, mint: str, side: str) -> Fill:
         """Sign, send, confirm and read back the real fill.

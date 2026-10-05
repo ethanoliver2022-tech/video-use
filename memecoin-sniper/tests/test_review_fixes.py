@@ -499,15 +499,35 @@ def test_metadata_urls_are_restricted():
         assert not _safe_url(bad), bad
 
 
-async def test_metadata_body_is_size_capped():
+async def test_metadata_body_is_size_capped(monkeypatch):
     import httpx
     from sniper import intel
 
+    async def public(uri):
+        return True
+    monkeypatch.setattr(intel, "_resolves_public", public)
+    body = {"small": b'{"twitter": "https://x.com/a"}', "huge": b'{"a":"' + b"x" * 70_000 + b'"}'}
+
     def handler(req):
-        return httpx.Response(200, content=b'{"a":"' + b"x" * 70_000 + b'"}')  # > 64 KB
+        return httpx.Response(200, content=body[req.url.path.strip("/")])
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    assert await intel.fetch_metadata(http, "https://meta.example/x") is None
+    assert await intel.fetch_metadata(http, "https://meta.example/small") == {
+        "twitter": "https://x.com/a"}  # control: the fetch path works
+    assert await intel.fetch_metadata(http, "https://meta.example/huge") is None  # > 64 KB
     await http.aclose()
+
+
+async def test_metadata_hostname_resolving_to_a_private_address_is_refused(monkeypatch):
+    import socket
+    from sniper import intel
+    loop = asyncio.get_running_loop()
+
+    async def fake_getaddrinfo(host, *a, **k):
+        ip = {"evil.example": "169.254.169.254", "good.example": "8.8.8.8"}[host]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0))]
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    assert not await intel._resolves_public("http://evil.example/latest/meta-data")
+    assert await intel._resolves_public("https://good.example/x")
 
 
 async def test_toggling_mode_keeps_copy_sells_off(tmp_path):
@@ -634,3 +654,125 @@ async def test_full_pump_exit_is_built_while_the_balance_is_read():
     rpc.confirm = confirm
     await ex.sell("M", 1.0, True, pump=True, curve=None)
     assert order.index("build-start") < order.index("balance-done")
+
+
+# ---------- fifth review ----------
+
+async def test_key_pasted_after_the_import_prompt_expired_is_deleted(tmp_path, monkeypatch):
+    import base58
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    await h.tap("w:imp")
+    assert h.tg.pending["kind"] == "import"
+    h.tg.pending["expires"] = 0  # the user came back after the prompt timed out
+    deleted = []
+    real_api = h.tg.api
+
+    async def api(method, **params):
+        if method == "deleteMessage":
+            deleted.append(params["message_id"])
+        return await real_api(method, **params)
+    h.tg.api = api
+    await h.text(base58.b58encode(bytes(Keypair())).decode(), msg_id=77)
+    assert 77 in deleted and "deleted" in h.last
+    await h.close()
+
+
+async def test_empty_wallet_clears_a_stale_leftover(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    eng.live = True
+    eng._set_leftover(pos.mint, 5000.0)
+
+    async def empty(*a, **k):
+        return 0.0
+    eng.rpc.get_token_balance = empty
+    await eng._sell_failed(pos, RuntimeError("outcome unknown"))
+    assert eng._known_leftover(pos.mint) == 0.0  # the old bag is gone too
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_slow_telegram_never_stalls_the_order_loop(tmp_path):
+    eng = engine(tmp_path)
+    gate = asyncio.Event()
+
+    async def slow(*a, **k):
+        await gate.wait()
+    eng.notifier.send = slow
+    eng.store.add_order(str(Keypair().pubkey()), "buy", 0.1, 0, 1.0, ">=", 1.0, 0.0)  # expired
+    await asyncio.wait_for(eng.check_orders(), 2)
+    gate.set()
+    await eng.http.aclose()
+
+
+async def test_scan_only_alerts_are_rate_limited(tmp_path):
+    from sniper.engine import SCAN_ALERTS_PER_HOUR
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+    eng.scan_only = True
+    sent = []
+
+    async def send(text, *a, **k):
+        sent.append(text)
+    eng.notifier.send = send
+    for _ in range(SCAN_ALERTS_PER_HOUR + 30):
+        await eng.handle_candidate(Candidate(chain="solana", mint=str(Keypair().pubkey()),
+                                             source="pumpfun", force=True))
+    await eng.settle()
+    assert len(sent) == SCAN_ALERTS_PER_HOUR
+    await eng.http.aclose()
+
+
+async def test_tracked_config_wallets_load_without_copy_trading(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    addr = str(Keypair().pubkey())
+    eng.cfg.copytrade.enabled = False
+    eng.cfg.copytrade.wallets = [CopyWallet(address=addr, mode="alert")]
+    eng._load_copy_wallets()
+    assert addr in eng._copy
+    await eng.http.aclose()
+
+
+async def test_late_landed_limit_stop_counts_as_filled(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    pos.update_price(pos.entry_price)
+    eng.live = True
+    oid = eng.store.add_order(pos.mint, "sell", 0, 100, 0.0, "<=", pos.entry_price, 1e12)
+    assert eng.store.set_order_status(oid, "executing")
+
+    async def sell(*a, **k):
+        raise RuntimeError("outcome unknown")
+    eng.executor.sell = sell
+
+    async def empty(*a, **k):
+        return 0.0  # it landed: the wallet is empty
+    eng.rpc.get_token_balance = empty
+    await eng._fill_order({"id": oid, "side": "sell", "mint": pos.mint, "pct": 100})
+    status = eng.store.db.execute("SELECT status FROM orders WHERE id = ?", (oid,)).fetchone()[0]
+    assert status == "filled"
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_clock_step_shift_is_saved(tmp_path, monkeypatch):
+    import time as _t
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    opened = pos.opened_at
+    boot = [100.0]
+    import sniper.engine as em
+    monkeypatch.setattr(em, "_boottime", lambda: boot[0])
+    real = _t.time
+    offset = [0.0]
+    monkeypatch.setattr(_t, "time", lambda: real() + offset[0])
+    task = asyncio.create_task(eng.exit_loop())
+    await asyncio.sleep(0.05)
+    offset[0] = 3600  # NTP steps the clock an hour forward (boot time doesn't move)
+    await asyncio.sleep(1.2)
+    task.cancel()
+    saved = [p for p in eng.store.open_positions() if p.mint == pos.mint][0]
+    assert saved.opened_at > opened + 3000  # a restart keeps the corrected time
+    await eng.http.aclose()

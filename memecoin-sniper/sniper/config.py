@@ -52,6 +52,10 @@ class SpeedConfig:
     min_priority_fee_sol: float = 0.0001
     max_priority_fee_sol: float = 0.003
 
+    def tip_sol(self) -> float:
+        """The Jito tip a trade pays (the one rule paper, live and risk checks share)."""
+        return self.jito_tip_sol if self.jito_enabled else 0.0
+
 
 @dataclass
 class DiscoveryConfig:

@@ -41,6 +41,7 @@ DANGER_EXITS = ("dev sold", "copied wallet sold", "stop loss")
 WRITE_OFF_AFTER = 40         # failed sells (with backoff, ~30+ min) before giving a position up
 ALERTS_PER_HOUR = 20         # cap on "other chain" alerts so Telegram never gets flooded
 TRACKER_ALERTS_PER_HOUR = 60 # cap on wallet-tracker alerts
+SCAN_ALERTS_PER_HOUR = 60    # scan-only mode: "passes filters" messages
 SEEN_TTL = 3 * 3600          # forget candidates after this long (memory stays flat 24/7)
 CURVE_TTL = 15 * 60          # forget bonding-curve snapshots of tokens we don't hold
 ATA_RENT_SOL = 0.0025        # rent for a new token account, roughly
@@ -136,6 +137,7 @@ class Engine:
         self._recent_sig_set: set[str] = set()
         self._alerts: deque[float] = deque()
         self._tracker_alerts: deque[float] = deque()
+        self._scan_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
         self._orders_running: set[int] = set()
         self._curve_misses: dict[str, int] = {}
@@ -170,11 +172,10 @@ class Engine:
         """Copy-mode wallets only while copy trading is on; alert-mode (tracked) wallets always."""
         self._copy.clear()
         enabled = self.cfg.copytrade.enabled
-        if enabled:
-            removed = self._removed()
-            for w in self.cfg.copytrade.wallets:
-                if w.address not in removed:  # removed from chat earlier
-                    self._copy[w.address] = w
+        removed = self._removed()
+        for w in self.cfg.copytrade.wallets:
+            if w.address not in removed and (enabled or w.mode == "alert"):  # not removed in chat
+                self._copy[w.address] = w
         for w in self.store.copy_wallets():  # added from Telegram
             if enabled or w["mode"] == "alert":
                 self._copy[w["address"]] = CopyWallet(**w)
@@ -247,7 +248,7 @@ class Engine:
             report = await self.safety.evaluate(c)
             if not report.passed:
                 log.debug("reject %s: %s", tag, "; ".join(report.reasons))
-                return "❌ rejected: " + "; ".join(report.reasons)
+                return "❌ rejected: " + esc("; ".join(report.reasons))
             notes = "; ".join(report.notes)
         if c.chain != "solana":
             if self.cfg.notify.alert_other_chains and self._alert_allowed():
@@ -255,13 +256,15 @@ class Engine:
                 await self.notifier.send(f"👀 {esc(tag)}{liq} via {c.source} — {esc(c.url or '')}")
             return "alert only (not Solana)"
         if self.scan_only:
-            await self.notifier.send(f"✅ passes filters: {esc(tag)} ({esc(notes)}) {esc(c.url or '')}")
+            if self._alert_allowed(self._scan_alerts, SCAN_ALERTS_PER_HOUR):
+                self._spawn(self.notifier.send(
+                    f"✅ passes filters: {esc(tag)} ({esc(notes)}) {esc(c.url or '')}"))
             return "passes filters"
         if c.source == "pumpfun" and self.cfg.entry.confirm_seconds > 0 and not c.force:
             problems = await self.confirm_flow(c)
             if problems:
                 log.debug("skip %s after confirmation: %s", tag, "; ".join(problems))
-                return "❌ confirmation failed: " + "; ".join(problems)
+                return "❌ confirmation failed: " + esc("; ".join(problems))
             notes += "; early flow confirmed"
             result = await self.try_buy(c, notes)
             pos = self.positions.get(c.mint)
@@ -456,7 +459,7 @@ class Engine:
                 bal = await self.rpc.get_balance_sol(self.own_wallet)
             except Exception as e:  # can't verify funds: don't buy blind
                 log.info("skip %s %s: balance unreadable (%s)", c.symbol, c.mint, e)
-                return f"skipped: couldn't check the wallet balance ({str(e)[:80]})"
+                return f"skipped: couldn't check the wallet balance ({esc(str(e)[:80])})"
         async with self.buy_lock:  # reserve a slot atomically, then trade without the lock
             if (c.mint in self._buying or c.mint in self.pending_buys()
                     or (c.mint in self.positions and not self.positions[c.mint].closed)):
@@ -550,7 +553,7 @@ class Engine:
             self._save_pending(pending)
 
     def _tip_estimate(self) -> float:
-        return self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+        return self.cfg.speed.tip_sol()
 
     # Tokens the bot knows are in the wallet but belong to no position: what's left of a
     # written-off bag. Kept apart from the positions table (a re-buy of the mint replaces
@@ -745,6 +748,8 @@ class Engine:
                 for pos in self.positions.values():
                     pos.opened_at += step
                     pos.last_update += step
+                    if not pos.closed:
+                        self.store.save_position(pos)  # survives a restart too
                 pending = self.pending_buys()  # an unconfirmed buy keeps its full window
                 for info in pending.values():
                     info["ts"] = info.get("ts", 0) + step
@@ -843,6 +848,8 @@ class Engine:
         if self.live:  # a sell that "failed" may still have landed: trust the wallet
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, pos.mint)
+                if held <= 0:
+                    self._clear_leftover(pos.mint)  # the wallet is empty: no old bag either
                 held = max(0.0, held - self._known_leftover(pos.mint))  # only this position's
                 if held <= 0:
                     pos.sol_out += self._estimate_value(pos)
@@ -1063,7 +1070,7 @@ class Engine:
                 continue
             if now >= o["expires"]:
                 self.store.set_order_status(o["id"], "expired")
-                await self.notifier.send(f"⌛ Order #{o['id']} expired")
+                self._spawn(self.notifier.send(f"⌛ Order #{o['id']} expired"))  # don't stall stops
                 continue
             if o["side"] == "sell":
                 pos = self.positions.get(o["mint"])
@@ -1096,7 +1103,7 @@ class Engine:
                 ok = result.startswith("🟢")
                 if not ok and o["mint"] in self.pending_buys():  # sent; outcome not known yet
                     self.store.set_order_status(o["id"], "unconfirmed", from_status="executing")
-                    await self.notifier.send(f"⏳ Order #{o['id']}: {esc(result)}. If it lands it "
+                    await self.notifier.send(f"⏳ Order #{o['id']}: {result}. If it lands it "
                                              "will be managed automatically.", logging.WARNING)
                     return
             else:
@@ -1108,19 +1115,22 @@ class Engine:
                 if o["pct"] >= 100 or dec is None:
                     dec = exits.ExitDecision(pos.tokens_remaining, True, "limit sell")
                 result = await self.execute_sell(pos, dec)
-                ok = result.startswith("🔴")
+                # our sell that only confirmed late also filled the order; tokens found gone
+                # from the wallet (sold some other way) did not
+                ok = result.startswith("🔴") or (
+                    pos.closed and pos.close_reason.startswith("sold (confirmed late"))
                 if not ok and not pos.closed:  # busy or a transient failure: keep the stop armed
                     self.store.set_order_status(o["id"], "open", from_status="executing")
                     return
                 if not ok:  # the position closed some other way (e.g. nothing left to sell)
                     self.store.set_order_status(o["id"], "cancelled", from_status="executing")
-                    await self.notifier.send(f"ℹ️ Order #{o['id']} cancelled: {esc(result)}")
+                    await self.notifier.send(f"ℹ️ Order #{o['id']} cancelled: {result}")
                     return
             self.store.set_order_status(o["id"], "filled" if ok else "failed",
                                         from_status="executing")
             if not ok:
                 await self.notifier.send(f"⚠️ Order #{o['id']} triggered but didn't fill: "
-                                         f"{esc(result)}", logging.WARNING)
+                                         f"{result}", logging.WARNING)  # already escaped
         except Exception as e:  # never leave an order stuck in "executing"
             log.exception("order %s failed", o["id"])
             self.store.set_order_status(o["id"], "failed", from_status="executing")
@@ -1326,6 +1336,8 @@ class Engine:
             if self.live:
                 try:
                     bal = await self.rpc.get_token_balance(self.own_wallet, pos.mint)
+                    if bal <= 0:
+                        self._clear_leftover(pos.mint)  # the wallet is empty: no old bag either
                     bal = max(0.0, bal - self._known_leftover(pos.mint))  # only this position's
                 except Exception:
                     bal = pos.tokens_remaining

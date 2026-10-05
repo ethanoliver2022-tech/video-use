@@ -225,6 +225,8 @@ class TelegramControl:
             return
         if chat != self.owner or not self._from_owner(msg.get("from")):
             return
+        if self.pending and time.monotonic() > self.pending["expires"]:
+            self.pending = None  # expire first, so a key sent to a stale prompt is still deleted
         if SECRET_RE.match(text) and not (self.pending and self.pending["kind"] == "import"):
             try:
                 await self.api("deleteMessage", chat_id=self.owner, message_id=msg.get("message_id"))
