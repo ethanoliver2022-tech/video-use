@@ -302,9 +302,10 @@ class LiveExecutor:
         self._guard(tx, max_sol_out, side)
 
     def _buy_cap(self, sol: float) -> float:
-        # top-level SOL out on a buy: the swap amount (Jupiter wraps it) or PumpPortal's
-        # 0.5% fee, plus room for rent; the bonding-curve payment itself runs in the program
-        return sol * 1.05 + 0.01
+        # top-level SOL out on a buy: the SOL wrapped for the swap (a PumpSwap buy wraps up to
+        # the swap amount plus your slippage; Jupiter wraps the amount) plus PumpPortal's 0.5%
+        # fee and room for rent; a bonding-curve payment itself runs inside the program
+        return sol * (1 + max(0.0, self.cfg.trading.slippage_pct) / 100) * 1.05 + 0.01
 
     @staticmethod
     def _sell_cap(value_sol: Optional[float]) -> float:

@@ -231,3 +231,18 @@ async def test_guard_runs_before_signing_whatever_the_signer_returns():
     with pytest.raises(NotSent, match="refused"):
         await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
     assert not signed and ex.sender.sent == 0
+
+
+def test_pumpswap_buy_wrapping_sol_up_to_slippage_is_allowed():
+    """A graduated token's buy wraps the swap amount plus slippage into WSOL: at high
+    slippage that must still pass, while anything beyond it is refused."""
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    cfg = load_config(None)
+    cfg.trading.slippage_pct = 50
+    ex, _ = live_executor(cfg)
+    ex.kp = ME
+    ok = tx(sol(int(0.1 * 1.5 * 1e9) + 500_000))       # 0.15 SOL wrapped + PumpPortal fee
+    ex._guard(ok, ex._buy_cap(0.1), "buy", 0.1)
+    with pytest.raises(UnsafeTransaction):
+        ex._guard(tx(sol(int(0.3 * 1e9))), ex._buy_cap(0.1), "buy", 0.1)
