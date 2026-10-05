@@ -105,7 +105,10 @@ class Jupiter:
         return data
 
     async def out_ui(self, quote: dict) -> float:
-        return int(quote["outAmount"]) / 10 ** await self.decimals(quote["outputMint"])
+        raw = quote.get("outAmount") if isinstance(quote, dict) else None
+        if not isinstance(raw, (str, int)) or not str(raw).isdigit():
+            raise ValueError(f"jupiter: malformed outAmount {raw!r}")
+        return int(raw) / 10 ** await self.decimals(quote["outputMint"])
 
     async def swap_tx(self, quote: dict, user: str, priority_fee_sol: float) -> bytes:
         resp = await self.http.post(f"{self.api}/swap", headers=self.headers, json={
@@ -186,7 +189,10 @@ class LiveExecutor:
         if not await self.rpc.confirm(sig):
             raise NotLanded(f"transaction {sig} expired without landing")
         tx = await self.rpc.get_transaction(sig)
-        tok, sol = balance_deltas(tx, self.pubkey, mint) if tx else (0.0, 0.0)
+        try:
+            tok, sol = balance_deltas(tx, self.pubkey, mint) if tx else (0.0, 0.0)
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+            tok, sol = 0.0, 0.0  # unreadable: fall back to the wallet below
         tok, sol = abs(tok), abs(sol)
         if tok <= 0:
             log.warning("could not read fill for %s from the transaction; using wallet balance", sig)

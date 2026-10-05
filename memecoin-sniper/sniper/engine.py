@@ -387,7 +387,10 @@ class Engine:
         if t.cooldown_after_loss_seconds and time.time() - self.last_loss_at < t.cooldown_after_loss_seconds:
             return "cooling down after loss"
         if self.live:
-            bal = await self.rpc.get_balance_sol(self.own_wallet)
+            try:
+                bal = await self.rpc.get_balance_sol(self.own_wallet)
+            except Exception as e:  # can't verify funds: don't buy blind
+                return f"couldn't check the wallet balance ({str(e)[:80]})"
             tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
             needed = sol + sum(self._buying.values()) + tip + self.cfg.speed.max_priority_fee_sol \
                 + ATA_RENT_SOL
@@ -431,6 +434,10 @@ class Engine:
                 await self.notifier.send(f"❌ buy failed {esc(c.symbol)} {c.mint}: {esc(str(e))}",
                                          logging.WARNING)
                 return f"buy failed: {e}"
+            fill.tokens = num(fill.tokens, allow_zero=True) or 0.0  # never trust a fill blindly
+            fill.sol = num(fill.sol, allow_zero=True) or 0.0
+            if fill.tokens > 0 and fill.sol <= 0:
+                fill.sol = sol  # we know what we spent
             if fill.tokens <= 0:  # confirmed but no tokens visible yet: let the reconciler decide
                 await self.notifier.send(f"⏳ buy {esc(c.symbol)} confirmed but no tokens visible "
                                          f"yet ({fill.signature}); checking the wallet")
@@ -666,7 +673,9 @@ class Engine:
                 return await self._sell_failed(pos, e)
             self.sell_failures.pop(pos.mint, None)
             self._sell_next_try.pop(pos.mint, None)
-            exits.apply_fill(pos, dec, fill.tokens or dec.tokens, fill.sol, self.cfg.exits)
+            fill.sol = num(fill.sol, allow_zero=True) or 0.0  # a bad fill never corrupts the books
+            fill.tokens = min(num(fill.tokens) or dec.tokens, pos.tokens_remaining)
+            exits.apply_fill(pos, dec, fill.tokens, fill.sol, self.cfg.exits)
             self.store.save_position(pos)
             self.store.event("sell", pos.mint, pos.symbol, reason=dec.reason, tokens=fill.tokens,
                              sol=fill.sol, sig=fill.signature)

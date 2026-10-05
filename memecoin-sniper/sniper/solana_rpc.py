@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import itertools
 import logging
 from typing import Any, Optional
@@ -14,6 +15,13 @@ log = logging.getLogger(__name__)
 
 class RpcError(RuntimeError):
     pass
+
+
+PARSE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, IndexError)
+
+
+def _malformed(method: str) -> RpcError:
+    return RpcError(f"{method}: malformed response from the RPC node")
 
 
 class TxFailed(RpcError):
@@ -45,12 +53,21 @@ class SolanaRpc:
 
     async def get_balance_sol(self, pubkey: str) -> float:
         res = await self.call("getBalance", [pubkey, {"commitment": "confirmed"}])
-        return res["value"] / 1e9
+        try:
+            lamports = res["value"]
+            if isinstance(lamports, bool) or not isinstance(lamports, int) or lamports < 0:
+                raise ValueError(lamports)
+        except PARSE_ERRORS:
+            raise _malformed("getBalance") from None
+        return lamports / 1e9
 
     async def get_latest_blockhash(self):
         from solders.hash import Hash
         res = await self.call("getLatestBlockhash", [{"commitment": "confirmed"}])
-        return Hash.from_string(res["value"]["blockhash"])
+        try:
+            return Hash.from_string(res["value"]["blockhash"])
+        except PARSE_ERRORS:
+            raise _malformed("getLatestBlockhash") from None
 
     async def get_mint_info(self, mint: str) -> Optional[dict]:
         res = await self.call("getAccountInfo", [mint, {"encoding": "jsonParsed"}])
@@ -81,10 +98,15 @@ class SolanaRpc:
             [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}],
         )
         raw, decimals = 0, 0
-        for acct in (res or {}).get("value", []):
-            amt = acct["account"]["data"]["parsed"]["info"]["tokenAmount"]
-            raw += int(amt["amount"])
-            decimals = int(amt["decimals"])
+        try:
+            for acct in res["value"]:
+                amt = acct["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                if not str(amt["amount"]).isdigit() or not 0 <= int(amt["decimals"]) <= 18:
+                    raise ValueError(amt)
+                raw += int(amt["amount"])
+                decimals = int(amt["decimals"])
+        except PARSE_ERRORS:
+            raise _malformed("getTokenAccountsByOwner") from None
         return raw, decimals
 
     async def get_token_balance(self, owner: str, mint: str) -> float:
@@ -94,10 +116,13 @@ class SolanaRpc:
     async def get_account_bytes(self, address: str) -> Optional[bytes]:
         res = await self.call("getAccountInfo", [address, {"encoding": "base64",
                                                            "commitment": "confirmed"}])
-        value = res and res.get("value")
-        if not value:
-            return None
-        return base64.b64decode(value["data"][0])
+        try:
+            value = res and res.get("value")
+            if not value:
+                return None
+            return base64.b64decode(value["data"][0], validate=True)
+        except (*PARSE_ERRORS, binascii.Error):
+            raise _malformed("getAccountInfo") from None
 
     async def send_raw_transaction(self, raw: bytes) -> str:
         encoded = base64.b64encode(raw).decode()
@@ -122,7 +147,12 @@ class SolanaRpc:
                 log.debug("status poll failed: %s", e)
                 await asyncio.sleep(1.0)
                 continue
-            status = ((res or {}).get("value") or [None])[0]
+            try:
+                status = ((res or {}).get("value") or [None])[0]
+                if status is not None and not isinstance(status, dict):
+                    raise TypeError(status)
+            except PARSE_ERRORS:
+                status = None  # malformed: treat as "not seen yet" and keep polling
             if status:
                 if status.get("err"):
                     raise TxFailed(f"transaction {signature} failed on-chain: {status['err']}")
