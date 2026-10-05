@@ -461,3 +461,176 @@ async def test_balance_rpc_is_read_outside_the_buy_lock(tmp_path):
     assert seen_locked == [False]
     eng.live = False
     await eng.http.aclose()
+
+
+# ---------- fourth review ----------
+
+def test_sell_slippage_never_below_the_users_setting(tmp_path):
+    eng = engine(tmp_path)
+    eng.cfg.trading.slippage_pct = 80
+    from sniper.models import Position
+    pos = Position(mint="M", symbol="M", source="x", creator=None, entry_price=1.0,
+                   tokens_initial=1.0, tokens_remaining=1.0, sol_in=1.0)
+    assert eng._sell_slippage(pos, exits.ExitDecision(1.0, True, "stop loss (-30%)")) >= 80
+    eng.cfg.trading.slippage_pct = 20
+    assert eng._sell_slippage(pos, exits.ExitDecision(1.0, True, "stop loss (-30%)")) <= 50
+
+
+async def test_small_buys_dont_start_below_the_stop_loss(tmp_path):
+    eng = engine(tmp_path)
+
+    async def buy(c, sol, curve):  # 0.01 SOL swap, plus ~0.005 of rent/tip/fees
+        return Fill(tokens=1_000_000.0, sol=sol + 0.005, signature="S")
+    eng.executor.buy = buy
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.01, force=True)
+    pos = eng.positions[m]
+    pos.update_price(0.01 / 1_000_000.0)  # the market hasn't moved
+    assert abs(pos.pnl_pct) < 1 and pos.sol_in > 0.0149  # costs are still in SOL PnL
+    assert exits.evaluate(pos, eng.cfg.exits) is None
+    await eng.http.aclose()
+
+
+def test_metadata_urls_are_restricted():
+    from sniper.intel import _safe_url
+    assert _safe_url("https://ipfs.io/ipfs/Qm") and _safe_url("https://cf-ipfs.com/x")
+    for bad in ("http://127.0.0.1/x", "http://10.1.2.3/", "http://169.254.169.254/latest",
+                "file:///etc/passwd", "http://localhost:9000", "https://[::1]/", "gopher://x"):
+        assert not _safe_url(bad), bad
+
+
+async def test_metadata_body_is_size_capped():
+    import httpx
+    from sniper import intel
+
+    def handler(req):
+        return httpx.Response(200, content=b'{"a":"' + b"x" * 70_000 + b'"}')  # > 64 KB
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert await intel.fetch_metadata(http, "https://meta.example/x") is None
+    await http.aclose()
+
+
+async def test_toggling_mode_keeps_copy_sells_off(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    addr = str(Keypair().pubkey())
+    eng.cfg.copytrade.wallets = [CopyWallet(address=addr, copy_sells=False)]
+    await eng.set_wallet_mode(addr, "alert")
+    await eng.set_wallet_mode(addr, "copy")
+    w = [x for x in eng.store.copy_wallets() if x["address"] == addr][0]
+    assert w["copy_sells"] is False
+    await eng.http.aclose()
+
+
+async def test_removed_config_wallet_stays_removed(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    addr = str(Keypair().pubkey())
+    eng.cfg.copytrade.enabled = True
+    eng.cfg.copytrade.wallets = [CopyWallet(address=addr)]
+    eng._load_copy_wallets()
+    assert addr in eng._copy
+    assert await eng.remove_copy_wallet(addr)
+    eng._load_copy_wallets()  # e.g. after a copytrade setting change, or a restart
+    assert addr not in eng._copy
+    await eng.add_copy_wallet(addr)  # re-adding from chat brings it back
+    eng._load_copy_wallets()
+    assert addr in eng._copy
+    await eng.http.aclose()
+
+
+async def test_balance_reread_when_a_buy_finished_meanwhile(tmp_path):
+    eng = engine(tmp_path)
+    eng.live = True
+    reads = []
+
+    async def bal(*a, **k):
+        reads.append(1)
+        if len(reads) == 1:
+            eng._buys_finished += 1  # another buy completes during this read
+        return 10.0
+    eng.rpc.get_balance_sol = bal
+
+    async def buy(c, sol, curve):
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+    eng.executor.buy = buy
+    from sniper.models import Candidate
+    await eng.try_buy(Candidate(chain="solana", mint=str(Keypair().pubkey()), source="manual",
+                                force=True))
+    assert len(reads) == 2  # the stale balance was read again under the lock
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_limit_sell_on_a_closed_position_is_cancelled_not_failed(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    oid = eng.store.add_order(pos.mint, "sell", 0, 100, 0.0, "<=", pos.entry_price, 1e12)
+    assert eng.store.set_order_status(oid, "executing")
+    from sniper.execution.executors import NothingToSell
+
+    async def gone(*a, **k):
+        raise NothingToSell("gone")
+    eng.executor.sell = gone
+    await eng._fill_order({"id": oid, "side": "sell", "mint": pos.mint, "pct": 100})
+    status = eng.store.db.execute("SELECT status FROM orders WHERE id = ?", (oid,)).fetchone()[0]
+    assert status == "cancelled"
+    await eng.http.aclose()
+
+
+async def test_leftover_bag_survives_a_rebuy_of_the_same_mint(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    eng.live = True
+    eng._set_leftover(pos.mint, 5000.0)  # an old written-off bag
+    tracked = pos.tokens_remaining
+
+    async def bal(*a, **k):
+        return tracked + 5000.0  # nothing of this position sold yet
+    eng.rpc.get_token_balance = bal
+    await eng._sell_failed(pos, RuntimeError("outcome unknown"),
+                           exits.ExitDecision(tracked / 2, False, "take profit +50%", 0, "tp"))
+    assert pos.tokens_remaining == tracked and pos.sol_out == 0  # the old bag isn't a landing
+    eng.live = False
+    await eng.http.aclose()
+
+
+def test_sender_follows_config_changes():
+    from sniper.config import load_config
+    from sniper.execution.sender import TxSender
+    cfg = load_config("config.example.yaml")
+
+    class Rpc:
+        url = "https://main"
+    s = TxSender(cfg.speed, Rpc(), None, lambda: cfg.trading.priority_fee_sol)
+    cfg.speed.broadcast_rpcs = ["https://a", "https://b"]
+    assert [r.url for r in s.extra] == ["https://a", "https://b"]
+    cfg.trading.priority_fee_sol = 0.0042
+    assert s.default_fee == 0.0042
+
+
+async def test_full_pump_exit_is_built_while_the_balance_is_read():
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    ex, rpc = live_executor(load_config(None))
+    order = []
+
+    async def pp(*a, **k):
+        order.append("build-start")
+        await asyncio.sleep(0)
+        return b"tx"
+    ex._pumpportal_tx = pp
+    real = rpc.get_token_balance_raw
+
+    async def bal(*a, **k):
+        await asyncio.sleep(0)
+        order.append("balance-done")
+        return await real(*a, **k)
+    rpc.get_token_balance_raw = bal
+    rpc.balance_raw = 1_000_000
+
+    async def confirm(sig, timeout=90):
+        return True
+    rpc.confirm = confirm
+    await ex.sell("M", 1.0, True, pump=True, curve=None)
+    assert order.index("build-start") < order.index("balance-done")

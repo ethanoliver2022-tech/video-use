@@ -1,6 +1,8 @@
 """Launch intelligence: socials metadata and early order-flow / bundle detection."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 from collections import Counter
@@ -36,9 +38,56 @@ def extract_socials(meta: dict) -> list[str]:
     return out
 
 
+METADATA_MAX_BYTES = 64 * 1024  # real token metadata is a few hundred bytes
+METADATA_DEADLINE = 3.0         # seconds, total (a trickling server can't stall a worker)
+
+
+def _safe_url(uri: str) -> bool:
+    """The metadata URI is chosen by whoever launched the token: only plain web URLs, never
+    this machine or its private network."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host or host == "localhost" \
+            or host.endswith(".localhost") or host.endswith(".internal"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a hostname
+    return ip.is_global
+
+
 async def fetch_metadata(http: httpx.AsyncClient, uri: str, gateway: str = "") -> Optional[dict]:
     if not uri:
         return None
+    via_gateway = bool(gateway and "/ipfs/" in uri)
+    if via_gateway:  # the user's own gateway (may well be local): trusted
+        uri = gateway.rstrip("/") + "/ipfs/" + uri.split("/ipfs/", 1)[1]
+    if not via_gateway and not _safe_url(uri):
+        log.debug("metadata uri refused: %s", uri[:100])
+        return None
+
+    async def read() -> Optional[dict]:
+        async with http.stream("GET", uri, timeout=2) as resp:
+            if resp.status_code != 200:
+                return None
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body += chunk
+                if len(body) > METADATA_MAX_BYTES:
+                    return None
+        data = json.loads(bytes(body))
+        return data if isinstance(data, dict) else None
+    try:
+        return await asyncio.wait_for(read(), METADATA_DEADLINE)
+    except Exception as e:
+        log.debug("metadata fetch failed for %s: %s", uri[:100], e)
+    return None
     if gateway and "/ipfs/" in uri:
         uri = gateway.rstrip("/") + "/ipfs/" + uri.split("/ipfs/", 1)[1]
     try:

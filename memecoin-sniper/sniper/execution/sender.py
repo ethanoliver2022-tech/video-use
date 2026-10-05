@@ -65,13 +65,27 @@ def fee_from_samples(samples: list[int], percentile: float, cu: int = TYPICAL_SW
 
 class TxSender:
     def __init__(self, cfg: SpeedConfig, rpc: SolanaRpc, http: httpx.AsyncClient,
-                 default_priority_fee: float):
+                 default_priority_fee):
+        """default_priority_fee: SOL, or a callable returning it (read live from settings)."""
         self.cfg, self.rpc, self.http = cfg, rpc, http
-        self.default_fee = default_priority_fee
+        self._default_fee = default_priority_fee
         self._fee_cache: tuple[float, float] = (0.0, float("-inf"))  # (value, monotonic time)
-        self.extra = [SolanaRpc(url, http) for url in cfg.broadcast_rpcs if url != rpc.url]
+        self._extra: tuple[tuple[str, ...], list[SolanaRpc]] = ((), [])
         # swap signature -> its bundle's tip signature; oldest evicted (in-flight are newest)
         self.tip_sigs: OrderedDict[str, str] = OrderedDict()
+
+    @property
+    def default_fee(self) -> float:
+        f = self._default_fee
+        return f() if callable(f) else f
+
+    @property
+    def extra(self) -> list[SolanaRpc]:
+        """Broadcast RPCs, following config changes (presets reload it in place)."""
+        urls = tuple(u for u in self.cfg.broadcast_rpcs if u != self.rpc.url)
+        if urls != self._extra[0]:
+            self._extra = (urls, [SolanaRpc(u, self.http) for u in urls])
+        return self._extra[1]
 
     async def priority_fee(self) -> float:
         if not self.cfg.auto_priority_fee:

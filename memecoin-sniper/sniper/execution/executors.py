@@ -176,7 +176,7 @@ class LiveExecutor:
                  http: httpx.AsyncClient, sender: Optional[TxSender] = None):
         self.cfg, self.kp, self.rpc, self.jupiter, self.http = cfg, keypair, rpc, jupiter, http
         self.pubkey = str(keypair.pubkey())
-        self.sender = sender or TxSender(cfg.speed, rpc, http, cfg.trading.priority_fee_sol)
+        self.sender = sender or TxSender(cfg.speed, rpc, http, lambda: cfg.trading.priority_fee_sol)
 
     def _sign(self, unsigned: bytes) -> VersionedTransaction:
         tx = VersionedTransaction.from_bytes(unsigned)
@@ -300,8 +300,21 @@ class LiveExecutor:
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
         slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
-        raw, decimals = await self.rpc.get_token_balance_raw(self.pubkey, mint)
+        # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
+        # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
+        early = None
+        if pump and sell_all:
+            early = asyncio.ensure_future(self._pumpportal_tx("sell", mint, "100%", in_sol=False,
+                                                              slippage_pct=slippage))
+        try:
+            raw, decimals = await self.rpc.get_token_balance_raw(self.pubkey, mint)
+        except BaseException:
+            if early:
+                early.cancel()
+            raise
         if raw <= 0:
+            if early:
+                early.cancel()
             raise NothingToSell(f"no {mint} left in the wallet")
         held = raw / 10 ** decimals
         if sell_all or tokens >= held:
@@ -309,7 +322,15 @@ class LiveExecutor:
         else:
             sell_raw = int(tokens * 10 ** decimals)
         unsigned = None
-        if pump:
+        if early is not None:
+            if sell_all:
+                try:
+                    unsigned = await early
+                except Exception as e:
+                    log.warning("pumpportal sell build failed (%s); using Jupiter", e)
+            else:
+                early.cancel()
+        if pump and unsigned is None and early is None:
             try:  # only *building* falls back; once a tx is sent we never send a second one
                 unsigned = await self._pumpportal_tx(
                     "sell", mint, "100%" if sell_all else _decimal_str(sell_raw, decimals),
