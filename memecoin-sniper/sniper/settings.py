@@ -5,6 +5,7 @@ config.yaml + preset at every start, so the chat is the source of truth.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Optional
 
@@ -139,7 +140,8 @@ def parse_value(s: Setting, raw: Any) -> Any:
         for part in str(raw).replace(" ", "").split(","):
             at, _, sell = part.partition(":")
             lvl = TakeProfitLevel(float(at.rstrip("%")), float(sell.rstrip("%")))
-            if lvl.at_pct <= 0 or not 0 < lvl.sell_pct <= 100:
+            if (not math.isfinite(lvl.at_pct) or lvl.at_pct <= 0
+                    or not 0 < lvl.sell_pct <= 100):  # also rejects nan / inf
                 raise ValueError(f"bad level {part}")
             levels.append(lvl)
         if sum(lvl.sell_pct for lvl in levels) > 100:

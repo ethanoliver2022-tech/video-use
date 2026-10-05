@@ -18,7 +18,7 @@ from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, L
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .intel import EarlyFlow
-from .models import PUMP_TOTAL_SUPPLY, Candidate, Position, num
+from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
 from .notify import Notifier
 from .pump_curve import fetch_curve
 from .safety import SafetyChecker
@@ -427,7 +427,7 @@ class Engine:
                 tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
                 self._add_pending(c, sol + tip)
         try:
-            curve = self.curves.get(c.mint) if c.route == "pump" else None
+            curve = self.curves.get(c.mint) if c.on_bonding_curve else None
             try:
                 fill = await self.executor.buy(c, sol, curve)
             except NotLanded as e:
@@ -447,10 +447,14 @@ class Engine:
                                          logging.WARNING)
                 return f"buy failed: {e}"
             fill.tokens = num(fill.tokens, allow_zero=True) or 0.0  # never trust a fill blindly
+            if fill.from_wallet and fill.pre is None:  # whole-wallet count, baseline unknown
+                fill.tokens = max(0.0, fill.tokens - self._known_leftover(c.mint))
             fill.sol = num(fill.sol, allow_zero=True) or 0.0
             if fill.tokens > 0 and fill.sol <= 0:
                 fill.sol = sol  # we know what we spent
             if fill.tokens <= 0:  # confirmed but no tokens visible yet: let the reconciler decide
+                if self.live:
+                    self._add_pending(c, fill.sol or sol, fill.pre)
                 await self.notifier.send(f"⏳ buy {esc(c.symbol)} confirmed but no tokens visible "
                                          f"yet ({fill.signature}); checking the wallet")
                 return "buy returned 0 tokens"
@@ -495,12 +499,25 @@ class Engine:
         if pending.pop(mint, None) is not None:
             self._save_pending(pending)
 
+    def _known_leftover(self, mint: str) -> float:
+        """Tokens the bot knows were already in the wallet: a written-off position's bag."""
+        import json
+        row = self.store.db.execute(
+            "SELECT data FROM positions WHERE mode = ? AND mint = ? AND closed = 1",
+            (self.mode, mint)).fetchone()
+        if not row:
+            return 0.0
+        data = json.loads(row[0])
+        if str(data.get("close_reason", "")).startswith("unsellable"):
+            return num(data.get("tokens_remaining"), allow_zero=True) or 0.0
+        return 0.0
+
     def _add_pending(self, c: Candidate, sol: float, pre: Optional[float] = None) -> None:
         pending = self.pending_buys()
         pending[c.mint] = {"sol": sol, "ts": time.time(), "symbol": c.symbol, "source": c.source,
                            "trigger": c.trigger, "route": c.route, "creator": c.creator,
                            "leader": c.leader, "dev_tokens": c.creator_initial_buy_tokens,
-                           "pre": pre or 0.0}  # tokens already held before this buy
+                           "pre": pre}  # tokens already held before this buy (None = unknown)
         self._save_pending(pending)
 
     async def reconcile_loop(self) -> None:
@@ -516,7 +533,10 @@ class Engine:
                 continue  # still being confirmed by try_buy in this process
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, mint) if self.live else 0.0
-                held -= num(info.get("pre"), allow_zero=True) or 0.0  # only what this buy added
+                pre = info.get("pre")
+                if pre is None:  # crashed before the pre-buy balance was known
+                    pre = self._known_leftover(mint)
+                held -= num(pre, allow_zero=True) or 0.0  # only what this buy added
             except Exception as e:
                 log.debug("reconcile %s: %s", mint, e)
                 continue  # try again next round; never drop a buy we couldn't check
@@ -592,10 +612,10 @@ class Engine:
         self._spawn(self.check_exit(pos))
 
     async def on_migration(self, mint: str) -> None:
+        self.curves.pop(mint, None)  # graduated: that curve no longer prices anything
         pos = self.positions.get(mint)
         if pos and not pos.closed and not pos.migrated:
             pos.migrated = True
-            self.curves.pop(mint, None)
             self.store.save_position(pos)
             # runs inside the websocket loop: never wait on Telegram here
             self._spawn(self.notifier.send(f"🎓 {esc(pos.symbol)} graduated off the bonding curve"))
@@ -658,6 +678,12 @@ class Engine:
                 for pos in self.positions.values():
                     pos.opened_at += step
                     pos.last_update += step
+                pending = self.pending_buys()  # an unconfirmed buy keeps its full window
+                for info in pending.values():
+                    info["ts"] = info.get("ts", 0) + step
+                self._save_pending(pending)
+                self.store.db.execute("UPDATE orders SET expires = expires + ? WHERE status = 'open'",
+                                      (step,))
             step_offset = new_step
             new_offset = time.time() - time.monotonic()
             if abs(new_offset - offset) > CLOCK_JUMP_SECONDS:
@@ -705,7 +731,7 @@ class Engine:
                 await self._closed(pos)
                 return f"{esc(pos.symbol)}: nothing left in the wallet; position closed"
             except Exception as e:
-                return await self._sell_failed(pos, e)
+                return await self._sell_failed(pos, e, dec)
             self.sell_failures.pop(pos.mint, None)
             self._sell_next_try.pop(pos.mint, None)
             fill.sol = num(fill.sol, allow_zero=True) or 0.0  # a bad fill never corrupts the books
@@ -736,7 +762,8 @@ class Engine:
         n = self.sell_failures.get(pos.mint, 0)
         return min(MAX_SELL_SLIPPAGE, max(base, base * (1 + n)))
 
-    async def _sell_failed(self, pos: Position, err: Exception) -> str:
+    async def _sell_failed(self, pos: Position, err: Exception,
+                           dec: Optional[exits.ExitDecision] = None) -> str:
         """Never abandon a position on a transient failure: back off, reconcile, retry."""
         n = self.sell_failures[pos.mint] = self.sell_failures.get(pos.mint, 0) + 1
         wait = min(2 ** n, 10) if n < SELL_FAST_RETRIES else SELL_BACKOFF_MAX
@@ -751,11 +778,17 @@ class Engine:
                     self.store.save_position(pos)
                     await self._closed(pos)
                     return f"{esc(pos.symbol)}: the sell landed late; position closed"
-                if held < pos.tokens_remaining * 0.999:  # part of it landed: book that part
+                if held < pos.tokens_remaining * 0.999:  # it (partly) landed: book it as a fill
                     sold = pos.tokens_remaining - held
-                    pos.sol_out += max(0.0, sold * pos.last_price * 0.97)
-                    pos.tokens_remaining = held
+                    done = exits.ExitDecision(sold, False, dec.reason if dec else "sell",
+                                              dec.tp_index if dec else None, dec.kind if dec else "")
+                    # marks the TP level / initials / KOL exit as done, so it isn't sold again
+                    exits.apply_fill(pos, done, sold, max(0.0, sold * pos.last_price * 0.97),
+                                     self.cfg.exits)
                     self.store.save_position(pos)
+                    self.sell_failures.pop(pos.mint, None)
+                    self._sell_next_try.pop(pos.mint, None)
+                    return f"{esc(pos.symbol)}: the sell landed late (PnL estimated)"
             except Exception as e:
                 log.debug("balance reconcile failed: %s", e)
         if n in (1, 5) or n % 20 == 0:
@@ -883,7 +916,7 @@ class Engine:
         except Exception as e:
             log.debug("curve lookup %s failed: %s", mint, e)
         probe = 0.01
-        q = await self.jupiter.quote("So11111111111111111111111111111111111111112", mint, probe,
+        q = await self.jupiter.quote(SOL_MINT, mint, probe,
                                      self.cfg.trading.slippage_pct)
         tokens = await self.jupiter.out_ui(q)
         if tokens <= 0:
@@ -956,6 +989,8 @@ class Engine:
                 if not pos or pos.closed:
                     self.store.set_order_status(o["id"], "cancelled")
                     continue
+                if time.monotonic() < self._sell_next_try.get(pos.mint, float("-inf")):
+                    continue  # its last sell failed: same backoff as automatic exits
                 price = pos.last_price
             else:
                 if o["mint"] not in prices:
@@ -988,6 +1023,14 @@ class Engine:
                     dec = exits.ExitDecision(pos.tokens_remaining, True, "limit sell")
                 result = await self.execute_sell(pos, dec)
                 ok = result.startswith("🔴")
+                if not ok and not pos.closed:  # busy or a transient failure: keep the stop armed
+                    self.store.set_order_status(o["id"], "open", from_status="executing")
+                    return
+            if not ok and "unconfirmed" in result:  # may still land: never re-run a buy
+                self.store.set_order_status(o["id"], "unconfirmed", from_status="executing")
+                await self.notifier.send(f"⏳ Order #{o['id']}: {esc(result)}. If it lands it "
+                                         "will be managed automatically.", logging.WARNING)
+                return
             self.store.set_order_status(o["id"], "filled" if ok else "failed",
                                         from_status="executing")
             if not ok:
@@ -1232,6 +1275,10 @@ class Engine:
                 self.telegram_ui or (self.notifier.enabled and self.cfg.notify.telegram_control)):
             from .telegram_bot import TelegramControl
             tg = TelegramControl(self, self.cfg.telegram_bot_token, self.cfg.telegram_chat_id, self.http)
+        if tg is None and self.paused and not self.scan_only:
+            # paused from Telegram earlier, but nothing here could resume it
+            log.warning("ignoring the pause set from Telegram: no Telegram control in this mode")
+            self.paused = False
         if self.telegram_ui and not self.live and self.store.get_setting("mode") == "live":
             try:  # resume live mode chosen from chat before the restart
                 self.executor = self._build_executor(True)

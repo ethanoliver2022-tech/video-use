@@ -82,6 +82,7 @@ class Fill:
     from_wallet: bool = False  # tokens is a whole-wallet balance, not this trade's delta
     sol_known: bool = True     # False: the trade landed but its SOL amount couldn't be read
     emptied: bool = False      # the sell took everything left in the wallet
+    pre: Optional[float] = None  # buys: tokens of this mint held before (None = unknown)
 
 
 @dataclass

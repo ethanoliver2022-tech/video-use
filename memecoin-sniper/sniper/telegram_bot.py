@@ -190,11 +190,25 @@ class TelegramControl:
             if self.owner:
                 await self.send(f"⚠️ {html.escape(str(e))}", [[("🏠 Menu", "m")]])
 
+    def _from_owner(self, sender: dict) -> bool:
+        """The owner chat is a private chat, whose id is the owner's user id. Checking the
+        sender too means a group chat id can never hand the bot to every member."""
+        sid = (sender or {}).get("id")
+        return sid is None or str(sid) == self.owner
+
     async def _route(self, u: dict) -> None:
+        if self.owner.startswith("-"):  # a group or channel id: refuse, everyone could trade
+            if not getattr(self, "_warned_group", False):
+                self._warned_group = True
+                log.error("TELEGRAM_CHAT_ID / the paired chat is a group (%s). For safety the bot "
+                          "only obeys a private chat: set your own chat id.", self.owner)
+            return
         if "callback_query" in u:
             cq = u["callback_query"]
             msg = cq.get("message") or {}
             if not self.owner or str(msg.get("chat", {}).get("id")) != self.owner:
+                return
+            if not self._from_owner(cq.get("from")):
                 return
             try:
                 await self.api("answerCallbackQuery", callback_query_id=cq["id"])
@@ -209,7 +223,7 @@ class TelegramControl:
         if not self.owner:
             await self._try_pair(chat, text, (msg.get("chat") or {}).get("type", "private"))
             return
-        if chat != self.owner:
+        if chat != self.owner or not self._from_owner(msg.get("from")):
             return
         if SECRET_RE.match(text) and not (self.pending and self.pending["kind"] == "import"):
             try:
@@ -438,6 +452,10 @@ class TelegramControl:
                         await self.api("deleteMessage", chat_id=self.owner, message_id=msg_id)
                     except Exception:
                         pass
+                blocked = self._live_blocked()
+                if blocked:
+                    await self.send(blocked)
+                    return
                 kp = e.wallet.import_secret(text)
                 await self.send(f"✅ Wallet imported: <code>{kp.pubkey()}</code>\n"
                                 "Your message with the key was deleted.")
@@ -549,16 +567,18 @@ class TelegramControl:
                 return
             action = "new!"
         if action == "new!":
-            if self._live_blocked():
-                await self.send("Switch to PAPER mode before changing wallets.")
+            blocked = self._live_blocked()
+            if blocked:
+                await self.send(blocked)
                 return
             kp = w.create()
             await self.send(f"✨ New wallet created.\n\nDeposit SOL to:\n<code>{kp.pubkey()}</code>\n\n"
                             "Back up the key: 💼 Wallet → 🔑 Export key.")
             await self._wallet_changed()
         elif action == "imp":
-            if self._live_blocked():
-                await self.send("Switch to PAPER mode before changing wallets.")
+            blocked = self._live_blocked()
+            if blocked:
+                await self.send(blocked)
                 return
             self._ask("import")
             await self.send("Send the private key (base58 or JSON array).\n"
@@ -579,8 +599,18 @@ class TelegramControl:
             await self.send("Send: <code>&lt;destination address&gt; &lt;amount in SOL | all&gt;</code>",
                             [[("✖️ Cancel", "x")]])
 
-    def _live_blocked(self) -> bool:
-        return self.engine.live
+    def _live_blocked(self) -> Optional[str]:
+        """Why the wallet can't be replaced right now, or None. Live positions (even while in
+        paper mode) are tied to the current wallet: a new one would orphan them."""
+        e = self.engine
+        if e.live:
+            return "Switch to PAPER mode before changing wallets."
+        n = e.store.db.execute("SELECT COUNT(*) FROM positions WHERE mode = 'live' AND closed = 0"
+                               ).fetchone()[0]
+        if n or e.store.get_setting("pending_buys:live") not in (None, "{}"):
+            return (f"You still have {n or 'pending'} LIVE position(s) held by this wallet. Go live "
+                    "and sell them first, or they'd be left behind in the old wallet.")
+        return None
 
     async def _wallet_changed(self) -> None:
         await self.wallet_menu()

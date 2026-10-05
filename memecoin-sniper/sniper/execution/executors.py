@@ -218,7 +218,10 @@ class LiveExecutor:
             tok, sol = balance_deltas(tx, self.pubkey, mint) if tx else (0.0, 0.0)
         except (KeyError, TypeError, ValueError, AttributeError, IndexError):
             tok, sol, readable = 0.0, 0.0, False  # unreadable: fall back to the wallet below
-        tok, sol = abs(tok), abs(sol)
+        # a buy costs the outflow; a sell receives the inflow. A sell whose fees exceeded its
+        # proceeds (dust, a rugged token) received nothing, not abs(-fees).
+        tok = abs(tok)
+        sol = max(0.0, -sol) if side == "buy" else max(0.0, sol)
         from_wallet = False
         if tok <= 0:
             log.warning("could not read fill for %s from the transaction; using wallet balance", sig)
@@ -275,6 +278,7 @@ class LiveExecutor:
             fill = await self._submit(unsigned, cand.mint, "buy")
             if fill.from_wallet:
                 fill.tokens = max(0.0, fill.tokens - base)
+            fill.pre = pre
             return fill
         except (NotLanded, TxFailed):
             raise  # definitely didn't buy
@@ -287,7 +291,7 @@ class LiveExecutor:
                 except Exception:
                     await asyncio.sleep(delay)
                     continue
-                if held > base:
+                if pre is not None and held > base:  # (unknown baseline: the reconciler decides)
                     log.warning("buy %s errored (%s) but tokens arrived; tracking them", cand.mint, e)
                     return Fill(tokens=held - base, sol=sol + self._tip(), signature="unconfirmed")
                 break
