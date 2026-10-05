@@ -159,7 +159,8 @@ class PumpPortalStream:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("pumpportal disconnected: %s (retry in %.0fs)", e, backoff)
+                err = str(e).replace(self.api_key, "***") if self.api_key else str(e)
+                log.warning("pumpportal disconnected: %s (retry in %.0fs)", err, backoff)
             finally:
                 self._ws = None
             await asyncio.sleep(backoff)

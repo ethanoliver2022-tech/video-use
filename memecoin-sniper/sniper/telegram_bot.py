@@ -202,7 +202,7 @@ class TelegramControl:
         chat = str(msg.get("chat", {}).get("id", ""))
         text = (msg.get("text") or "").strip()
         if not self.owner:
-            await self._try_pair(chat, text)
+            await self._try_pair(chat, text, (msg.get("chat") or {}).get("type", "private"))
             return
         if chat != self.owner:
             return
@@ -228,9 +228,14 @@ class TelegramControl:
         else:
             await self.main_menu()
 
-    async def _try_pair(self, chat: str, text: str) -> None:
+    async def _try_pair(self, chat: str, text: str, chat_type: str = "private") -> None:
         parts = text.split()
         if len(parts) != 2 or parts[0].split("@")[0] not in ("/start", "/pair"):
+            return
+        if chat_type != "private":  # in a group, every member would control the wallet
+            await self.engine.notifier.telegram(
+                "🔒 For safety I only pair in a private chat. Open a direct chat with me and "
+                "send the code there.", chat_id=chat)
             return
         if not secrets.compare_digest(parts[1].upper().encode(), self.pair_code.encode()):
             self.pair_failures += 1

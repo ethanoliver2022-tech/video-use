@@ -218,3 +218,14 @@ async def test_token_card_survives_garbage_dexscreener(tmp_path):
         token_card.fetch_curve = fetch_curve
     await eng.http.aclose()
     await real_http.aclose()
+
+
+async def test_pumpportal_errors_never_log_the_api_key(caplog):
+    import asyncio
+    from sniper.scanners.pumpportal import PumpPortalStream
+    s = PumpPortalStream("not a url at all", True, False, "SECRETKEY123")
+    task = asyncio.create_task(s.run())
+    await asyncio.sleep(0.3)
+    task.cancel()
+    assert "pumpportal disconnected" in caplog.text
+    assert "SECRETKEY123" not in caplog.text

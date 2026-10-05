@@ -106,6 +106,10 @@ async def test_pairing_with_code(tmp_path):
     await h.text("/start", chat="1")
     await h.text("/start WRONG", chat="1")
     assert h.tg.owner == "" and not h.sent
+    await h.tg.handle_update({"message": {"chat": {"id": -100, "type": "group"},
+                                          "text": f"/start {code}", "message_id": 3}})
+    assert h.tg.owner == "" and "private chat" in h.sent[-1][0]  # never pairs a group
+    h.sent.clear()
     await h.text(f"/start {code}", chat="1")
     assert h.tg.owner == "1" and "Paired" in h.sent[0][0]
     await h.text("/pause", chat="2")  # strangers are ignored after pairing too
