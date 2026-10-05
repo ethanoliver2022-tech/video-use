@@ -13,8 +13,8 @@ import httpx
 
 from . import exits
 from .config import Config, CopyWallet
-from .execution.executors import (CurveState, Executor, Jupiter, LiveExecutor, NothingToSell,
-                                  NotLanded, PaperExecutor)
+from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, LiveExecutor,
+                                  NothingToSell, NotLanded, PaperExecutor)
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .intel import EarlyFlow
@@ -48,6 +48,8 @@ ORDER_POLL_SECONDS = 3
 MAX_OPEN_ORDERS = 20
 CURVE_MISSES_BEFORE_MIGRATED = 5  # consecutive "no curve account" reads before giving up on it
 MIN_RENT_LAMPORTS = 890_880       # a SOL account can't be left between 0 and this
+PENDING_BUY_WINDOW = 180          # seconds an unconfirmed buy is watched (> blockhash lifetime)
+RECONCILE_SECONDS = 5
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
@@ -375,7 +377,8 @@ class Engine:
     async def risk_block(self, sol: float) -> Optional[str]:
         t = self.cfg.trading
         open_n = sum(1 for p in self.positions.values()   # moonbags don't take up a slot
-                     if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) + len(self._buying)
+                     if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
+            + len(self._buying) + len(self.pending_buys())
         if open_n >= t.max_open_positions:
             return "max open positions"
         if -self.store.realized_today() >= t.daily_loss_limit_sol:
@@ -394,7 +397,8 @@ class Engine:
     async def try_buy(self, c: Candidate, notes: str = "") -> str:
         sol = c.buy_sol or self.cfg.trading.buy_amount_sol
         async with self.buy_lock:  # reserve a slot atomically, then trade without the lock
-            if c.mint in self._buying or (c.mint in self.positions and not self.positions[c.mint].closed):
+            if (c.mint in self._buying or c.mint in self.pending_buys()
+                    or (c.mint in self.positions and not self.positions[c.mint].closed)):
                 return "already holding"
             blocked = await self.risk_block(sol)
             if blocked:
@@ -409,6 +413,12 @@ class Engine:
                 await self.notifier.send(f"⌛ buy {esc(c.symbol)} didn't land: {esc(str(e))}",
                                          logging.WARNING)
                 return f"buy didn't land: {e}"
+            except BuyUncertain as e:
+                self._add_pending(c, e.sol)
+                await self.notifier.send(f"⏳ buy {esc(c.symbol)}: {esc(str(e))}. Watching the wallet; "
+                                         "if the tokens arrive they'll be managed automatically.",
+                                         logging.WARNING)
+                return f"buy unconfirmed: {e}"
             except Exception as e:
                 await self.notifier.send(f"❌ buy failed {esc(c.symbol)} {c.mint}: {esc(str(e))}",
                                          logging.WARNING)
@@ -440,6 +450,69 @@ class Engine:
         if c.route == "pump":
             await self.stream.watch_token(c.mint)
         return text
+
+    # ---------- unconfirmed buys ----------
+
+    def pending_buys(self) -> dict:
+        import json
+        return json.loads(self.store.get_setting(f"pending_buys:{self.mode}") or "{}")
+
+    def _save_pending(self, pending: dict) -> None:
+        import json
+        self.store.set_setting(f"pending_buys:{self.mode}", json.dumps(pending))
+
+    def _add_pending(self, c: Candidate, sol: float) -> None:
+        pending = self.pending_buys()
+        pending[c.mint] = {"sol": sol, "ts": time.time(), "symbol": c.symbol, "source": c.source,
+                           "trigger": c.trigger, "route": c.route, "creator": c.creator,
+                           "leader": c.leader, "dev_tokens": c.creator_initial_buy_tokens}
+        self._save_pending(pending)
+
+    async def reconcile_loop(self) -> None:
+        while True:
+            await asyncio.sleep(RECONCILE_SECONDS)
+            await self.reconcile_pending()
+
+    async def reconcile_pending(self, now: Optional[float] = None) -> None:
+        """Adopt tokens from buys whose outcome was unknown; forget them once they can no
+        longer land."""
+        for mint, info in list(self.pending_buys().items()):
+            try:
+                held = await self.rpc.get_token_balance(self.own_wallet, mint) if self.live else 0.0
+            except Exception as e:
+                log.debug("reconcile %s: %s", mint, e)
+                continue  # try again next round; never drop a buy we couldn't check
+            pending = self.pending_buys()
+            existing = self.positions.get(mint)
+            if existing and not existing.closed:  # adopted before a crash: just clear it
+                pending.pop(mint, None)
+                self._save_pending(pending)
+                continue
+            if held > 0:
+                tag = (info.get("trigger") or "").split(":")[0]
+                source = info["source"] + (f"/{tag}" if tag and tag != info["source"] else "")
+                pos = Position(mint=mint, symbol=info.get("symbol") or mint[:6], source=source,
+                               creator=info.get("creator"), entry_price=info["sol"] / held,
+                               tokens_initial=held, tokens_remaining=held, sol_in=info["sol"],
+                               route=info.get("route", "jupiter"), leader=info.get("leader"),
+                               dev_tokens=info.get("dev_tokens"))
+                self.positions[mint] = pos
+                self.store.save_position(pos)
+                self.store.event("buy", mint, pos.symbol, source=info["source"], sol=info["sol"],
+                                 tokens=held, sig="reconciled")
+                pending.pop(mint, None)
+                self._save_pending(pending)
+                if pos.route == "pump":
+                    await self.stream.watch_token(mint)
+                await self.notifier.send(f"✅ the unconfirmed buy of {esc(pos.symbol)} did land: "
+                                         f"{held:,.0f} tokens, now managed.",
+                                         buttons=[[("Sell 50%", f"s:{mint}:50"),
+                                                   ("Sell 100%", f"s:{mint}:100")]])
+            elif (now or time.time()) - info["ts"] > PENDING_BUY_WINDOW:
+                pending.pop(mint, None)
+                self._save_pending(pending)
+                await self.notifier.send(f"ℹ️ the unconfirmed buy of {esc(info.get('symbol') or mint[:6])} "
+                                         "never landed; no SOL was spent on it.")
 
     # ---------- price feeds ----------
 
@@ -904,8 +977,8 @@ class Engine:
         if live == self.live:
             return f"Already in {self.mode.upper()} mode."
         open_pos = [p for p in self.positions.values() if not p.closed]
-        if open_pos or self._buying:
-            n = len(open_pos) + len(self._buying)
+        if open_pos or self._buying or self.pending_buys():
+            n = len(open_pos) + len(self._buying) + len(self.pending_buys())
             return f"Close your {n} open {self.mode} position(s) first (Positions → Sell 100%)."
         self.executor = self._build_executor(live)  # raises if no wallet
         for mint in list(self.positions):
@@ -1091,7 +1164,7 @@ class Engine:
 
         loops = [("pumpportal", self.stream.run), ("exits", self.exit_loop),
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
-                 ("orders", self.order_loop)]
+                 ("orders", self.order_loop), ("reconcile", self.reconcile_loop)]
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,
                                          d.geckoterminal_poll_seconds, self.on_candidate, self.http,

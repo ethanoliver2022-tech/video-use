@@ -9,6 +9,7 @@ reflects actual slippage and fees.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from dataclasses import dataclass
@@ -49,6 +50,15 @@ class CurveState:
 
 class NotLanded(RuntimeError):
     """The transaction expired without landing: safe to retry."""
+
+
+class BuyUncertain(RuntimeError):
+    """The buy may or may not have landed and the wallet can't tell us yet. The engine
+    keeps watching the wallet so tokens that arrive late are never orphaned."""
+
+    def __init__(self, mint: str, sol: float, detail: str):
+        super().__init__(f"couldn't confirm the buy yet ({detail})")
+        self.mint, self.sol = mint, sol
 
 
 class NothingToSell(RuntimeError):
@@ -197,12 +207,19 @@ class LiveExecutor:
         except (NotLanded, TxFailed):
             raise  # definitely didn't buy
         except Exception as e:
-            # outcome unknown (RPC hiccup after sending): trust the wallet, never orphan tokens
-            held = await self.rpc.get_token_balance(self.pubkey, cand.mint)
-            if held > 0:
-                log.warning("buy %s errored (%s) but tokens arrived; tracking them", cand.mint, e)
-                return Fill(tokens=held, sol=sol + self._tip(), signature="unconfirmed")
-            raise
+            # Outcome unknown (an RPC hiccup after sending). Never report "failed" here: the
+            # tokens may already be in the wallet, or land within the blockhash lifetime.
+            for delay in (0.5, 1.0, 2.0):
+                try:
+                    held = await self.rpc.get_token_balance(self.pubkey, cand.mint)
+                except Exception:
+                    await asyncio.sleep(delay)
+                    continue
+                if held > 0:
+                    log.warning("buy %s errored (%s) but tokens arrived; tracking them", cand.mint, e)
+                    return Fill(tokens=held, sol=sol + self._tip(), signature="unconfirmed")
+                break
+            raise BuyUncertain(cand.mint, sol + self._tip(), str(e)) from e
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:

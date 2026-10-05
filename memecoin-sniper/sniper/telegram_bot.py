@@ -480,6 +480,9 @@ class TelegramControl:
         orders = len(e.store.open_orders())
         if orders:
             lines.append(f"📋 {orders} open limit order(s)")
+        pending = len(e.pending_buys())
+        if pending:
+            lines.append(f"⏳ {pending} unconfirmed buy(s): checking the wallet")
         if not e.has_trade_stream:
             lines.append("ℹ️ No PumpPortal key: prices use on-chain polling, and copy trading is off.")
         if "api.mainnet-beta.solana.com" in e.cfg.endpoints.rpc_url:

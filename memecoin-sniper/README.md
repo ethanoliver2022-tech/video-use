@@ -214,8 +214,9 @@ Built to run unattended:
 - **Exits get through a crash.** A sell that fails because the price moved past
   your slippage is retried within seconds, with more slippage each time (up to
   50%). Dev-dump and stop-loss exits start at 1.5x your slippage.
-- **No orphaned buys.** If an RPC error hides a buy's outcome, the bot checks
-  the wallet and starts managing any tokens that arrived.
+- **No orphaned buys.** If an RPC error hides a buy's outcome, the bot never
+  writes it off as failed: it keeps watching the wallet (across restarts) until the
+  transaction can no longer land, and adopts the tokens the moment they show up.
 - **One slow trade never blocks the others.** Each exit runs on its own, and
   the live trade stream never waits on a sell or on Telegram.
 - **Jito down or rate limited?** Transactions fall back to plain RPC, because
@@ -253,12 +254,12 @@ Built to run unattended:
   learning while paused).
 - No web dashboard; Telegram is the UI.
 - EVM chains are alert-only (capped at 20 alerts an hour).
-- The trading code has been tested offline (104 tests) and the Docker image has
+- The trading code has been tested offline (143 tests) and the Docker image has
   been built and run, but it hasn't placed real trades against mainnet yet.
   Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 104 tests, no network needed
+pip install -e '.[dev]' && pytest     # 143 tests, no network needed
 ```

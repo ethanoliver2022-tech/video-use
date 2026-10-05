@@ -687,3 +687,89 @@ async def test_confirmed_launch_that_is_not_bought_stops_its_trade_feed(tmp_path
     assert c.mint not in eng.stream.token_subs
     assert {"method": "unsubscribeTokenTrade", "keys": [c.mint]} in eng.sent_ws
     await eng.http.aclose()
+
+
+# ---------- final-check finding: unconfirmable buys must never orphan tokens ----------
+
+async def test_landed_buy_with_unreadable_wallet_is_watched_then_adopted(tmp_path):
+    from sniper.execution.executors import BuyUncertain
+    cfg = load_config(None)
+    ex, rpc = live_executor(cfg)
+
+    async def pp(*a, **k):
+        return b"tx"
+    ex._pumpportal_tx = pp
+    rpc.confirm_raises = RpcError("getSignatureStatuses: HTTP 502")  # landed, but unclear
+
+    async def rate_limited(owner, mint):
+        raise RpcError("getTokenAccountsByOwner: HTTP 429 (rate limited)")
+    rpc.get_token_balance = rate_limited
+    with pytest.raises(BuyUncertain):  # not "buy failed"
+        await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+
+    eng = make_engine(tmp_path, api_key="k")
+    eng.live, eng.own_wallet = True, "ME"
+    mint = wallet()
+
+    async def sol_bal(owner):
+        return 10.0
+    eng.rpc.get_balance_sol = sol_bal
+
+    class Ex:
+        async def buy(self, c, sol, curve):
+            raise BuyUncertain(c.mint, sol, "502")
+    eng.executor = Ex()
+    res = await eng.try_buy(Candidate(chain="solana", mint=mint, source="manual", symbol="P",
+                                      route="pump", force=True))
+    assert res.startswith("buy unconfirmed") and mint in eng.pending_buys()
+    assert "already holding" in await eng.try_buy(  # no double buy while we watch
+        Candidate(chain="solana", mint=mint, source="manual", symbol="P", force=True))
+
+    balance = {"v": None}
+
+    async def bal(owner, m):
+        if balance["v"] is None:
+            raise RpcError("429")
+        return balance["v"]
+    eng.rpc.get_token_balance = bal
+
+    await eng.reconcile_pending(now=time.time() + 10_000)
+    assert mint in eng.pending_buys()  # couldn't check: never dropped
+    balance["v"] = 5000.0
+    await eng.reconcile_pending()
+    pos = eng.positions[mint]
+    assert pos.tokens_remaining == 5000 and pos.sol_in == pytest.approx(0.05)  # as reported
+    assert not eng.pending_buys()
+    await eng.http.aclose()
+
+
+async def test_unconfirmed_buy_that_never_lands_is_forgotten_after_window(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    eng.live, eng.own_wallet = True, "ME"
+    mint = wallet()
+    eng._add_pending(Candidate(chain="solana", mint=mint, source="manual", symbol="Q"), 0.1)
+
+    async def zero(owner, m):
+        return 0.0
+    eng.rpc.get_token_balance = zero
+    await eng.reconcile_pending()
+    assert mint in eng.pending_buys()  # still inside the landing window
+    await eng.reconcile_pending(now=time.time() + engine_mod.PENDING_BUY_WINDOW + 1)
+    assert not eng.pending_buys() and mint not in eng.positions
+    await eng.http.aclose()
+
+
+async def test_reconcile_never_adopts_twice(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    eng.live, eng.own_wallet = True, "ME"
+    mint = wallet()
+    eng._add_pending(Candidate(chain="solana", mint=mint, source="manual", symbol="R"), 0.1)
+    eng.positions[mint] = pump_pos(mint)  # adopted just before a crash
+
+    async def held(owner, m):
+        return 777.0
+    eng.rpc.get_token_balance = held
+    await eng.reconcile_pending()
+    assert not eng.pending_buys() and eng.positions[mint].tokens_remaining == 1e6
+    assert eng.store.events("buy") == []
+    await eng.http.aclose()

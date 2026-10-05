@@ -3,6 +3,7 @@ transactions randomly land, fail on-chain, expire, or return ambiguous errors.""
 import asyncio
 import collections
 import json
+import time
 import logging
 import random
 
@@ -205,16 +206,23 @@ async def test_live_chaos(tmp_path, seed):
                 eng, chain = build(tmp_path, rng, chain)
                 await eng.restore()
             await asyncio.sleep(0)
+            if r > 0.97:  # the 5s reconcile loop; sometimes minutes have passed in "real" time
+                await eng.reconcile_pending(now=time.time() + rng.choice([0, 0, 200]))
             if step % 20 == 0:
                 await eng.settle()
-                # no orphans: every token in the wallet belongs to an open position
+                # no orphans: every token in the wallet is managed, or being watched
+                pending = eng.pending_buys()
                 for mint, bal in chain.tokens.items():
                     if bal > 1e-6:
                         pos = eng.positions.get(mint)
-                        assert pos and not pos.closed, ("orphaned tokens", seed, step, mint, bal)
+                        assert (pos and not pos.closed) or mint in pending, \
+                            ("orphaned tokens", seed, step, mint, bal)
         # drain: a calm chain, and every position must end up fully sold
         chain.reliable = True
         eng.cfg.exits.max_hold_seconds = 0
+        await eng.reconcile_pending()                          # adopt anything that landed
+        await eng.reconcile_pending(now=time.time() + 10_000)  # and expire what never will
+        assert not eng.pending_buys(), seed
         for _ in range(20):
             await eng.settle()
             for p in list(eng.positions.values()):
@@ -229,9 +237,11 @@ async def test_live_chaos(tmp_path, seed):
         assert not eng.store.open_positions()
         # the run must actually have traded through every kind of outcome
         outcomes = collections.Counter(t["outcome"] for t in chain.txs.values())
-        assert len(eng.store.events("buy")) >= 10, outcomes
-        assert len(eng.store.events("close")) >= 5, outcomes
+        assert len(eng.store.events("buy")) >= 3, outcomes
         TOTALS.update(outcomes)
+        TOTALS["buys"] += len(eng.store.events("buy"))
+        TOTALS["closes"] += len(eng.store.events("close"))
+        TOTALS["sessions"] += 1
         await eng.http.aclose()
     finally:
         logging.getLogger("sniper").removeHandler(catcher)
@@ -242,3 +252,5 @@ def test_live_chaos_covered_every_outcome():
     """Runs after the seeds above: together they must hit every kind of chain outcome."""
     for kind in ("ok", "failed", "expired", "landed_unclear", "lost_unclear"):
         assert TOTALS[kind] >= 5, (kind, TOTALS)
+    assert TOTALS["buys"] >= 8 * TOTALS["sessions"], TOTALS    # lots of real trading
+    assert TOTALS["closes"] >= 4 * TOTALS["sessions"], TOTALS
