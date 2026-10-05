@@ -143,6 +143,8 @@ async def run_e2e(tmp_path, stream_key=True):
     cfg.write_text(f"""
 preset: degen
 data_dir: {data}
+trading:
+  cooldown_after_loss_seconds: 0   # the scenario buys again right after a loss
 discovery:
   geckoterminal_networks: []
   dexscreener_profiles: false

@@ -35,7 +35,7 @@ class TradingConfig:
     priority_fee_sol: float = 0.0005       # used when speed.auto_priority_fee is off
     min_sol_reserve: float = 0.03          # never spend below this (rent + fees for sells)
     daily_loss_limit_sol: float = 0.5      # stop opening positions after this much realized loss; 0 = off
-    cooldown_after_loss_seconds: int = 0
+    cooldown_after_loss_seconds: int = 60  # pause new entries this long after a losing trade
 
 
 @dataclass

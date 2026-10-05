@@ -45,8 +45,11 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
   their servers.
 - **Every rule is visible and adjustable.** Filters and exits are plain settings,
   not a black box, and the stats show which rule makes or loses you money.
-- **Filters stack.** Dev reputation, socials reuse, bundle detection, honeypot
-  round-trip, Token-2022 checks and RugCheck all run on every automatic buy.
+- **Filters stack.** Dev reputation, socials reuse and bundle detection run on
+  every automatic buy. Migrations, copy trades and other DEX tokens also get the
+  honeypot round-trip, Token-2022, holder and RugCheck checks. Brand-new pump.fun
+  launches skip those: the pump.fun program already guarantees revoked
+  authorities, and the lookups would only cost speed.
 - **Paper mode with the same logic.** Test any strategy risk-free before going live.
 
 ## Run it all from Telegram
