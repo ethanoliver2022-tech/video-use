@@ -12,7 +12,8 @@ import httpx
 
 log = logging.getLogger("sniper")
 # a self-hosted Telegram Bot API server can be used instead of Telegram's own
-TELEGRAM_API = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/")
+TELEGRAM_API = ((os.environ.get("TELEGRAM_API_BASE") or "").strip()
+                or "https://api.telegram.org").rstrip("/")
 
 Buttons = list[list[tuple[str, str]]]  # rows of (label, callback_data)
 
