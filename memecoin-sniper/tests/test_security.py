@@ -71,3 +71,17 @@ def test_startup_sets_a_private_umask():
     import inspect
     import sniper.__main__ as m
     assert "os.umask(0o077)" in inspect.getsource(m.main)
+
+
+async def test_pairing_code_survives_restarts_until_used(tmp_path):
+    from tests.test_telegram import Harness
+    h1 = Harness(tmp_path, owner="")
+    code = h1.tg.pair_code
+    h2 = Harness(tmp_path, owner="")  # the bot restarted before you paired
+    assert h2.tg.pair_code == code  # the code in the log still works
+    await h2.text(f"/start {code}", chat="7")
+    assert h2.tg.owner == "7"
+    h3 = Harness(tmp_path, owner="")
+    assert h3.tg.owner == "7" and not h3.tg.pair_code  # used up, never valid again
+    assert h3.eng.store.get_setting("pair_code") == ""
+    await h1.close(); await h2.close(); await h3.close()

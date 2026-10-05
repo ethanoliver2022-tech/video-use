@@ -27,6 +27,10 @@ fi
 
 say "Locking down the firewall (SSH only; the bot needs no open ports)"
 ufw allow OpenSSH >/dev/null
+# also every port sshd really listens on, so a custom SSH port can't lock you out
+for port in $(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'); do
+  ufw allow "$port/tcp" >/dev/null
+done
 ufw --force enable >/dev/null
 
 if [ -d "$DIR/.git" ]; then
@@ -85,11 +89,12 @@ docker compose up -d --build --force-recreate
 
 say "Waiting for the bot to start"
 CODE=""
-for _ in $(seq 1 45); do
-  CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{10\}' | tail -1 || true)"
-  if [ -n "$CODE" ] || docker compose logs 2>/dev/null | grep -q "sniper starting"; then
-    sleep 2
-    CODE="$(docker compose logs 2>/dev/null | grep -o '/start [0-9A-F]\{10\}' | tail -1 || true)"
+READY=""
+for _ in $(seq 1 60); do   # up to 2 minutes; ends on the first definite answer
+  LOGS="$(docker compose logs 2>/dev/null || true)"
+  CODE="$(printf '%s' "$LOGS" | grep -o '/start [0-9A-F]\{10\}' | tail -1 || true)"
+  if printf '%s' "$LOGS" | grep -q "telegram ready: paired"; then READY=1; fi
+  if [ -n "$CODE" ] || [ -n "$READY" ] || printf '%s' "$LOGS" | grep -q "rejected the bot token"; then
     break
   fi
   sleep 2
@@ -103,7 +108,7 @@ if docker compose logs 2>/dev/null | grep -q "rejected the bot token"; then
 fi
 if [ -n "$CODE" ]; then
   printf '\033[1;32m✅ Running! Open your bot in Telegram and send:\n\n    %s\033[0m\n\n' "$CODE"
-elif docker compose logs 2>/dev/null | grep -q "sniper starting"; then
+elif [ -n "$READY" ]; then
   printf '\033[1;32m✅ Running and already paired. Open your bot in Telegram and send /menu\033[0m\n\n'
 else
   echo "⚠️  The bot didn't report in yet. Check the logs with:"

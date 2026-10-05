@@ -114,7 +114,7 @@ copy trading.
    cd memecoin-sniper
    cp .env.example .env              # paste TELEGRAM_BOT_TOKEN (+ optional keys)
    docker compose up -d --build      # or: pip install -e . && python -m sniper bot
-   docker compose logs | grep /start # shows: Send this to your bot:  /start 3F9A1C27B0
+   docker compose logs | grep /start | tail -1   # shows: Send this to your bot:  /start 3F9A1C27B0
    ```
 3. **Pair your chat.** Open your bot in Telegram and send the `/start …` line.
    From then on, only your chat can control the bot and everyone else is ignored.

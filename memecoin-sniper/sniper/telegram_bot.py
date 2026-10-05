@@ -69,7 +69,9 @@ class TelegramControl:
     def __init__(self, engine: "Engine", token: str, chat_id: str, http: httpx.AsyncClient):
         self.engine, self.token, self.http = engine, token, http
         self.owner = str(chat_id or engine.store.get_setting("owner_chat_id") or "")
-        self.pair_code = "" if self.owner else self._new_code()
+        # the same code survives restarts until it's used, so the one in the log always works
+        self.pair_code = "" if self.owner else (
+            engine.store.get_setting("pair_code") or self._save_code(self._new_code()))
         self.pair_failures = 0
         self.offset = 0
         self.pending: Optional[dict] = None
@@ -78,6 +80,10 @@ class TelegramControl:
         engine.notifier.chat = self.owner
 
     # ---------- transport ----------
+
+    def _save_code(self, code: str) -> str:
+        self.engine.store.set_setting("pair_code", code)
+        return code
 
     @staticmethod
     def _new_code() -> str:
@@ -140,6 +146,8 @@ class TelegramControl:
             wait = min(wait * 2, 60)
         if self.pair_code:  # only now: a code sent from here on is never dropped as backlog
             log.warning("📱 Telegram not paired yet. Send this to your bot:  /start %s", self.pair_code)
+        else:
+            log.info("telegram ready: paired, send /menu to your bot")
         backoff = 5.0
         while True:
             try:
@@ -262,11 +270,12 @@ class TelegramControl:
             self.pair_failures += 1
             if self.pair_failures >= MAX_PAIR_ATTEMPTS:
                 self.pair_failures = 0
-                self.pair_code = self._new_code()
+                self.pair_code = self._save_code(self._new_code())
                 log.warning("too many wrong pairing codes; new code:  /start %s", self.pair_code)
             return
         self.owner = chat
         self.pair_code = ""
+        self.engine.store.set_setting("pair_code", "")  # used up
         self.engine.store.set_setting("owner_chat_id", chat)
         self.engine.notifier.chat = chat
         log.info("telegram paired with chat %s", chat)
