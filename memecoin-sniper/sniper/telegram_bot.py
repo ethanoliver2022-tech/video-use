@@ -390,7 +390,7 @@ class TelegramControl:
         elif data == "wd!":
             await self.do_withdraw()
         else:
-            self.unhandled.append(data)
+            self.unhandled = self.unhandled[-49:] + [data]  # bounded: kept for diagnostics
             log.warning("unhandled Telegram button: %s", data)
 
     def _bg_reply(self, coro) -> None:
