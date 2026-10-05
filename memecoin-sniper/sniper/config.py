@@ -34,7 +34,7 @@ class TradingConfig:
     slippage_pct: float = 20.0
     priority_fee_sol: float = 0.0005       # used when speed.auto_priority_fee is off
     min_sol_reserve: float = 0.03          # never spend below this (rent + fees for sells)
-    daily_loss_limit_sol: float = 0.5      # stop opening positions after this much realized loss
+    daily_loss_limit_sol: float = 0.5      # stop opening positions after this much realized loss; 0 = off
     cooldown_after_loss_seconds: int = 0
 
 
@@ -96,7 +96,7 @@ class FilterConfig:
     max_roundtrip_loss_pct: float = 25.0
     min_socials: int = 0                   # pump.fun metadata: twitter / telegram / website
     reject_reused_socials: bool = True     # same twitter/telegram as an earlier launch
-    max_creator_launches_24h: int = 3      # serial launchers are almost always farming
+    max_creator_launches_24h: int = 3      # serial launchers are almost always farming; 0 = off
     auto_blocklist_ruggers: bool = True    # creators who dev-dump on us get blocklisted
     name_blocklist: list[str] = field(default_factory=lambda: ["test", "rug", "scam"])
     creator_blocklist: list[str] = field(default_factory=list)

@@ -38,9 +38,9 @@ def random_cfg(rng: random.Random) -> ExitConfig:
     )
 
 
-def run_one(seed: int) -> None:
+def run_one(seed: int, cfg: ExitConfig = None) -> None:
     rng = random.Random(seed)
-    cfg = random_cfg(rng)
+    cfg = cfg or random_cfg(rng)
     t0 = 1_700_000_000.0
     entry = rng.uniform(1e-9, 1e-3)
     tokens = rng.uniform(1e3, 1e9)

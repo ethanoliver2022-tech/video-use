@@ -383,7 +383,7 @@ class Engine:
             + len(set(self._buying) | set(self.pending_buys()))  # in-flight buys are also pending
         if open_n >= t.max_open_positions:
             return "max open positions"
-        if -self.store.realized_today() >= t.daily_loss_limit_sol:
+        if t.daily_loss_limit_sol > 0 and -self.store.realized_today() >= t.daily_loss_limit_sol:
             return "daily loss limit hit"
         if (t.cooldown_after_loss_seconds and self.last_loss_at is not None
                 and time.monotonic() - self.last_loss_at < t.cooldown_after_loss_seconds):

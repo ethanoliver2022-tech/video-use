@@ -171,7 +171,7 @@ class SafetyChecker:
         n = self.store.launches_since(c.creator, time.time() - 86400, exclude_mint=c.mint)
         if n:
             r.notes.append(f"creator launched {n} other coin(s) in 24h")
-        if n >= self.cfg.max_creator_launches_24h:
+        if self.cfg.max_creator_launches_24h and n >= self.cfg.max_creator_launches_24h:
             r.fail(f"serial launcher: {n} other launches in 24h")
 
     async def _socials(self, c: Candidate, r: SafetyReport) -> None:

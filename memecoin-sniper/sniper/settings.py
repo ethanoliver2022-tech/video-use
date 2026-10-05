@@ -28,7 +28,8 @@ SETTINGS: list[Setting] = [
     Setting("trading.buy_amount_sol", "Buy size", "float", 0.001, 100, "SOL"),
     Setting("trading.slippage_pct", "Slippage", "float", 0.5, 100, "%"),
     Setting("trading.max_open_positions", "Max positions", "int", 1, 50),
-    Setting("trading.daily_loss_limit_sol", "Daily loss limit", "float", 0, 1000, "SOL"),
+    Setting("trading.daily_loss_limit_sol", "Daily loss limit", "float", 0, 1000, "SOL",
+            help="stop new buys for the rest of the UTC day after this much loss; 0 = no limit"),
     Setting("trading.min_sol_reserve", "SOL reserve", "float", 0, 100, "SOL"),
     # exits
     Setting("exits.take_profit", "Take profits", "tp", help="format: up%:sell%, e.g. 40:40,100:30,250:20"),
@@ -61,9 +62,10 @@ SETTINGS: list[Setting] = [
     Setting("entry.confirm_seconds", "Confirm window", "float", 0, 120, "s"),
     Setting("entry.min_unique_buyers", "Min early buyers", "int", 0, 1000),
     Setting("filters.max_creator_initial_buy_pct", "Max dev buy", "float", 0, 100, "%"),
-    Setting("filters.max_top10_holder_pct", "Max top-10 hold", "float", 0, 100, "%"),
+    Setting("filters.max_top10_holder_pct", "Max top-10 hold", "float", 1, 100, "%"),
     Setting("filters.min_socials", "Min socials", "int", 0, 3),
-    Setting("filters.max_creator_launches_24h", "Max dev launches/24h", "int", 0, 1000),
+    Setting("filters.max_creator_launches_24h", "Max dev launches/24h", "int", 0, 1000,
+            help="skip devs who launched more than this many tokens in 24h; 0 = off"),
     Setting("filters.min_liquidity_usd", "Min liquidity", "float", 0, 1e9, "$"),
     Setting("filters.honeypot_check", "Honeypot check", "bool"),
     # speed

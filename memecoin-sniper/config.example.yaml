@@ -12,7 +12,7 @@ trading:
   slippage_pct: 20
   priority_fee_sol: 0.0005      # only used when speed.auto_priority_fee is false
   min_sol_reserve: 0.03         # always keep this for sell fees + rent
-  daily_loss_limit_sol: 0.5     # stops new entries for the rest of the UTC day
+  daily_loss_limit_sol: 0.5     # stops new entries for the rest of the UTC day (0 = no limit)
   cooldown_after_loss_seconds: 60
 
 speed:
