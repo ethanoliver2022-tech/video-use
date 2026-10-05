@@ -210,3 +210,24 @@ def test_allocate_on_the_wallet_is_refused():
     from solders.system_program import AllocateParams, allocate
     with pytest.raises(UnsafeTransaction):
         check(tx(allocate(AllocateParams(pubkey=ME.pubkey(), space=1))))
+
+
+async def test_guard_runs_before_signing_whatever_the_signer_returns():
+    """The guard checks the built bytes themselves: no signing path can skip it."""
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    from sniper.execution.executors import NotSent
+    from sniper.models import Candidate
+    ex, rpc = live_executor(load_config(None))
+    ex.kp = ME
+    ex.pubkey = str(ME.pubkey())
+    signed = []
+    ex._sign = lambda unsigned: signed.append(unsigned) or unsigned
+    evil = bytes(tx(pump_buy(), sol(10 * 10**9)))
+
+    async def pp(*a, **k):
+        return evil
+    ex._pumpportal_tx = pp
+    with pytest.raises(NotSent, match="refused"):
+        await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+    assert not signed and ex.sender.sent == 0

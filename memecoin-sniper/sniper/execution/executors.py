@@ -241,16 +241,20 @@ class LiveExecutor:
         Raises NotLanded if the transaction expired without landing. Any other error
         after sending means the outcome is uncertain; callers reconcile with the wallet.
         """
+        try:  # guard the exact message that gets signed, before the signature exists
+            built = VersionedTransaction.from_bytes(unsigned)
+        except Exception:
+            built = None  # not a transaction at all: signing it fails just below
+        if built is not None:
+            try:
+                self._guard(built, max_sol_out, side, swap_sol)
+            except UnsafeTransaction as e:
+                log.error("refused to sign a %s for %s: %s", side, mint, e)
+                raise NotSent(f"🛡 refused to sign it: {e}") from e
         try:
             signed = self._sign(unsigned)
         except Exception as e:  # e.g. an error body instead of a transaction: nothing was sent
             raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
-        if isinstance(signed, VersionedTransaction):
-            try:
-                self._guard(signed, max_sol_out, side, swap_sol)
-            except UnsafeTransaction as e:
-                log.error("refused to sign a %s for %s: %s", side, mint, e)
-                raise NotSent(f"🛡 refused to sign it: {e}") from e
         sig = await self.sender.send(signed, self.kp)
         log.info("sent %s %s", side, sig)
         if not await self.rpc.confirm(sig):
