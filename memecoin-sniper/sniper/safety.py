@@ -118,6 +118,13 @@ class SafetyChecker:
         self.store, self.jupiter, self.ipfs_gateway = store, jupiter, ipfs_gateway
         self.probe_sol = probe_sol
 
+    def quick_check(self, c: Candidate) -> bool:
+        """The instant (no network) checks only: worth building a buy for this token yet?"""
+        r = static_checks(c, self.cfg)
+        if r.passed and c.chain == "solana":
+            self._reputation(c, r)
+        return r.passed
+
     async def evaluate(self, c: Candidate) -> SafetyReport:
         r = static_checks(c, self.cfg)
         if c.chain != "solana" or not r.passed:

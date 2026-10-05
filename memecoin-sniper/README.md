@@ -58,22 +58,38 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 ### How fast is it?
 
 What a snipe waits on, from the launch message to the transaction leaving:
-the pump.fun launch arrives on PumpPortal's websocket, the filters run (in
-memory and SQLite, plus at most 0.7s for the optional copycat-socials check;
-nothing when socials aren't checked), PumpPortal builds the transaction (one
-HTTP round trip), and it's signed locally and sent to all five Jito regions at
-once. The wallet balance and the priority fee are kept fresh in the background,
-so neither costs a round trip on the buy itself. Fills are polled every 0.4s.
 
-The fastest paid bots are still a little quicker at the very first block: they
-build pump.fun transactions themselves instead of asking PumpPortal (saving that
-round trip, roughly 50–200ms), read the chain through Yellowstone gRPC or
-ShredStream on servers next to the validators, and some pay for private relays.
-That matters most for a block-0 snipe of a hyped launch; for everything after
-the first second (the confirmation window, copy trades, exits) the difference
-is small. To get as close as possible: a paid RPC (Helius, Triton, QuickNode), a
-server in Frankfurt or New York near PumpPortal and Jito, and a higher
-`jito_tip_sol` when you're competing for the first block.
+1. The launch arrives on PumpPortal's websocket (one connection, always open).
+2. The instant checks run in memory (name, dev buy size, blocklist, dev reputation).
+3. If they pass, **the buy transaction is requested from PumpPortal at once**, while
+   the slower filters (token metadata / socials, on-chain lookups) are still running.
+   With a confirmation window, it's built half a second before the window ends. So
+   when a token passes, the transaction is usually already waiting: it's signed
+   locally and sent to all five Jito regions at once. A token that fails is never
+   sent (its prebuilt transaction is thrown away).
+4. Connections to PumpPortal, every Jito region and your RPCs are kept open and
+   warm, so no buy pays a TCP/TLS handshake. The wallet balance and the priority
+   fee are refreshed in the background, so neither costs a round trip either.
+5. As soon as the first Jito region accepts the bundle, the bot starts watching for
+   the fill (every 0.4s), without waiting for the farther regions to answer.
+
+The `degen` preset skips the metadata wait entirely, so a launch that passes the
+instant checks is bought straight away.
+
+What the fastest paid bots still have on top: they read the chain through
+Yellowstone gRPC or ShredStream on servers next to the validators (seeing a launch
+a little before PumpPortal relays it), build pump.fun transactions themselves
+(this bot takes PumpPortal's round trip off the critical path instead, which gets
+most of the same benefit without hand-building transactions that break whenever
+pump.fun updates its program), and some pay for private relays. That matters most
+for a block-0 snipe of a hyped launch; for everything after the first second (the
+confirmation window, copy trades, exits) the difference is small.
+
+To get as close as possible:
+- a paid RPC (Helius, Triton, QuickNode) in `SOLANA_RPC_URL`,
+- a server in Frankfurt or New York, near PumpPortal and Jito,
+- the `degen` preset (or socials checks off) if the first block matters most,
+- a higher `jito_tip_sol` when you're competing for the first block.
 
 ## Run it all from Telegram
 

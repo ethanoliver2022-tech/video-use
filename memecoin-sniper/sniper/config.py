@@ -194,8 +194,10 @@ class Config:
 PRESETS: dict[str, dict[str, Any]] = {
     "degen": {
         "entry": {"confirm_seconds": 0},
+        # speed first: no waiting on token metadata (the copycat-socials check) before buying
         "filters": {"max_creator_initial_buy_pct": 15, "max_top10_holder_pct": 45,
-                    "min_socials": 0, "max_creator_launches_24h": 10, "min_liquidity_usd": 3000},
+                    "min_socials": 0, "reject_reused_socials": False,
+                    "max_creator_launches_24h": 10, "min_liquidity_usd": 3000},
         "exits": {"stop_loss_pct": 35, "trailing_activate_pct": 50, "trailing_stop_pct": 30,
                   "max_hold_seconds": 1800, "sell_initials_at_pct": 100, "moonbag_pct": 10,
                   "take_profit": [{"at_pct": 100, "sell_pct": 50}, {"at_pct": 400, "sell_pct": 30}]},

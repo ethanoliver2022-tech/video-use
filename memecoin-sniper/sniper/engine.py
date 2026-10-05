@@ -61,6 +61,9 @@ BALANCE_CACHE_SECONDS = 3     # a buy uses it if no newer than this (and no buy 
 PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fill
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
+KEEPALIVE_SECONDS = 120  # idle connections kept open this long
+WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
+PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
@@ -100,7 +103,12 @@ class Engine:
         self.cfg, self.live, self.scan_only = cfg, live, scan_only
         self.config_path = config_path
         self.mode = "live" if live else "paper"
-        self.http = httpx.AsyncClient(timeout=15, headers={"user-agent": "memecoin-sniper/0.4"})
+        # connections stay open between snipes (httpx's default drops them after 5s idle, so
+        # every buy would pay a fresh TCP + TLS handshake to PumpPortal and each Jito region)
+        self.http = httpx.AsyncClient(timeout=15, headers={"user-agent": "memecoin-sniper/0.4"},
+                                      limits=httpx.Limits(max_connections=200,
+                                                          max_keepalive_connections=100,
+                                                          keepalive_expiry=KEEPALIVE_SECONDS))
         self.rpc = SolanaRpc(cfg.endpoints.rpc_url, self.http)
         self.jupiter = Jupiter(cfg.endpoints.jupiter_api, self.rpc, self.http, cfg.jupiter_api_key)
         self.store = Store(cfg.data_dir, self.mode)
@@ -252,11 +260,23 @@ class Engine:
 
     async def handle_candidate(self, c: Candidate) -> Optional[str]:
         """Filter, confirm and buy. Returns a human-readable outcome."""
+        try:
+            return await self._handle_candidate(c)
+        finally:
+            if c.prebuilt is not None and not c.prebuilt.done():
+                c.prebuilt.cancel()  # rejected or skipped: the built transaction is never sent
+
+    async def _handle_candidate(self, c: Candidate) -> Optional[str]:
         tag = f"[{c.chain}] {c.symbol or '?'} {c.mint}"
         if self.paused and c.source not in USER_SOURCES and not self.scan_only:
             return "paused"
         notes = ""
         if not c.force:
+            # no confirmation window ahead: build the buy now, while the slower filters run
+            # (metadata / socials, on-chain lookups), if the instant checks already pass
+            windowed = c.source == "pumpfun" and self.cfg.entry.confirm_seconds > 0
+            if self.live and not windowed and c.route == "pump" and self.safety.quick_check(c):
+                self._start_prebuild(c)
             report = await self.safety.evaluate(c)
             if not report.passed:
                 log.debug("reject %s: %s", tag, "; ".join(report.reasons))
@@ -295,6 +315,31 @@ class Engine:
         q.append(now)
         return True
 
+    async def _window(self, c: Candidate) -> None:
+        """Wait out the confirmation window, building the buy shortly before it ends so a
+        launch that passes is bought without waiting on PumpPortal."""
+        wait = self.cfg.entry.confirm_seconds
+        lead = min(PREBUILD_LEAD, wait)
+        await asyncio.sleep(wait - lead)
+        self._start_prebuild(c)
+        await asyncio.sleep(lead)
+
+    def _start_prebuild(self, c: Candidate) -> None:
+        """Live pump.fun buys: have PumpPortal build the transaction while the filters (or the
+        confirmation window) still run. It's only signed and sent if the token passes."""
+        prepare = getattr(self.executor, "prepare_buy", None)
+        if (not self.live or prepare is None or c.prebuilt is not None or c.chain != "solana"
+                or c.route != "pump" or self.scan_only or c.mint in self._buying
+                or (c.mint in self.positions and not self.positions[c.mint].closed)):
+            return
+        open_n = sum(1 for p in self.positions.values() if not p.closed) + len(self._buying)
+        if open_n >= self.cfg.trading.max_open_positions:
+            return  # it couldn't be bought anyway
+        sol = c.buy_sol or self.cfg.trading.buy_amount_sol
+        task = asyncio.ensure_future(prepare(c, sol))
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())  # never "unretrieved"
+        c.prebuilt, c.prebuilt_sol = task, sol
+
     async def confirm_flow(self, c: Candidate) -> list[str]:
         """Watch the first seconds of trading before committing (bundle / farm detection)."""
         if not self.has_trade_stream:
@@ -302,7 +347,7 @@ class Engine:
         flow = self.flows[c.mint] = EarlyFlow(creator=c.creator)
         await self.stream.watch_token(c.mint)
         try:
-            await asyncio.sleep(self.cfg.entry.confirm_seconds)
+            await self._window(c)
         finally:
             self.flows.pop(c.mint, None)
         problems = flow.evaluate(self.cfg.entry)
@@ -314,7 +359,7 @@ class Engine:
         """Without PumpPortal's paid trade stream: compare the bonding curve and the dev's
         balance before and after the window. Can't count unique buyers or spot bundles."""
         start_sol = c.v_sol
-        await asyncio.sleep(self.cfg.entry.confirm_seconds)
+        await self._window(c)
         try:
             curve = await fetch_curve(self.rpc, c.mint)
         except Exception as e:
@@ -653,6 +698,26 @@ class Engine:
                            "pre": pre,  # tokens already held before this buy (None = unknown)
                            "swap_sol": c.buy_sol or self.cfg.trading.buy_amount_sol}
         self._save_pending(pending)
+
+    async def keep_warm(self) -> None:
+        """Live: ping each trading host in turn so its connection is open when a snipe comes.
+        (The main RPC is kept warm by the balance refresh.) One host at a time, so a ping can
+        never collide with a bundle in every Jito region at once."""
+        from urllib.parse import urlsplit
+        i = 0
+        while True:
+            hosts = sorted({f"{u.scheme}://{u.netloc}/" for u in map(urlsplit, [
+                self.cfg.endpoints.pumpportal_trade,
+                *(self.cfg.speed.jito_block_engines if self.cfg.speed.jito_enabled else []),
+                *self.cfg.speed.broadcast_rpcs]) if u.scheme in ("http", "https") and u.netloc})
+            await asyncio.sleep(WARM_SECONDS / max(1, len(hosts)))
+            if self.live and hosts:
+                url = hosts[i % len(hosts)]
+                i += 1
+                try:
+                    await self.http.head(url, timeout=5)
+                except Exception as e:  # only a keep-alive: never matters if it fails
+                    log.debug("keep-alive %s: %s", url.split("//")[-1].split("/")[0], type(e).__name__)
 
     async def balance_loop(self) -> None:
         while True:
@@ -1562,7 +1627,7 @@ class Engine:
         loops = [("pumpportal", self.stream.run), ("exits", self.exit_loop),
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
-                 ("balance", self.balance_loop)]
+                 ("balance", self.balance_loop), ("keep-warm", self.keep_warm)]
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,
                                          d.geckoterminal_poll_seconds, self.on_candidate, self.http,

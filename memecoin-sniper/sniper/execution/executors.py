@@ -30,6 +30,7 @@ from .txguard import UnsafeTransaction, check_transaction
 
 log = logging.getLogger(__name__)
 
+PREBUILT_MAX_AGE = 5.0  # seconds a transaction built ahead of the buy may be used for
 PUMP_FEE = 0.0125  # protocol + creator fee on the bonding curve, approx.
 PUMPPORTAL_FEE = 0.005     # PumpPortal's fee on trades it builds (paper estimate; see pumpportal.fun)
 NETWORK_FEE_SOL = 0.000005  # base signature fee
@@ -382,20 +383,54 @@ class LiveExecutor:
         except Exception:
             return None
 
-    async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
-        # Tokens of this mint already in the wallet (e.g. a written-off bag) must never be
-        # mistaken for this buy's fill. Read alongside building the tx: no added latency.
-        pre_task = asyncio.ensure_future(self._held_or_none(cand.mint))
+    async def prepare_buy(self, cand: Candidate, sol: float) -> tuple[bytes, Optional[float], float]:
+        """Build a pump.fun buy (and read the pre-buy balance) ahead of time, while the filters
+        are still running: (unsigned tx, tokens already held, monotonic time built). If the
+        token passes, only signing and sending are left on the critical path."""
+        unsigned, pre = await asyncio.gather(
+            self._pumpportal_tx("buy", cand.mint, sol, in_sol=True),
+            self._held_or_none(cand.mint))
+        return unsigned, pre, time.monotonic()
+
+    async def _prebuilt(self, cand: Candidate, sol: float):
+        """The transaction built ahead by prepare_buy, if it's for this buy and still fresh."""
+        task = cand.prebuilt
+        if task is None or cand.prebuilt_sol != sol or cand.route != "pump":
+            return None
         try:
-            if cand.route == "pump":
-                unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
-            else:
-                q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
-                unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        except BaseException:
-            pre_task.cancel()
-            raise
-        pre = await pre_task
+            unsigned, pre, built_at = await task
+        except asyncio.CancelledError:
+            me = asyncio.current_task()
+            if me is None or getattr(me, "cancelling", lambda: 1)():  # we're cancelled ourselves
+                raise
+            return None  # only the prebuild was cancelled: build now
+        except Exception as e:
+            log.debug("prebuilt buy for %s unusable (%s); building now", cand.mint, e)
+            return None
+        if time.monotonic() - built_at > PREBUILT_MAX_AGE:
+            return None  # the price has moved on: build a fresh one
+        return unsigned, pre
+
+    async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
+        ready = await self._prebuilt(cand, sol)
+        if ready is not None:
+            unsigned, pre = ready
+        else:
+            # Tokens of this mint already in the wallet (e.g. a written-off bag) must never be
+            # mistaken for this buy's fill. Read alongside building the tx: no added latency.
+            pre_task = asyncio.ensure_future(self._held_or_none(cand.mint))
+            try:
+                if cand.route == "pump":
+                    unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
+                else:
+                    q = await self.jupiter.quote(SOL_MINT, cand.mint, sol,
+                                                 self.cfg.trading.slippage_pct)
+                    unsigned = await self.jupiter.swap_tx(q, self.pubkey,
+                                                          await self.sender.priority_fee())
+            except BaseException:
+                pre_task.cancel()
+                raise
+            pre = await pre_task
         base = pre or 0.0
         try:
             fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol), sol)

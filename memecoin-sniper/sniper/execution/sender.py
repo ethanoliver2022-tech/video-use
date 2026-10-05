@@ -78,6 +78,7 @@ class TxSender:
         self._extra: tuple[tuple[str, ...], list[SolanaRpc]] = ((), [])
         # swap signature -> its bundle's tip signature; oldest evicted (in-flight are newest)
         self.tip_sigs: OrderedDict[str, str] = OrderedDict()
+        self._inflight: set[asyncio.Task] = set()  # slower submission paths still running
 
     @property
     def default_fee(self) -> float:
@@ -131,9 +132,11 @@ class TxSender:
             jobs += [self._send_bundle(url, bundle) for url in engines]
         if not use_jito or self.cfg.jito_also_send_rpc:
             jobs += [r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]]
-        results = await asyncio.gather(*jobs, return_exceptions=True)
-        ok = [r for r in results if not isinstance(r, Exception)]
-        if not ok and use_jito and not self.cfg.jito_also_send_rpc:
+        accepted, results = await self._first_ok(jobs)
+        if accepted:
+            return sig  # accepted: start confirming now, the slower regions finish on their own
+        ok: list = []
+        if use_jito and not self.cfg.jito_also_send_rpc:
             # Jito unreachable / rate limited: getting the trade out matters more than
             # MEV protection (think: exiting a rug), so fall back to plain RPC.
             log.warning("jito submission failed (%s); sending through RPC instead", results[0])
@@ -147,6 +150,33 @@ class TxSender:
             if isinstance(r, Exception):
                 log.debug("one submission path failed: %s", r)
         return sig
+
+    async def _first_ok(self, jobs: list) -> tuple[bool, list]:
+        """(True, []) as soon as any path accepts the transaction. The others keep running in
+        the background (a far-away Jito region must not delay confirming a fill).
+        (False, errors) if every path failed."""
+        pending = {asyncio.ensure_future(j) for j in jobs}
+        errors: list = []
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    if t.exception() is None:
+                        for p in pending:  # keep a reference until they finish; log failures
+                            self._inflight.add(p)
+                            p.add_done_callback(self._path_done)
+                        pending = set()
+                        return True, []
+                    errors.append(t.exception())
+            return False, errors
+        finally:
+            for p in pending:  # only when we were cancelled ourselves
+                p.cancel()
+
+    def _path_done(self, t: asyncio.Task) -> None:
+        self._inflight.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            log.debug("one submission path failed: %s", t.exception())
 
     async def _send_bundle(self, engine: str, bundle: list[str]) -> str:
         resp = await self.http.post(f"{engine.rstrip('/')}/api/v1/bundles", json={

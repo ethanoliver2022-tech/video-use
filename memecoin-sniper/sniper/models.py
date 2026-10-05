@@ -52,6 +52,9 @@ class Candidate:
     force: bool = False             # manual buy: skip filters
     trigger: str = ""               # why it was picked: "dev", "keyword:<word>", "limit", ...
     queued_at: float = 0.0            # monotonic time it entered the buy queue
+    # a buy transaction built while the filters ran (live pump.fun only), and its size
+    prebuilt: Optional[object] = field(default=None, repr=False, compare=False)
+    prebuilt_sol: float = 0.0
 
     @property
     def on_bonding_curve(self) -> bool:

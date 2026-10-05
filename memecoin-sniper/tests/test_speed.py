@@ -135,3 +135,235 @@ async def test_buying_an_already_graduated_token_never_triggers_a_migration_sell
     dec = exits.evaluate(pos, eng.cfg.exits)
     assert dec is None or dec.reason != "migrated"
     await eng.http.aclose()
+
+
+# ---- the buy is built while the filters run ----
+
+def _live_ex():
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    ex, rpc = live_executor(load_config(None))
+    built = []
+
+    async def pp(action, mint, amount, in_sol, slippage_pct=None):
+        built.append((action, amount))
+        await asyncio.sleep(0.01)
+        return b"tx"
+    ex._pumpportal_tx = pp
+    return ex, built
+
+
+def _pump(mint="M"):
+    return Candidate(chain="solana", mint=mint, source="pumpfun", route="pump")
+
+
+async def test_a_prebuilt_buy_is_sent_without_building_again():
+    ex, built = _live_ex()
+    c = _pump()
+    c.prebuilt, c.prebuilt_sol = asyncio.ensure_future(ex.prepare_buy(c, 0.1)), 0.1
+    await ex.buy(c, 0.1, None)
+    assert built == [("buy", 0.1)] and ex.sender.sent == 1
+
+
+async def test_a_stale_failed_or_different_prebuilt_buy_is_rebuilt(monkeypatch):
+    import sniper.execution.executors as ex_mod
+    ex, built = _live_ex()
+    c = _pump()
+    c.prebuilt, c.prebuilt_sol = asyncio.ensure_future(ex.prepare_buy(c, 0.1)), 0.2
+    await ex.buy(c, 0.1, None)           # built for another size: never used
+    assert len(built) == 2
+
+    built.clear()
+    c = _pump()
+    c.prebuilt, c.prebuilt_sol = asyncio.ensure_future(ex.prepare_buy(c, 0.1)), 0.1
+    monkeypatch.setattr(ex_mod, "PREBUILT_MAX_AGE", -1.0)  # too old by the time it's used
+    await ex.buy(c, 0.1, None)
+    assert len(built) == 2
+    monkeypatch.undo()
+
+    built.clear()
+    c = _pump()
+
+    async def broken(*a):
+        raise RuntimeError("pumpportal 500")
+    c.prebuilt, c.prebuilt_sol = asyncio.ensure_future(broken()), 0.1
+    await ex.buy(c, 0.1, None)           # a failed prebuild costs nothing extra: just build
+    assert built == [("buy", 0.1)] and ex.sender.sent == 3
+
+
+class _PrebuildEx:
+    def __init__(self):
+        self.prepared, self.sent = [], []
+
+    async def prepare_buy(self, c, sol):
+        self.prepared.append(c.mint)
+        await asyncio.sleep(0.05)  # PumpPortal round trip
+        import time
+        return b"tx", 0.0, time.monotonic()
+
+    async def buy(self, c, sol, curve):
+        self.sent.append(await c.prebuilt if c.prebuilt else None)
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+
+
+async def _live_engine(tmp_path, passing):
+    from sniper.models import SafetyReport
+    eng = engine(tmp_path)
+    eng.live, eng.own_wallet, eng.paused = True, "W", False
+    eng.cfg.entry.confirm_seconds = 0
+    eng.executor = ex = _PrebuildEx()
+    seen = []
+
+    async def bal(*a, **k):
+        return 10.0
+    eng.rpc.get_balance_sol = bal
+
+    async def evaluate(c):
+        await asyncio.sleep(0.02)  # metadata / socials
+        seen.append(list(ex.prepared))
+        return SafetyReport(passed=passing)
+    eng.safety.evaluate = evaluate
+    return eng, ex, seen
+
+
+async def test_launch_buy_is_built_while_filters_run(tmp_path):
+    eng, ex, seen = await _live_engine(tmp_path, passing=True)
+    c = _pump(str(Keypair().pubkey()))
+    res = await eng.handle_candidate(c)
+    assert res.startswith("🟢")
+    assert seen == [[c.mint]]            # the build had started before the filters finished
+    assert ex.sent and ex.sent[0][0] == b"tx"
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_rejected_launch_never_sends_its_prebuilt_buy(tmp_path):
+    eng, ex, seen = await _live_engine(tmp_path, passing=False)
+    c = _pump(str(Keypair().pubkey()))
+    res = await eng.handle_candidate(c)
+    assert "rejected" in res and not ex.sent
+    await asyncio.sleep(0)               # let the cancellation land
+    assert c.prebuilt is not None and c.prebuilt.cancelled()
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_no_prebuild_in_paper_mode_or_for_instantly_rejected_tokens(tmp_path):
+    eng, ex, seen = await _live_engine(tmp_path, passing=False)
+    c = _pump(str(Keypair().pubkey()))
+    c.name = "rug pull"                   # fails the instant name check: nothing is built
+    await eng.handle_candidate(c)
+    assert not ex.prepared
+    eng.live = False
+    await eng.handle_candidate(_pump(str(Keypair().pubkey())))
+    assert not ex.prepared
+    await eng.http.aclose()
+
+
+async def test_confirmation_window_builds_the_buy_just_before_it_ends(tmp_path, monkeypatch):
+    import sniper.engine as em
+    monkeypatch.setattr(em, "PREBUILD_LEAD", 0.05)
+    eng, ex, seen = await _live_engine(tmp_path, passing=True)
+    eng.cfg.entry.confirm_seconds = 0.15
+    c = _pump(str(Keypair().pubkey()))
+    task = asyncio.ensure_future(eng._window(c))
+    await asyncio.sleep(0.05)
+    assert not ex.prepared               # not at the start of the window...
+    await task
+    assert ex.prepared == [c.mint]       # ...but before it ended
+    eng.live = False
+    await eng.http.aclose()
+
+
+# ---- sending ----
+
+class _Rpc:
+    url = "http://rpc"
+
+    def __init__(self):
+        self.sent = 0
+
+    async def send_raw_transaction(self, raw):
+        self.sent += 1
+        return "SIG"
+
+
+def _sender(regions):
+    from sniper.config import SpeedConfig
+    from sniper.execution.sender import TxSender
+    cfg = SpeedConfig(jito_block_engines=[f"https://{r}" for r in regions])
+    rpc = _Rpc()
+    return TxSender(cfg, rpc, None, 0.0001), rpc
+
+
+def _signed():
+    from solders.hash import Hash
+    from sniper.execution.wallet import transfer_tx
+    kp = Keypair()
+    return transfer_tx(kp, str(Keypair().pubkey()), 1000, Hash.new_unique()), kp
+
+
+async def test_send_returns_on_the_first_region_that_accepts():
+    import time
+    s, rpc = _sender(["fast", "slow"])
+    finished = []
+
+    async def bundle(engine, b):
+        if "slow" in engine:
+            await asyncio.sleep(0.3)
+        finished.append(engine)
+        return "ok"
+    s._send_bundle = bundle
+    tx, kp = _signed()
+    t0 = time.monotonic()
+    assert await s.send(tx, kp) == str(tx.signatures[0])
+    assert time.monotonic() - t0 < 0.2   # didn't wait for the far region
+    await asyncio.sleep(0.35)
+    assert finished == ["https://fast", "https://slow"]  # which still got the bundle
+    assert not s._inflight
+
+
+async def test_send_falls_back_to_rpc_only_when_every_region_fails():
+    s, rpc = _sender(["a", "b"])
+
+    async def bundle(engine, b):
+        raise RuntimeError("429")
+    s._send_bundle = bundle
+    tx, kp = _signed()
+    await s.send(tx, kp)
+    assert rpc.sent == 1
+
+
+# ---- connections ----
+
+async def test_trading_hosts_are_kept_warm_in_live_mode_only(tmp_path, monkeypatch):
+    import sniper.engine as em
+    monkeypatch.setattr(em, "WARM_SECONDS", 0.06)
+    eng = engine(tmp_path)
+    pinged = []
+
+    async def head(url, **k):
+        pinged.append(url)
+    eng.http.head = head
+    task = asyncio.ensure_future(eng.keep_warm())
+    await asyncio.sleep(0.1)
+    assert not pinged                     # paper: nothing to keep warm
+    eng.live = True
+    await asyncio.sleep(0.2)
+    task.cancel()
+    assert "https://pumpportal.fun/" in pinged
+    assert "https://ny.mainnet.block-engine.jito.wtf/" in pinged
+    assert len(set(pinged)) == 6          # PumpPortal + 5 Jito regions, one at a time
+    eng.live = False
+    await eng.http.aclose()
+
+
+def test_connections_stay_open_between_snipes(tmp_path):
+    eng = engine(tmp_path)
+    assert eng.http._transport._pool._keepalive_expiry >= 60
+
+
+def test_degen_preset_never_waits_on_metadata():
+    from sniper.config import load_config
+    assert load_config(None, preset="degen").filters.reject_reused_socials is False
+    assert load_config(None, preset="balanced").filters.reject_reused_socials is True
