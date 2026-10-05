@@ -36,9 +36,18 @@ CREATE TABLE IF NOT EXISTS orders (
 """
 
 
+def _private(path: Path) -> None:
+    """The data folder (wallet key, database) is for its owner only, even on a shared host."""
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass  # e.g. a read-only or foreign-owned mount: the files themselves are still 0600
+
+
 class Store:
     def __init__(self, data_dir: str, mode: str = "paper"):
         Path(data_dir).mkdir(parents=True, exist_ok=True)
+        _private(Path(data_dir))
         self.mode = mode
         self.path = Path(data_dir) / "sniper.db"
         self.db = sqlite3.connect(self.path, isolation_level=None)  # autocommit

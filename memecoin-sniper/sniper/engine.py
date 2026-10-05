@@ -1257,6 +1257,7 @@ class Engine:
         apply_overrides(new, self.store.overrides())
         update_in_place(self.cfg, new, skip={"private_key", "telegram_bot_token", "telegram_chat_id",
                                              "pumpportal_api_key", "jupiter_api_key",
+                                             "withdraw_allowlist", "allow_key_export",
                                              "data_dir", "endpoints"})
         self.store.set_setting("preset", name)
         for key in ("discovery.pumpfun_new_tokens", "copytrade.enabled", "trading.buy_amount_sol",
@@ -1303,6 +1304,9 @@ class Engine:
             raise ValueError("no wallet")
         if to == str(kp.pubkey()):
             raise ValueError("that's the bot's own address")
+        if self.cfg.withdraw_allowlist and to not in self.cfg.withdraw_allowlist:
+            raise ValueError("withdrawals are locked to the addresses in WITHDRAW_ALLOWLIST "
+                             "(in .env on the server)")
         bal = await self.rpc.get_balance_sol(str(kp.pubkey()))
         bal_lamports = int(round(bal * 1e9))
         fee = 5000  # one signature, no priority fee

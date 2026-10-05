@@ -184,6 +184,9 @@ class Config:
     telegram_chat_id: str = ""
     pumpportal_api_key: str = ""   # needed for live trade / copy-trade streams
     jupiter_api_key: str = ""      # free at portal.jup.ag; switches to api.jup.ag
+    # .env-only locks: Telegram can't change them, so they hold even if the chat is compromised
+    withdraw_allowlist: list[str] = field(default_factory=list)  # WITHDRAW_ALLOWLIST
+    allow_key_export: bool = True                                # ALLOW_KEY_EXPORT
 
 
 # Presets sit underneath your config.yaml: anything you set there wins.
@@ -268,6 +271,10 @@ def load_config(path: str | os.PathLike | None = None, preset: str | None = None
     cfg.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     cfg.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     cfg.pumpportal_api_key = os.getenv("PUMPPORTAL_API_KEY", "").strip()
+    cfg.withdraw_allowlist = [a.strip() for a in os.getenv("WITHDRAW_ALLOWLIST", "").split(",")
+                              if a.strip()]
+    cfg.allow_key_export = os.getenv("ALLOW_KEY_EXPORT", "true").strip().lower() not in (
+        "0", "false", "no", "off")
     cfg.jupiter_api_key = os.getenv("JUPITER_API_KEY", "").strip()
     if cfg.jupiter_api_key and "lite-api.jup.ag" in cfg.endpoints.jupiter_api:
         cfg.endpoints.jupiter_api = cfg.endpoints.jupiter_api.replace("lite-api.jup.ag", "api.jup.ag")

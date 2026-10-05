@@ -585,6 +585,9 @@ class TelegramControl:
             self._ask("import")
             await self.send("Send the private key (base58 or JSON array).\n"
                             "I'll delete your message as soon as I've read it.", [[("✖️ Cancel", "x")]])
+        elif action in ("exp", "exp!") and not self.engine.cfg.allow_key_export:
+            await self.send("🔒 Key export is turned off (ALLOW_KEY_EXPORT=false in .env). "
+                            "On the server the key is in data/wallet.key.")
         elif action == "exp":
             await self.show("⚠️ Anyone who sees your private key can take your funds.\n"
                             f"Show it here? It will be deleted after {EXPORT_TTL}s.",

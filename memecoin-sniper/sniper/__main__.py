@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -31,6 +32,9 @@ def main() -> None:
     stats.add_argument("--days", type=float, default=0, help="only the last N days")
 
     args = p.parse_args()
+    # everything the bot writes (wallet key, backups, database with your trades and chat id)
+    # is readable by its owner only
+    os.umask(0o077)
     # `docker stop` sends SIGTERM: turn it into a clean shutdown (positions are saved either way)
     signal.signal(signal.SIGTERM, _terminate)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,

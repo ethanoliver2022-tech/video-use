@@ -171,13 +171,30 @@ wallets, and the blocklist.
 
 ### Security
 
-- **Your key stays on your server.** It's stored in `data/wallet.key` (permissions `0600`)
-  and every transaction is signed locally. Whoever can log into the server
-  can read the key, so lock the server down, and back up `data/`.
-- **Only the paired chat is obeyed.** To change owner, delete the `owner_chat_id`
-  setting, or set `TELEGRAM_CHAT_ID` in `.env`.
-- **Replacing a wallet never deletes the old key.** It's kept as `wallet.key.bak-*`.
-- **Wallet changes are blocked while LIVE.** Switch to paper first.
+Who can do what:
+
+- **Only you control the bot.** It obeys one private chat: yours, paired with a
+  one-time code that only appears in the server log. Groups are refused (every
+  member would be an owner), and every message and button press is also checked
+  against your Telegram user. Anyone else who finds the bot gets no reply.
+- **Your key stays on your server.** It's stored in `data/wallet.key` (permissions
+  `0600`, folder `0700`) and every transaction is signed locally; it's never sent
+  anywhere and never written to a log. The database (your trades, your chat id) is
+  private to the server's owner too. Whoever can log into the server as root can
+  read the key, so use SSH keys (not passwords) and keep the server updated.
+- **Lock it down further from `.env`** (Telegram can't change these, so they hold
+  even if someone got into your Telegram account):
+  `WITHDRAW_ALLOWLIST=<your Phantom address>` allows withdrawals only there, and
+  `ALLOW_KEY_EXPORT=false` stops the key ever being shown in chat. Recommended
+  once you're set up.
+- **Turn on Telegram two-step verification** (Settings → Privacy and Security):
+  your Telegram account is the remote control.
+- **Pasted keys are deleted.** A private key sent to the chat (outside Import) is
+  deleted at once; an exported key is shown behind a spoiler and deleted after 60s.
+- **Replacing a wallet never deletes the old key.** It's kept as `wallet.key.bak-*`,
+  and it's blocked while any LIVE position is still held by the current wallet.
+- **Pinned dependencies.** The image installs exact, hash-checked versions, so a
+  compromised or broken new release of a library can't slip in on rebuild.
 - **Use a dedicated hot wallet** holding only what you can afford to lose.
 
 ## How it works

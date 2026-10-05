@@ -58,11 +58,12 @@ PUMPPORTAL_API_KEY=$PP
 JUPITER_API_KEY=$JUP
 EOF
   umask 022
-else
-  # older installs: add any newer optional keys so they're easy to fill in later
-  grep -q '^PUMPPORTAL_API_KEY=' .env || echo 'PUMPPORTAL_API_KEY=' >> .env
-  grep -q '^JUPITER_API_KEY=' .env || echo 'JUPITER_API_KEY=' >> .env
 fi
+# older installs: add any newer optional keys so they're easy to fill in later
+grep -q '^PUMPPORTAL_API_KEY=' .env || echo 'PUMPPORTAL_API_KEY=' >> .env
+grep -q '^JUPITER_API_KEY=' .env || echo 'JUPITER_API_KEY=' >> .env
+chmod 600 .env                     # bot token, API keys: owner only
+mkdir -p data && chmod 700 data    # wallet key + database: owner only
 
 if [ ! -f config.yaml ]; then
   cp config.example.yaml config.yaml
