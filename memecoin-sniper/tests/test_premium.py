@@ -288,7 +288,7 @@ async def test_copy_ignores_dust(tmp_path):
     await eng.http.aclose()
 
 
-CREATE = {"mint": "NewPump", "traderPublicKey": DEV, "txType": "create", "initialBuy": 20_000_000,
+CREATE = {"mint": "NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "traderPublicKey": DEV, "txType": "create", "initialBuy": 20_000_000,
           "bondingCurveKey": "c", "vTokensInBondingCurve": 1_053_000_000, "vSolInBondingCurve": 30.57,
           "name": "Frog", "symbol": "FROG", "uri": "", "signature": "create"}
 
@@ -300,18 +300,18 @@ async def test_confirmation_window_rejects_bundle_and_accepts_organic(tmp_path):
     task = asyncio.create_task(eng.handle_candidate(c))
     await asyncio.sleep(0.01)
     for i in range(4):
-        await eng.on_trade(pump_trade("NewPump", "buy", wallet(), 0.5, 31 + i))
+        await eng.on_trade(pump_trade("NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "buy", wallet(), 0.5, 31 + i))
     result = await task
-    assert "bundle" in result and "NewPump" not in eng.positions
-    assert {"method": "unsubscribeTokenTrade", "keys": ["NewPump"]} in eng.sent
+    assert "bundle" in result and "NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump" not in eng.positions
+    assert {"method": "unsubscribeTokenTrade", "keys": ["NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]} in eng.sent
 
-    organic = dict(CREATE, mint="Organic", signature="c2", traderPublicKey=wallet())
+    organic = dict(CREATE, mint="Organicxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", signature="c2", traderPublicKey=wallet())
     await eng.stream._dispatch(json.dumps(organic))
     c = eng.queue.get_nowait()
     task = asyncio.create_task(eng.handle_candidate(c))
     await asyncio.sleep(0.01)
     for i, sol in enumerate((0.3, 0.55, 0.45, 0.62)):
-        await eng.on_trade(pump_trade("Organic", "buy", wallet(), sol, 31 + i))
+        await eng.on_trade(pump_trade("Organicxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "buy", wallet(), sol, 31 + i))
     assert (await task).startswith("🟢")
     await eng.http.aclose()
 
@@ -320,13 +320,13 @@ async def test_restore_after_restart_and_telegram_controls(tmp_path):
     eng = make_engine(tmp_path)
     await eng.stream._dispatch(json.dumps(CREATE))
     await eng.handle_candidate(eng.queue.get_nowait())
-    assert "NewPump" in eng.positions
+    assert "NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump" in eng.positions
     await eng.http.aclose()
 
     eng2 = make_engine(tmp_path)
     await eng2.restore()
-    p = eng2.positions["NewPump"]
-    assert not p.closed and {"method": "subscribeTokenTrade", "keys": ["NewPump"]} in eng2.sent
+    p = eng2.positions["NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]
+    assert not p.closed and {"method": "subscribeTokenTrade", "keys": ["NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]} in eng2.sent
 
     replies = []
     tg = TelegramControl(eng2, "token", "42", eng2.http)
@@ -340,11 +340,11 @@ async def test_restore_after_restart_and_telegram_controls(tmp_path):
     await tg.handle_update({"message": {"chat": {"id": 42}, "text": "/pause"}})
     assert eng2.paused and eng2.store.get_setting("paused") == "1"
     await tg.handle_update({"message": {"chat": {"id": 42}, "text": "/positions"}})
-    assert replies[-1][1][0][2] == ("Sell 100%", "s:NewPump:100")
+    assert replies[-1][1][0][2] == ("Sell 100%", "s:NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump:100")
 
-    eng2.curves["NewPump"] = eng2.curves.get("NewPump") or __import__(
+    eng2.curves["NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"] = eng2.curves.get("NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump") or __import__(
         "sniper.execution.executors", fromlist=["CurveState"]).CurveState(31.0, 1.04e9)
-    await tg.handle_update({"callback_query": {"id": "1", "data": "s:NewPump:50",
+    await tg.handle_update({"callback_query": {"id": "1", "data": "s:NewPumpxxxxxxxxxxxxxxxxxxxxxxxxxxxxxpump:50",
                                                "message": {"chat": {"id": 42}}}})
     await eng2.settle()
     assert 0 < p.tokens_remaining < p.tokens_initial

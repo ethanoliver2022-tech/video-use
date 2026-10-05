@@ -217,7 +217,12 @@ class SafetyChecker:
         except Exception as e:
             r.notes.append(f"rugcheck error: {e}")
             return
-        dangers = [x.get("name", "?") for x in data.get("risks", []) if x.get("level") == "danger"]
+        if not isinstance(data, dict):
+            r.notes.append("rugcheck: unexpected response")
+            return
+        risks = data.get("risks") if isinstance(data.get("risks"), list) else []
+        dangers = [str(x.get("name", "?")) for x in risks
+                   if isinstance(x, dict) and x.get("level") == "danger"]
         r.notes.append(f"rugcheck score {data.get('score_normalised', data.get('score'))}")
         if dangers and self.cfg.rugcheck_reject_danger:
             r.fail("rugcheck danger: " + ", ".join(dangers))

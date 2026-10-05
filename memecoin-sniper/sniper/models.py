@@ -6,7 +6,23 @@ from collections import deque
 from dataclasses import asdict, dataclass, field, fields
 from typing import Optional
 
+import math
+
 SOL_MINT = "So11111111111111111111111111111111111111112"
+
+
+def num(v, allow_zero: bool = False) -> Optional[float]:
+    """A finite, non-negative float from untrusted data, or None. Rejects NaN, Infinity,
+    negatives, booleans and anything that isn't a number or a numeric string."""
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        f = float(v.strip()) if isinstance(v, str) else float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f) or f < 0 or (f == 0 and not allow_zero):
+        return None
+    return f
 PUMP_TOTAL_SUPPLY = 1_000_000_000  # every pump.fun token mints exactly 1B (6 decimals)
 
 
@@ -142,8 +158,8 @@ class Position:
     def update_price(self, price: float, ts: Optional[float] = None) -> None:
         """Record a new price. `last_update` only moves when the price does, so polling a
         token nobody trades still lets the dead-token exit fire."""
-        if price <= 0:
-            return
+        if not isinstance(price, (int, float)) or not math.isfinite(price) or price <= 0:
+            return  # never let a bad quote or feed message corrupt the position
         if abs(price - self.last_price) > self.last_price * 1e-9:
             self.last_update = ts or time.time()
         self.last_price = price

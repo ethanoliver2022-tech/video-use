@@ -60,10 +60,12 @@ class EarlyFlow:
     dev_sold: bool = False
 
     def add(self, msg: dict) -> None:
+        from .models import num
         trader = msg.get("traderPublicKey", "")
-        sol = float(msg.get("solAmount") or 0)
-        if msg.get("marketCapSol"):
-            self.market_cap_sol = float(msg["marketCapSol"])
+        sol = num(msg.get("solAmount"), allow_zero=True) or 0.0
+        mcap = num(msg.get("marketCapSol"))
+        if mcap:
+            self.market_cap_sol = mcap
         if msg.get("txType") == "buy":
             self.buys.append((trader, sol))
         elif msg.get("txType") == "sell":

@@ -13,7 +13,7 @@ from typing import Awaitable, Callable, Optional
 
 import websockets
 
-from ..models import Candidate
+from ..models import Candidate, num
 
 log = logging.getLogger(__name__)
 
@@ -27,36 +27,37 @@ def candidate_from_create(msg: dict) -> Candidate:
         chain="solana",
         mint=msg["mint"],
         source="pumpfun",
-        symbol=msg.get("symbol", ""),
-        name=msg.get("name", ""),
+        symbol=msg.get("symbol") if isinstance(msg.get("symbol"), str) else "",
+        name=msg.get("name") if isinstance(msg.get("name"), str) else "",
         creator=msg.get("traderPublicKey"),
         created_at=time.time(),
-        pool=msg.get("bondingCurveKey"),
+        pool=msg.get("bondingCurveKey") if isinstance(msg.get("bondingCurveKey"), str) else None,
         creator_initial_buy_tokens=_f(msg.get("initialBuy")),
-        v_sol=_f(msg.get("vSolInBondingCurve")),
-        v_tokens=_f(msg.get("vTokensInBondingCurve")),
+        v_sol=num(msg.get("vSolInBondingCurve")),
+        v_tokens=num(msg.get("vTokensInBondingCurve")),
         url=f"https://pump.fun/coin/{msg['mint']}",
-        uri=msg.get("uri"),
+        uri=msg.get("uri") if isinstance(msg.get("uri"), str) else None,
         route="pump",
     )
 
 
 def trade_price(msg: dict) -> Optional[float]:
-    """SOL per token implied by a trade message."""
-    v_sol, v_tok = _f(msg.get("vSolInBondingCurve")), _f(msg.get("vTokensInBondingCurve"))
+    """SOL per token implied by a trade message (None if the message is malformed)."""
+    v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
     if v_sol and v_tok:
         return v_sol / v_tok
-    sol, tok = _f(msg.get("solAmount")), _f(msg.get("tokenAmount"))
+    sol, tok = num(msg.get("solAmount")), num(msg.get("tokenAmount"))
     if sol and tok:
         return sol / tok
     return None
 
 
 def _f(v) -> Optional[float]:
-    try:
-        return float(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
+    return num(v, allow_zero=True)
+
+
+def _valid_address(v) -> bool:
+    return isinstance(v, str) and 32 <= len(v) <= 44 and v.isalnum()
 
 
 class PumpPortalStream:
@@ -171,6 +172,11 @@ class PumpPortalStream:
             return
         if not isinstance(msg, dict):
             return
+        if "mint" in msg and not _valid_address(msg["mint"]):
+            return  # malformed: never let it reach the engine
+        for key in ("traderPublicKey", "signature"):
+            if key in msg and not isinstance(msg[key], str):
+                msg.pop(key)
         if "mint" not in msg:
             if msg.get("errors") or msg.get("error"):  # e.g. bad / unfunded API key
                 log.warning("pumpportal: %s", msg.get("errors") or msg.get("error"))

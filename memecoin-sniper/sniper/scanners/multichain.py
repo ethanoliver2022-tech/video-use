@@ -22,10 +22,8 @@ DEX_CHAINS = {"solana": "solana", "ethereum": "eth", "base": "base", "bsc": "bsc
 
 
 def _float(v) -> Optional[float]:
-    try:
-        return float(v) if v not in (None, "") else None
-    except (TypeError, ValueError):
-        return None
+    from ..models import num
+    return num(v, allow_zero=True)
 
 
 # Quote assets that are never the "new token" in a pool.
@@ -43,38 +41,64 @@ QUOTE_TOKENS = {
 }
 
 
+def _get(d, *path):
+    for key in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(key)
+    return d
+
+
 def _token_id(pool: dict, rel: str) -> str:
-    tid = pool.get("relationships", {}).get(rel, {}).get("data", {}).get("id", "")
-    return tid.split("_", 1)[1] if "_" in tid else ""
+    tid = _get(pool, "relationships", rel, "data", "id")
+    return tid.split("_", 1)[1] if isinstance(tid, str) and "_" in tid else ""
 
 
 def parse_gecko_pools(network: str, payload: dict) -> list[Candidate]:
     out = []
-    for pool in payload.get("data", []):
-        attrs = pool.get("attributes", {})
-        mint = _token_id(pool, "base_token")
-        if mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
-            mint = _token_id(pool, "quote_token")  # pool listed as SOL/NEW instead of NEW/SOL
-        if not mint or mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    for pool in data if isinstance(data, list) else []:
+        try:
+            cand = _parse_gecko_pool(network, pool)
+        except (TypeError, ValueError, AttributeError) as e:
+            log.debug("skipping malformed pool: %s", e)
             continue
-        created = attrs.get("pool_created_at")
-        ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp() if created else None
-        name = attrs.get("name", "")
-        cand = Candidate(
-            chain=GECKO_CHAINS.get(network, network),
-            mint=mint,
-            source="geckoterminal",
-            symbol=name.split("/")[0].strip(),
-            name=name,
-            pool=attrs.get("address"),
-            liquidity_usd=_float(attrs.get("reserve_in_usd")),
-            fdv_usd=_float(attrs.get("fdv_usd")),
-            url=f"https://www.geckoterminal.com/{network}/pools/{attrs.get('address')}",
-        )
-        if ts:
-            cand.created_at = ts
-        out.append(cand)
+        if cand:
+            out.append(cand)
     return out
+
+
+def _parse_gecko_pool(network: str, pool) -> Optional[Candidate]:
+    if not isinstance(pool, dict):
+        return None
+    attrs = pool.get("attributes") if isinstance(pool.get("attributes"), dict) else {}
+    mint = _token_id(pool, "base_token")
+    if mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
+        mint = _token_id(pool, "quote_token")  # pool listed as SOL/NEW instead of NEW/SOL
+    if not mint or mint.lower() in {q.lower() for q in QUOTE_TOKENS}:
+        return None
+    created = attrs.get("pool_created_at")
+    ts = None
+    if isinstance(created, str) and created:
+        try:
+            ts = datetime.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            ts = None
+    name = attrs.get("name") if isinstance(attrs.get("name"), str) else ""
+    cand = Candidate(
+        chain=GECKO_CHAINS.get(network, network),
+        mint=mint,
+        source="geckoterminal",
+        symbol=name.split("/")[0].strip(),
+        name=name,
+        pool=attrs.get("address") if isinstance(attrs.get("address"), str) else None,
+        liquidity_usd=_float(attrs.get("reserve_in_usd")),
+        fdv_usd=_float(attrs.get("fdv_usd")),
+        url=f"https://www.geckoterminal.com/{network}/pools/{attrs.get('address')}",
+    )
+    if ts:
+        cand.created_at = ts
+    return cand
 
 
 def _describe(e: Exception) -> str:
@@ -145,7 +169,8 @@ class DexScreenerScanner:
             if not isinstance(prof, dict):
                 continue
             chain, addr = prof.get("chainId"), prof.get("tokenAddress")
-            if not chain or not addr or (chain, addr) in self._seen:
+            if not isinstance(chain, str) or not isinstance(addr, str) or not chain or not addr \
+                    or (chain, addr) in self._seen:
                 continue
             self._seen.add((chain, addr))
             fresh.setdefault(chain, []).append(addr)
@@ -157,25 +182,32 @@ class DexScreenerScanner:
         resp = await self.http.get(f"{self.api}/tokens/v1/{chain}/{','.join(addrs)}")
         resp.raise_for_status()
         best: dict[str, dict] = {}
-        for pair in resp.json() or []:
+        pairs = resp.json()
+        for pair in pairs if isinstance(pairs, list) else []:
             if not isinstance(pair, dict):
                 continue
-            addr = pair.get("baseToken", {}).get("address")
-            liq = (pair.get("liquidity") or {}).get("usd") or 0
-            if addr and liq >= ((best.get(addr) or {}).get("liquidity") or {}).get("usd", -1):
+            addr = _get(pair, "baseToken", "address")
+            if not isinstance(addr, str) or not addr:
+                continue
+            liq = _float(_get(pair, "liquidity", "usd")) or 0.0
+            prev = _float(_get(best.get(addr), "liquidity", "usd")) if addr in best else -1.0
+            if liq >= (prev if prev is not None else 0.0):
                 best[addr] = pair
         for addr, pair in best.items():
+            sym, name = _get(pair, "baseToken", "symbol"), _get(pair, "baseToken", "name")
+            url, pair_addr = pair.get("url"), pair.get("pairAddress")
             cand = Candidate(
                 chain=DEX_CHAINS.get(chain, chain),
                 mint=addr,
                 source="dexscreener",
-                symbol=pair.get("baseToken", {}).get("symbol", ""),
-                name=pair.get("baseToken", {}).get("name", ""),
-                pool=pair.get("pairAddress"),
-                liquidity_usd=_float((pair.get("liquidity") or {}).get("usd")),
+                symbol=sym if isinstance(sym, str) else "",
+                name=name if isinstance(name, str) else "",
+                pool=pair_addr if isinstance(pair_addr, str) else None,
+                liquidity_usd=_float(_get(pair, "liquidity", "usd")),
                 fdv_usd=_float(pair.get("fdv")),
-                url=pair.get("url"),
+                url=url if isinstance(url, str) else None,
             )
-            if pair.get("pairCreatedAt"):
-                cand.created_at = pair["pairCreatedAt"] / 1000
+            created = _float(pair.get("pairCreatedAt"))
+            if created:
+                cand.created_at = created / 1000
             await self.on_candidate(cand)

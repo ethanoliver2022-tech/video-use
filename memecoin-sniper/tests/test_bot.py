@@ -144,7 +144,7 @@ def test_concentration_skips_pda_owners():
 
 # ---------- parsing / math ----------
 
-CREATE_MSG = {"signature": "s", "mint": "Mint1pump", "traderPublicKey": CREATOR, "txType": "create",
+CREATE_MSG = {"signature": "s", "mint": "Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "traderPublicKey": CREATOR, "txType": "create",
               "initialBuy": 30_000_000, "solAmount": 0.9, "bondingCurveKey": "curve",
               "vTokensInBondingCurve": 1_043_000_000, "vSolInBondingCurve": 30.86,
               "marketCapSol": 29.6, "name": "Frog", "symbol": "FROG", "uri": "x", "pool": "pump"}
@@ -209,20 +209,20 @@ async def test_paper_engine_snipe_and_exit(tmp_path):
     await eng.stream._dispatch(json.dumps(CREATE_MSG))
     c = eng.queue.get_nowait()
     await eng.handle_candidate(c)
-    p = eng.positions["Mint1pump"]
+    p = eng.positions["Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]
     assert p.sol_in == 0.05 and p.tokens_initial > 0
-    assert {"method": "subscribeTokenTrade", "keys": ["Mint1pump"]} in sent
+    assert {"method": "subscribeTokenTrade", "keys": ["Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]} in sent
 
     # price pumps +60% -> first take-profit
     v_sol = 30.86 * 1.6 ** 0.5
     v_tok = 30.86 * 1_043_000_000 / v_sol
-    await eng.on_trade({"mint": "Mint1pump", "txType": "buy", "traderPublicKey": "anon",
+    await eng.on_trade({"mint": "Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "txType": "buy", "traderPublicKey": "anon",
                         "solAmount": 5, "vSolInBondingCurve": v_sol, "vTokensInBondingCurve": v_tok})
     await eng.settle()  # exits run in the background
     assert p.tp_levels_hit == {0} and 0 < p.tokens_remaining < p.tokens_initial
 
     # dev dumps -> everything out
-    await eng.on_trade({"mint": "Mint1pump", "txType": "sell", "traderPublicKey": CREATOR,
+    await eng.on_trade({"mint": "Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump", "txType": "sell", "traderPublicKey": CREATOR,
                         "solAmount": 1, "vSolInBondingCurve": v_sol - 1,
                         "vTokensInBondingCurve": v_tok * 1.03})
     await eng.settle()

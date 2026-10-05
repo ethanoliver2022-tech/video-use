@@ -18,7 +18,7 @@ from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, L
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .intel import EarlyFlow
-from .models import PUMP_TOTAL_SUPPLY, Candidate, Position
+from .models import PUMP_TOTAL_SUPPLY, Candidate, Position, num
 from .notify import Notifier
 from .pump_curve import fetch_curve
 from .safety import SafetyChecker
@@ -345,14 +345,15 @@ class Engine:
             return
         if self.paused or self.scan_only:
             return
-        if float(msg.get("solAmount") or 0) < self.cfg.copytrade.min_leader_buy_sol:
+        if (num(msg.get("solAmount"), allow_zero=True) or 0.0) < self.cfg.copytrade.min_leader_buy_sol:
             return
         c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6], route="pump",
                       leader=leader.address if leader.copy_sells else None,
                       buy_sol=leader.buy_sol or None, force=not self.cfg.copytrade.run_safety_checks,
                       url=f"https://pump.fun/coin/{mint}")
         name = leader.label or leader.address[:6]
-        log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint, float(msg.get("solAmount") or 0))
+        log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint,
+                 num(msg.get("solAmount"), allow_zero=True) or 0.0)
         result = await self.handle_candidate(c)
         if result and not result.startswith("🟢"):
             await self.notifier.send(f"👥 {esc(name)} bought {mint[:8]}… — not copied: {esc(result)}",
@@ -364,7 +365,7 @@ class Engine:
             return
         if not self._alert_allowed(self._tracker_alerts, TRACKER_ALERTS_PER_HOUR):
             return
-        sol = float(msg.get("solAmount") or 0)
+        sol = num(msg.get("solAmount"), allow_zero=True) or 0.0
         name = esc(w.label or w.address[:6])
         icon = "🟢" if side == "buy" else "🔴"
         buttons = [[(f"Buy {a:g}", f"b:{mint}:{a:g}") for a in (0.05, 0.1, 0.25)],
@@ -549,9 +550,9 @@ class Engine:
         if self._dup(msg):  # token + account subscriptions can both deliver the same trade
             return
         mint = msg["mint"]
-        if msg.get("vSolInBondingCurve") and msg.get("vTokensInBondingCurve"):
-            self._set_curve(mint, CurveState(float(msg["vSolInBondingCurve"]),
-                                             float(msg["vTokensInBondingCurve"])))
+        v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
+        if v_sol and v_tok:
+            self._set_curve(mint, CurveState(v_sol, v_tok))
         if mint in self.flows:
             self.flows[mint].add(msg)
         leader = self._copy.get(msg.get("traderPublicKey", ""))
@@ -561,7 +562,7 @@ class Engine:
         if not pos or pos.closed:
             return
         pool = msg.get("pool")
-        if pool and pool != "pump" and not pos.migrated:  # trading on PumpSwap / an AMM now
+        if isinstance(pool, str) and pool and pool != "pump" and not pos.migrated:  # trading on PumpSwap / an AMM now
             await self.on_migration(mint)
         price = trade_price(msg)
         if price:

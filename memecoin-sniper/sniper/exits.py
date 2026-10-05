@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import ExitConfig
-from .models import Position, TradeTick
+from .models import Position, TradeTick, num
 
 DUST_FRACTION = 0.02    # if a partial sell would leave < 2% of the original bag, sell it all
 INITIALS_BUFFER = 1.03  # sell 3% extra when taking initials to cover fees and slippage
@@ -39,7 +39,8 @@ def record_trade(pos: Position, msg: dict, kol_wallets: set[str], own_wallet: st
     if side not in ("buy", "sell") or (own_wallet and trader == own_wallet):
         return
     pos.recent_trades.append(TradeTick(side=side, trader=trader,
-                                       sol=float(msg.get("solAmount") or 0), ts=time.time()))
+                                       sol=num(msg.get("solAmount"), allow_zero=True) or 0.0,
+                                       ts=time.time()))
     if side == "sell" and pos.creator and trader == pos.creator:
         pos.dev_sold = True
     if side == "sell" and pos.leader and trader == pos.leader:
