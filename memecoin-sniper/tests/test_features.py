@@ -200,7 +200,7 @@ class PriceEngineExecutor:
         self.buys.append((c.mint, sol))
         return Fill(tokens=1000.0, sol=sol)
 
-    async def sell(self, mint, tokens, sell_all, pump, curve):
+    async def sell(self, mint, tokens, sell_all, pump, curve, slippage_pct=None):
         return Fill(tokens=tokens, sol=0.5)
 
     async def quote_sell(self, mint, tokens):

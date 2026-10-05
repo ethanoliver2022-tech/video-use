@@ -35,6 +35,9 @@ esc = html.escape
 PRICE_POLL_SECONDS = 2
 QUOTE_GAP_SECONDS = 5        # poll on-chain / Jupiter when the trade stream has been quiet this long
 SELL_BACKOFF_MAX = 60        # seconds between retries of a failing sell
+SELL_FAST_RETRIES = 10       # the first retries come quickly (2, 4, 8, 10, 10... seconds)
+MAX_SELL_SLIPPAGE = 50.0     # failed sells retry with more slippage, up to this
+DANGER_EXITS = ("dev sold", "copied wallet sold", "stop loss")
 WRITE_OFF_AFTER = 40         # failed sells (with backoff, ~30+ min) before giving a position up
 ALERTS_PER_HOUR = 20         # cap on "other chain" alerts so Telegram never gets flooded
 TRACKER_ALERTS_PER_HOUR = 60 # cap on wallet-tracker alerts
@@ -227,6 +230,11 @@ class Engine:
                 log.debug("skip %s after confirmation: %s", tag, "; ".join(problems))
                 return "❌ confirmation failed: " + "; ".join(problems)
             notes += "; early flow confirmed"
+            result = await self.try_buy(c, notes)
+            pos = self.positions.get(c.mint)
+            if not pos or pos.closed:  # skipped/failed after watching: stop the (billed) feed
+                await self.stream.unwatch_token(c.mint)
+            return result
         return await self.try_buy(c, notes)
 
     def _alert_allowed(self, q: Optional[deque] = None, per_hour: int = ALERTS_PER_HOUR) -> bool:
@@ -548,7 +556,8 @@ class Engine:
             curve = self.curves.get(pos.mint) if not pos.migrated else None
             try:
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
-                                                pump=pos.route == "pump", curve=curve)
+                                                pump=pos.route == "pump", curve=curve,
+                                                slippage_pct=self._sell_slippage(pos, dec))
             except NothingToSell:
                 pos.sol_out += self._estimate_value(pos)
                 pos.tokens_remaining, pos.closed = 0.0, True
@@ -571,10 +580,20 @@ class Engine:
                 await self._closed(pos)
             return text
 
+    def _sell_slippage(self, pos: Position, dec: exits.ExitDecision) -> float:
+        """A token crashing through a rug blows past normal slippage, so each failed attempt
+        allows more, and emergency exits start higher."""
+        base = self.cfg.trading.slippage_pct
+        if dec.reason.startswith(DANGER_EXITS):
+            base *= 1.5
+        n = self.sell_failures.get(pos.mint, 0)
+        return min(MAX_SELL_SLIPPAGE, max(base, base * (1 + n)))
+
     async def _sell_failed(self, pos: Position, err: Exception) -> str:
         """Never abandon a position on a transient failure: back off, reconcile, retry."""
         n = self.sell_failures[pos.mint] = self.sell_failures.get(pos.mint, 0) + 1
-        self._sell_next_try[pos.mint] = time.time() + min(2 ** n, SELL_BACKOFF_MAX)
+        wait = min(2 ** n, 10) if n < SELL_FAST_RETRIES else SELL_BACKOFF_MAX
+        self._sell_next_try[pos.mint] = time.time() + wait
         if self.live:  # a sell that "failed" may still have landed: trust the wallet
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, pos.mint)

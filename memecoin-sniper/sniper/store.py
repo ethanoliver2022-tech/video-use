@@ -43,6 +43,9 @@ class Store:
         self.path = Path(data_dir) / "sniper.db"
         self.db = sqlite3.connect(self.path, isolation_level=None)  # autocommit
         self.db.execute("PRAGMA journal_mode=WAL")
+        # WAL + NORMAL: crash-safe and consistent, without an fsync per insert (the bot
+        # records every pump.fun launch, and a disk flush each time stalls the event loop)
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
         self._migrate()
 

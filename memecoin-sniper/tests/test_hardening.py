@@ -146,7 +146,7 @@ class SlowExecutor:
         await asyncio.sleep(self.delay)
         return Fill(tokens=1000.0, sol=sol)
 
-    async def sell(self, mint, tokens, sell_all, pump, curve):
+    async def sell(self, mint, tokens, sell_all, pump, curve, slippage_pct=None):
         self.sells += 1
         await asyncio.sleep(self.delay)
         return Fill(tokens=tokens, sol=0.2)
@@ -629,4 +629,61 @@ async def test_telegram_ignores_backlog_from_while_offline(tmp_path):
     await tg._drop_backlog()
     assert tg.offset == 42  # the queued "Buy" tap is skipped, never executed
     assert ("getUpdates", {"offset": 42, "timeout": 0}) in calls
+    await eng.http.aclose()
+
+
+# ---------- fourth review pass ----------
+
+async def test_failed_sells_retry_with_more_slippage(tmp_path):
+    eng = make_engine(tmp_path)
+    seen = []
+
+    class Ex(SlowExecutor):
+        async def sell(self, mint, tokens, sell_all, pump, curve, slippage_pct=None):
+            seen.append(slippage_pct)
+            raise RuntimeError("slippage exceeded")
+    eng.executor = Ex(0)
+    base = eng.cfg.trading.slippage_pct
+    pos = pump_pos(opened_at=time.time() - 10_000)
+    eng.positions["M"] = pos
+    for _ in range(4):
+        await eng.check_exit(pos)
+        assert eng._sell_next_try["M"] - time.time() <= 10.5  # quick retries early on
+        eng._sell_next_try["M"] = 0
+    assert seen == [min(50.0, base * k) for k in (1, 2, 3, 4)]  # capped at 50%
+    pos.dev_sold = True
+    eng.sell_failures.pop("M")
+    await eng.check_exit(pos)
+    assert seen[-1] == base * 1.5  # emergency exits start higher
+    await eng.http.aclose()
+
+
+async def test_buy_that_failed_on_chain_is_never_tracked():
+    from sniper.solana_rpc import TxFailed
+    cfg = load_config(None)
+    ex, rpc = live_executor(cfg)
+
+    async def pp(*a, **k):
+        return b"tx"
+    ex._pumpportal_tx = pp
+    rpc.confirm_raises = TxFailed("transaction X failed on-chain: slippage")
+    rpc.balance_raw = 5_000  # leftover dust from an earlier trade
+    with pytest.raises(TxFailed):
+        await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+
+
+async def test_confirmed_launch_that_is_not_bought_stops_its_trade_feed(tmp_path):
+    eng = make_engine(tmp_path, api_key="k", entry={"confirm_seconds": 0.01, "min_unique_buyers": 0},
+                      trading={"max_open_positions": 0})
+    c = Candidate(chain="solana", mint=wallet(), source="pumpfun", creator=wallet(), route="pump",
+                  v_sol=30.0, v_tokens=1.07e9)
+
+    async def ok(cand):
+        from sniper.models import SafetyReport
+        return SafetyReport(passed=True)
+    eng.safety.evaluate = ok
+    res = await eng.handle_candidate(c)
+    assert "max open positions" in res
+    assert c.mint not in eng.stream.token_subs
+    assert {"method": "unsubscribeTokenTrade", "keys": [c.mint]} in eng.sent_ws
     await eng.http.aclose()

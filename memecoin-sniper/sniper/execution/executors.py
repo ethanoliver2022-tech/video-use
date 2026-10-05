@@ -20,7 +20,7 @@ from solders.transaction import VersionedTransaction
 
 from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
-from ..solana_rpc import SolanaRpc, balance_deltas
+from ..solana_rpc import SolanaRpc, TxFailed, balance_deltas
 from .sender import TxSender
 
 log = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class NothingToSell(RuntimeError):
 class Executor(Protocol):
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill: ...
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
-                   curve: Optional[CurveState]) -> Fill: ...
+                   curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill: ...
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]: ...
 
 
@@ -70,6 +70,8 @@ class Jupiter:
 
     async def decimals(self, mint: str) -> int:
         if mint not in self._decimals:
+            if len(self._decimals) > 20_000:  # bounded for 24/7 running
+                self._decimals = {SOL_MINT: 9}
             info = await self.rpc.get_mint_info(mint)
             if not info:
                 raise RuntimeError(f"unknown mint {mint}")
@@ -121,7 +123,7 @@ class PaperExecutor:
         return Fill(tokens=await self.jupiter.out_ui(q), sol=sol)
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
-                   curve: Optional[CurveState]) -> Fill:
+                   curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
         if curve:
             return Fill(tokens=tokens, sol=curve.sell_out(tokens))
         q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct)
@@ -143,14 +145,16 @@ class LiveExecutor:
         tx = VersionedTransaction.from_bytes(unsigned)
         return VersionedTransaction(tx.message, [self.kp])
 
-    async def _pumpportal_tx(self, action: str, mint: str, amount, in_sol: bool) -> bytes:
+    async def _pumpportal_tx(self, action: str, mint: str, amount, in_sol: bool,
+                             slippage_pct: Optional[float] = None) -> bytes:
+        slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
         resp = await self.http.post(self.cfg.endpoints.pumpportal_trade, data={
             "publicKey": self.pubkey,
             "action": action,
             "mint": mint,
             "amount": amount,
             "denominatedInSol": "true" if in_sol else "false",
-            "slippage": max(1, round(self.cfg.trading.slippage_pct)),
+            "slippage": max(1, round(slippage)),  # PumpPortal takes whole percents
             "priorityFee": await self.sender.priority_fee(),
             "pool": "auto",
         })
@@ -190,8 +194,8 @@ class LiveExecutor:
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         try:
             return await self._submit(unsigned, cand.mint, "buy")
-        except NotLanded:
-            raise
+        except (NotLanded, TxFailed):
+            raise  # definitely didn't buy
         except Exception as e:
             # outcome unknown (RPC hiccup after sending): trust the wallet, never orphan tokens
             held = await self.rpc.get_token_balance(self.pubkey, cand.mint)
@@ -201,7 +205,8 @@ class LiveExecutor:
             raise
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
-                   curve: Optional[CurveState]) -> Fill:
+                   curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
+        slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
         raw, decimals = await self.rpc.get_token_balance_raw(self.pubkey, mint)
         if raw <= 0:
             raise NothingToSell(f"no {mint} left in the wallet")
@@ -214,12 +219,11 @@ class LiveExecutor:
         if pump:
             try:  # only *building* falls back; once a tx is sent we never send a second one
                 unsigned = await self._pumpportal_tx(
-                    "sell", mint, "100%" if sell_all else tokens, in_sol=False)
+                    "sell", mint, "100%" if sell_all else tokens, in_sol=False, slippage_pct=slippage)
             except Exception as e:
                 log.warning("pumpportal sell build failed (%s); using Jupiter", e)
         if unsigned is None:
-            q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.cfg.trading.slippage_pct,
-                                         raw_amount=sell_raw)
+            q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         fill = await self._submit(unsigned, mint, "sell")
         if fill.tokens <= 0:

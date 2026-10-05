@@ -16,6 +16,10 @@ class RpcError(RuntimeError):
     pass
 
 
+class TxFailed(RpcError):
+    """The transaction landed on-chain but failed (e.g. slippage exceeded): nothing changed."""
+
+
 class SolanaRpc:
     def __init__(self, url: str, client: Optional[httpx.AsyncClient] = None):
         self.url = url
@@ -121,7 +125,7 @@ class SolanaRpc:
             status = ((res or {}).get("value") or [None])[0]
             if status:
                 if status.get("err"):
-                    raise RpcError(f"transaction {signature} failed: {status['err']}")
+                    raise TxFailed(f"transaction {signature} failed on-chain: {status['err']}")
                 if status.get("confirmationStatus") in ("confirmed", "finalized"):
                     return True
             await asyncio.sleep(1.0)
