@@ -296,3 +296,168 @@ def test_take_profit_rejects_nan_and_inf():
     for bad in ("nan:50", "inf:50", "50:nan"):
         with pytest.raises(ValueError):
             parse_value(BY_KEY["exits.take_profit"], bad)
+
+
+# ---------- third review ----------
+
+async def test_unreadable_buy_books_what_was_sent_not_just_the_tip(tmp_path):
+    eng = engine(tmp_path)
+
+    async def buy(c, sol, curve):
+        return Fill(tokens=1000.0, sol=0.0005, signature="S", sol_known=False)  # tip only
+    eng.executor.buy = buy
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.05, force=True)
+    assert eng.positions[m].sol_in >= 0.05
+    await eng.http.aclose()
+
+
+async def test_migration_of_a_token_seen_at_launch_is_still_sniped(tmp_path):
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+    eng.paused = False
+    m = str(Keypair().pubkey())
+    await eng.on_candidate(Candidate(chain="solana", mint=m, source="pumpfun", creator="D"))
+    while not eng.queue.empty():
+        eng.queue.get_nowait()
+    await eng.on_candidate(Candidate(chain="solana", mint=m, source="pumpfun-migration",
+                                     route="pump"))
+    assert not eng.queue.empty()
+    await eng.http.aclose()
+
+
+async def test_late_landed_limit_sell_is_not_rearmed(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    eng.live = True
+    oid = eng.store.add_order(pos.mint, "sell", 0, 50, 0.0, "<=", pos.entry_price, 1e12)
+    assert eng.store.set_order_status(oid, "executing")
+    left = pos.tokens_remaining / 2
+
+    async def sell(*a, **k):
+        raise RuntimeError("outcome unknown")
+    eng.executor.sell = sell
+
+    async def bal(*a, **k):
+        return left
+    eng.rpc.get_token_balance = bal
+    await eng._fill_order({"id": oid, "side": "sell", "mint": pos.mint, "pct": 50})
+    assert not eng.store.open_orders()  # filled, not re-armed to sell another 50%
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_slow_telegram_never_holds_the_sell_lock(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    gate = asyncio.Event()
+
+    async def slow(*a, **k):
+        await gate.wait()  # Telegram rate-limited
+    eng.notifier.send = slow
+    await asyncio.wait_for(eng.manual_sell(pos.mint, 25), 2)
+    assert not eng.sell_locks[pos.mint].locked()
+    gate.set()
+    await eng.http.aclose()
+
+
+async def test_restore_never_adopts_unrelated_tokens(tmp_path):
+    eng = engine(tmp_path)
+    pos = await bought(eng)
+    tracked = pos.tokens_remaining
+    eng.live = True
+
+    async def bal(*a, **k):
+        return tracked * 3  # an old bag of the same mint is also in the wallet
+    eng.rpc.get_token_balance = bal
+    await eng.restore()
+    assert eng.positions[pos.mint].tokens_remaining == tracked
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_jito_with_no_block_engines_falls_back_to_rpc():
+    from solders.hash import Hash
+    from solders.keypair import Keypair as Kp
+    from solders.message import MessageV0
+    from solders.system_program import TransferParams, transfer
+    from solders.transaction import VersionedTransaction
+    from sniper.config import load_config
+    from sniper.execution.sender import TxSender
+    cfg = load_config("config.example.yaml")
+    cfg.speed.jito_enabled, cfg.speed.jito_block_engines = True, []
+    sent = []
+
+    class Rpc:
+        url = "x"
+
+        async def send_raw_transaction(self, raw):
+            sent.append(raw)
+            return "SIG"
+    s = TxSender(cfg.speed, Rpc(), None, 0.0001)
+    kp = Kp()
+    tx = VersionedTransaction(MessageV0.try_compile(kp.pubkey(), [transfer(TransferParams(
+        from_pubkey=kp.pubkey(), to_pubkey=Kp().pubkey(), lamports=1))], [], Hash.new_unique()), [kp])
+    await s.send(tx, kp)
+    assert sent
+
+
+async def test_config_wallet_mode_can_be_toggled(tmp_path):
+    from sniper.config import CopyWallet
+    eng = engine(tmp_path)
+    addr = str(Keypair().pubkey())
+    eng.cfg.copytrade.wallets = [CopyWallet(address=addr, label="whale", buy_sol=0.2)]
+    await eng.set_wallet_mode(addr, "alert")
+    w = [x for x in eng.store.copy_wallets() if x["address"] == addr][0]
+    assert w["mode"] == "alert" and w["label"] == "whale" and w["buy_sol"] == 0.2
+    await eng.http.aclose()
+
+
+async def test_copy_add_track_alone_gives_usage(tmp_path):
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    await h.text("/copy add track")
+    assert "address" in h.last and "index" not in h.last
+    await h.close()
+
+
+async def test_candidates_stuck_in_a_backed_up_queue_are_dropped(tmp_path):
+    import time as _t
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+    handled = []
+
+    async def handle(c):
+        handled.append(c.mint)
+    eng.handle_candidate = handle
+    stale = Candidate(chain="solana", mint="S", source="pumpfun", queued_at=_t.monotonic() - 120)
+    fresh = Candidate(chain="solana", mint="F", source="pumpfun", queued_at=_t.monotonic())
+    manual = Candidate(chain="solana", mint="M", source="manual", queued_at=_t.monotonic() - 120)
+    for c in (stale, fresh, manual):
+        eng.queue.put_nowait(c)
+    task = asyncio.create_task(eng.worker())
+    await eng.queue.join()
+    task.cancel()
+    assert handled == ["F", "M"]
+    await eng.http.aclose()
+
+
+async def test_balance_rpc_is_read_outside_the_buy_lock(tmp_path):
+    eng = engine(tmp_path)
+    eng.live = True
+    seen_locked = []
+
+    async def bal(*a, **k):
+        seen_locked.append(eng.buy_lock.locked())
+        return 10.0
+    eng.rpc.get_balance_sol = bal
+
+    async def buy(c, sol, curve):
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+    eng.executor.buy = buy
+    from sniper.models import Candidate
+    await eng.try_buy(Candidate(chain="solana", mint=str(Keypair().pubkey()), source="manual",
+                                force=True))
+    assert seen_locked == [False]
+    eng.live = False
+    await eng.http.aclose()

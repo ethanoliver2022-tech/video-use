@@ -51,6 +51,7 @@ MIN_RENT_LAMPORTS = 890_880       # a SOL account can't be left between 0 and th
 PENDING_BUY_WINDOW = 180          # seconds an unconfirmed buy is watched (> blockhash lifetime)
 RECONCILE_SECONDS = 5
 CLOCK_JUMP_SECONDS = 30  # wall clock moved this much more than real elapsed time
+MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
@@ -115,7 +116,7 @@ class Engine:
         self.stream.on_migration = self.on_migration
 
         self.queue: asyncio.Queue[Candidate] = asyncio.Queue(maxsize=500)
-        self.seen: dict[tuple[str, str], float] = {}
+        self.seen: dict[tuple, float] = {}
         self.positions: dict[str, Position] = {}
         self.curves: dict[str, CurveState] = {}
         self._curve_ts: dict[str, float] = {}
@@ -179,7 +180,8 @@ class Engine:
     async def on_candidate(self, c: Candidate) -> None:
         if c.source == "pumpfun" and c.creator:
             self.store.record_launch(c.mint, c.creator)  # reputation keeps learning while paused
-        key = (c.chain, c.mint)
+        # a graduation is a new event for a mint we saw launch: dedup it separately
+        key = (c.chain, c.mint) + (("migration",) if c.source == "pumpfun-migration" else ())
         if key in self.seen:
             return
         self.seen[key] = time.time()
@@ -191,6 +193,7 @@ class Engine:
             return
         if c.v_sol and c.v_tokens:
             self._set_curve(c.mint, CurveState(c.v_sol, c.v_tokens))
+        c.queued_at = time.monotonic()
         try:
             self.queue.put_nowait(c)
         except asyncio.QueueFull:
@@ -216,6 +219,10 @@ class Engine:
         while True:
             c = await self.queue.get()
             try:
+                waited = time.monotonic() - c.queued_at if c.queued_at else 0.0
+                if waited > MAX_QUEUE_WAIT and c.source not in USER_SOURCES:
+                    log.debug("dropping %s: waited %.0fs in a backed-up queue", c.mint, waited)
+                    continue  # a snipe minutes late is no snipe
                 await self.handle_candidate(c)
             except Exception:
                 log.exception("error handling %s", c.mint)
@@ -337,8 +344,11 @@ class Engine:
 
     async def set_wallet_mode(self, address: str, mode: str) -> None:
         w = next((x for x in self.store.copy_wallets() if x["address"] == address), None)
-        if not w:
-            raise ValueError("wallet not found")
+        if not w:  # a wallet from config.yaml: the change is saved as a chat override
+            cw = next((x for x in self.cfg.copytrade.wallets if x.address == address), None)
+            if not cw:
+                raise ValueError("wallet not found")
+            w = {"label": cw.label, "buy_sol": cw.buy_sol}
         await self.add_copy_wallet(address, w["label"], w["buy_sol"], mode)
 
     async def remove_copy_wallet(self, address: str) -> bool:
@@ -386,7 +396,7 @@ class Engine:
 
     # ---------- entries ----------
 
-    async def risk_block(self, sol: float) -> Optional[str]:
+    async def risk_block(self, sol: float, bal: Optional[float] = None) -> Optional[str]:
         t = self.cfg.trading
         open_n = sum(1 for p in self.positions.values()   # moonbags don't take up a slot
                      if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
@@ -399,11 +409,12 @@ class Engine:
                 and time.monotonic() - self.last_loss_at < t.cooldown_after_loss_seconds):
             return "cooling down after loss"
         if self.live:
-            try:
-                bal = await self.rpc.get_balance_sol(self.own_wallet)
-            except Exception as e:  # can't verify funds: don't buy blind
-                return f"couldn't check the wallet balance ({str(e)[:80]})"
-            tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+            if bal is None:
+                try:
+                    bal = await self.rpc.get_balance_sol(self.own_wallet)
+                except Exception as e:  # can't verify funds: don't buy blind
+                    return f"couldn't check the wallet balance ({str(e)[:80]})"
+            tip = self._tip_estimate()
             needed = sol + sum(self._buying.values()) + tip + self.cfg.speed.max_priority_fee_sol \
                 + ATA_RENT_SOL
             if bal - needed < t.min_sol_reserve:
@@ -412,11 +423,18 @@ class Engine:
 
     async def try_buy(self, c: Candidate, notes: str = "") -> str:
         sol = c.buy_sol or self.cfg.trading.buy_amount_sol
+        bal = None
+        if self.live:  # the slow RPC read happens outside the lock: buys never queue on it
+            try:
+                bal = await self.rpc.get_balance_sol(self.own_wallet)
+            except Exception as e:  # can't verify funds: don't buy blind
+                log.info("skip %s %s: balance unreadable (%s)", c.symbol, c.mint, e)
+                return f"skipped: couldn't check the wallet balance ({str(e)[:80]})"
         async with self.buy_lock:  # reserve a slot atomically, then trade without the lock
             if (c.mint in self._buying or c.mint in self.pending_buys()
                     or (c.mint in self.positions and not self.positions[c.mint].closed)):
                 return "already holding"
-            blocked = await self.risk_block(sol)
+            blocked = await self.risk_block(sol, bal)  # in-flight buys are subtracted here
             if blocked:
                 log.info("skip %s %s: %s", c.symbol, c.mint, blocked)
                 return f"skipped: {blocked}"
@@ -424,7 +442,7 @@ class Engine:
             if self.live:
                 # write-ahead: if the bot dies anywhere from here on, the reconciler still
                 # knows this buy may have landed and will adopt or expire it after restart
-                tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+                tip = self._tip_estimate()
                 self._add_pending(c, sol + tip)
         try:
             curve = self.curves.get(c.mint) if c.on_bonding_curve else None
@@ -450,11 +468,11 @@ class Engine:
             if fill.from_wallet and fill.pre is None:  # whole-wallet count, baseline unknown
                 fill.tokens = max(0.0, fill.tokens - self._known_leftover(c.mint))
             fill.sol = num(fill.sol, allow_zero=True) or 0.0
-            if fill.tokens > 0 and fill.sol <= 0:
-                fill.sol = sol  # we know what we spent
+            if not fill.sol_known or (fill.tokens > 0 and fill.sol <= 0):
+                fill.sol = sol + self._tip_estimate()  # unreadable tx: we know what we sent
             if fill.tokens <= 0:  # confirmed but no tokens visible yet: let the reconciler decide
                 if self.live:
-                    self._add_pending(c, fill.sol or sol, fill.pre)
+                    self._add_pending(c, fill.sol, fill.pre)
                 await self.notifier.send(f"⏳ buy {esc(c.symbol)} confirmed but no tokens visible "
                                          f"yet ({fill.signature}); checking the wallet")
                 return "buy returned 0 tokens"
@@ -499,6 +517,9 @@ class Engine:
         if pending.pop(mint, None) is not None:
             self._save_pending(pending)
 
+    def _tip_estimate(self) -> float:
+        return self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+
     def _known_leftover(self, mint: str) -> float:
         """Tokens the bot knows were already in the wallet: a written-off position's bag."""
         import json
@@ -511,6 +532,17 @@ class Engine:
         if str(data.get("close_reason", "")).startswith("unsellable"):
             return num(data.get("tokens_remaining"), allow_zero=True) or 0.0
         return 0.0
+
+    def _clear_leftover(self, mint: str) -> None:
+        import json
+        row = self.store.db.execute(
+            "SELECT data FROM positions WHERE mode = ? AND mint = ? AND closed = 1",
+            (self.mode, mint)).fetchone()
+        if row:
+            pos = Position.from_dict(json.loads(row[0]))
+            if pos.tokens_remaining:
+                pos.tokens_remaining = 0.0
+                self.store.save_position(pos)
 
     def _add_pending(self, c: Candidate, sol: float, pre: Optional[float] = None) -> None:
         pending = self.pending_buys()
@@ -536,6 +568,8 @@ class Engine:
                 pre = info.get("pre")
                 if pre is None:  # crashed before the pre-buy balance was known
                     pre = self._known_leftover(mint)
+                    if held < pre:  # that bag has since left the wallet: the guess is stale
+                        pre = 0.0
                 held -= num(pre, allow_zero=True) or 0.0  # only what this buy added
             except Exception as e:
                 log.debug("reconcile %s: %s", mint, e)
@@ -748,7 +782,7 @@ class Engine:
             text = (f"🔴 SELL {esc(pos.symbol)} {'ALL' if dec.sell_all else f'{dec.tokens:,.0f}'} "
                     f"→ {fill.sol:.4f} SOL{' (estimated)' if estimated else ''} — "
                     f"{esc(dec.reason)} (pnl {pos.pnl_pct:+.0f}%)")
-            await self.notifier.send(text)
+            self._spawn(self.notifier.send(text))  # never hold the sell lock waiting on Telegram
             if pos.closed:
                 await self._closed(pos)
             return text
@@ -788,20 +822,23 @@ class Engine:
                     self.store.save_position(pos)
                     self.sell_failures.pop(pos.mint, None)
                     self._sell_next_try.pop(pos.mint, None)
-                    return f"{esc(pos.symbol)}: the sell landed late (PnL estimated)"
+                    text = (f"🔴 SELL {esc(pos.symbol)} {sold:,.0f} — {esc(done.reason)}: it landed "
+                            "late (PnL estimated)")
+                    self._spawn(self.notifier.send(text))
+                    return text  # a real sell: callers (limit orders) must see it as filled
             except Exception as e:
                 log.debug("balance reconcile failed: %s", e)
         if n in (1, 5) or n % 20 == 0:
-            await self.notifier.send(f"⚠️ sell {esc(pos.symbol)} failed ({n}x), retrying: "
-                                     f"{esc(str(err)[:300])}", logging.WARNING)
+            self._spawn(self.notifier.send(f"⚠️ sell {esc(pos.symbol)} failed ({n}x), retrying: "
+                                           f"{esc(str(err)[:300])}", logging.WARNING))
         if n >= WRITE_OFF_AFTER:
             pos.closed, pos.close_reason = True, "unsellable: written off"
             self.store.save_position(pos)
             await self._closed(pos)
             where = (" The tokens are still in your wallet: send /sell <mint> to try again "
                      "later.") if self.live else ""
-            await self.notifier.send(f"🛑 {esc(pos.symbol)} couldn't be sold after {n} tries and was "
-                                     f"written off.{esc(where)}", logging.ERROR)
+            self._spawn(self.notifier.send(f"🛑 {esc(pos.symbol)} couldn't be sold after {n} tries "
+                                           f"and was written off.{esc(where)}", logging.ERROR))
         return f"sell failed: {esc(str(err)[:300])}"
 
     @staticmethod
@@ -822,8 +859,9 @@ class Engine:
         self.sell_failures.pop(pos.mint, None)
         self._sell_next_try.pop(pos.mint, None)
         self._curve_misses.pop(pos.mint, None)
-        await self.notifier.send(f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
-                                 f" — today {self.store.realized_today():+.4f} SOL")
+        self._spawn(self.notifier.send(  # callers may hold the sell lock: don't wait on Telegram
+            f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
+            f" — today {self.store.realized_today():+.4f} SOL"))
         await self.stream.unwatch_token(pos.mint)
 
     # ---------- manual control (CLI / Telegram) ----------
@@ -864,6 +902,7 @@ class Engine:
             return f"sell failed: {esc(str(e)[:300])}"
         self.store.event("sell", mint, mint[:6], reason="manual (untracked)", tokens=fill.tokens,
                          sol=fill.sol, sig=fill.signature)
+        self._clear_leftover(mint)  # the written-off bag is gone now
         return f"🔴 sold {fill.tokens:,.0f} tokens → {fill.sol:.4f} SOL"
 
     async def manual_buy(self, mint: str, sol: Optional[float], force: bool = False) -> str:
@@ -1252,7 +1291,7 @@ class Engine:
                     self.store.save_position(pos)
                     await self._closed(pos)
                     continue
-                pos.tokens_remaining = bal
+                pos.tokens_remaining = min(bal, pos.tokens_remaining)  # never adopt unrelated tokens
                 self.store.save_position(pos)
             pos.last_update = time.time()
             self.positions[pos.mint] = pos

@@ -51,6 +51,7 @@ class Candidate:
     buy_sol: Optional[float] = None # per-candidate size override (copy trades, manual buys)
     force: bool = False             # manual buy: skip filters
     trigger: str = ""               # why it was picked: "dev", "keyword:<word>", "limit", ...
+    queued_at: float = 0.0            # monotonic time it entered the buy queue
 
     @property
     def on_bonding_curve(self) -> bool:

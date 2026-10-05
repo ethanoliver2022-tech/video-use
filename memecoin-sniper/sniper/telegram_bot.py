@@ -818,6 +818,8 @@ class TelegramControl:
             mode = "copy"
             if rest[-1].lower() in ("track", "alert"):
                 mode, rest = "alert", rest[:-1]
+            if not rest:
+                raise ValueError("send: <address> [label] [sol per trade] [track]")
             label, sol = "", 0.0
             for tok in rest[1:]:
                 try:

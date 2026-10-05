@@ -94,18 +94,19 @@ class TxSender:
         sig = str(tx.signatures[0])
         raw = bytes(tx)
         jobs = []
-        if self.cfg.jito_enabled:
+        use_jito = self.cfg.jito_enabled and bool(self.cfg.jito_block_engines)
+        if use_jito:
             tip = tip_transaction(payer, self.cfg.jito_tip_sol, tx.message.recent_blockhash)
             self.tip_sigs[sig] = str(tip.signatures[0])
             while len(self.tip_sigs) > 1000:
                 self.tip_sigs.popitem(last=False)
             bundle = [base64.b64encode(raw).decode(), base64.b64encode(bytes(tip)).decode()]
             jobs += [self._send_bundle(url, bundle) for url in self.cfg.jito_block_engines]
-        if not self.cfg.jito_enabled or self.cfg.jito_also_send_rpc:
+        if not use_jito or self.cfg.jito_also_send_rpc:
             jobs += [r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]]
         results = await asyncio.gather(*jobs, return_exceptions=True)
         ok = [r for r in results if not isinstance(r, Exception)]
-        if not ok and self.cfg.jito_enabled and not self.cfg.jito_also_send_rpc:
+        if not ok and use_jito and not self.cfg.jito_also_send_rpc:
             # Jito unreachable / rate limited: getting the trade out matters more than
             # MEV protection (think: exiting a rug), so fall back to plain RPC.
             log.warning("jito submission failed (%s); sending through RPC instead", results[0])
@@ -114,7 +115,7 @@ class TxSender:
                 return_exceptions=True)
             ok = [r for r in results if not isinstance(r, Exception)]
         if not ok:
-            raise RuntimeError(f"every submission path failed: {results[0]}")
+            raise RuntimeError(f"every submission path failed: {results[0] if results else '-'}")
         for r in results:
             if isinstance(r, Exception):
                 log.debug("one submission path failed: %s", r)
