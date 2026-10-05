@@ -50,6 +50,7 @@ CURVE_MISSES_BEFORE_MIGRATED = 5  # consecutive "no curve account" reads before 
 MIN_RENT_LAMPORTS = 890_880       # a SOL account can't be left between 0 and this
 PENDING_BUY_WINDOW = 180          # seconds an unconfirmed buy is watched (> blockhash lifetime)
 RECONCILE_SECONDS = 5
+CLOCK_JUMP_SECONDS = 30  # wall clock moved this much more than real elapsed time
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
 
@@ -116,7 +117,7 @@ class Engine:
         self._sell_next_try: dict[str, float] = {}
         self._buying: dict[str, float] = {}       # mint -> SOL, buys in flight
         self.buy_lock = asyncio.Lock()
-        self.last_loss_at = 0.0
+        self.last_loss_at: Optional[float] = None  # monotonic clock
         self._recent_sigs: deque[str] = deque(maxlen=5000)
         self._recent_sig_set: set[str] = set()
         self._alerts: deque[float] = deque()
@@ -248,7 +249,7 @@ class Engine:
 
     def _alert_allowed(self, q: Optional[deque] = None, per_hour: int = ALERTS_PER_HOUR) -> bool:
         q = self._alerts if q is None else q
-        now = time.time()
+        now = time.monotonic()
         while q and now - q[0] > 3600:
             q.popleft()
         if len(q) >= per_hour:
@@ -384,7 +385,8 @@ class Engine:
             return "max open positions"
         if -self.store.realized_today() >= t.daily_loss_limit_sol:
             return "daily loss limit hit"
-        if t.cooldown_after_loss_seconds and time.time() - self.last_loss_at < t.cooldown_after_loss_seconds:
+        if (t.cooldown_after_loss_seconds and self.last_loss_at is not None
+                and time.monotonic() - self.last_loss_at < t.cooldown_after_loss_seconds):
             return "cooling down after loss"
         if self.live:
             try:
@@ -630,7 +632,19 @@ class Engine:
     # ---------- exits ----------
 
     async def exit_loop(self) -> None:
+        offset = time.time() - time.monotonic()
         while True:
+            # In-memory timers use the monotonic clock. Price timestamps are wall-clock, so if
+            # the wall clock steps (NTP fix, VM migration) or the server was suspended, every
+            # price would suddenly look stale and healthy tokens would be dumped as "dead":
+            # give the feeds a fresh window instead.
+            new_offset = time.time() - time.monotonic()
+            if abs(new_offset - offset) > CLOCK_JUMP_SECONDS:
+                log.warning("clock jumped %+.0fs; refreshing price timers", new_offset - offset)
+                now = time.time()
+                for pos in self.positions.values():
+                    pos.last_update = now
+            offset = new_offset
             for pos in list(self.positions.values()):
                 if not pos.closed:
                     self._spawn(self.check_exit(pos))  # one slow sell never delays the others
@@ -640,7 +654,7 @@ class Engine:
         lock = self.sell_locks.get(pos.mint)
         if lock and lock.locked():
             return
-        if time.time() < self._sell_next_try.get(pos.mint, 0):
+        if time.monotonic() < self._sell_next_try.get(pos.mint, float("-inf")):
             return  # backing off after a failed sell
         dec = exits.evaluate(pos, self.cfg.exits)
         if dec:
@@ -699,7 +713,7 @@ class Engine:
         """Never abandon a position on a transient failure: back off, reconcile, retry."""
         n = self.sell_failures[pos.mint] = self.sell_failures.get(pos.mint, 0) + 1
         wait = min(2 ** n, 10) if n < SELL_FAST_RETRIES else SELL_BACKOFF_MAX
-        self._sell_next_try[pos.mint] = time.time() + wait
+        self._sell_next_try[pos.mint] = time.monotonic() + wait
         if self.live:  # a sell that "failed" may still have landed: trust the wallet
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, pos.mint)
@@ -736,7 +750,7 @@ class Engine:
     async def _closed(self, pos: Position) -> None:
         pnl = pos.realized_pnl_sol
         if pnl < 0:
-            self.last_loss_at = time.time()
+            self.last_loss_at = time.monotonic()
         if (pos.close_reason == "dev sold" and pnl < 0 and pos.creator
                 and self.cfg.filters.auto_blocklist_ruggers):
             self.store.block(pos.creator, f"dev dumped {pos.symbol}")
@@ -1085,7 +1099,7 @@ class Engine:
         if last is None:  # first run: start counting from today
             self.store.set_setting("last_report", today)
             return False
-        if last == today:
+        if last >= today:  # ISO dates sort; also covers the clock stepping back a day
             return False
         self.store.set_setting("last_report", today)
         midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)

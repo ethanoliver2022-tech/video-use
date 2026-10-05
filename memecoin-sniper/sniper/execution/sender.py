@@ -67,14 +67,14 @@ class TxSender:
                  default_priority_fee: float):
         self.cfg, self.rpc, self.http = cfg, rpc, http
         self.default_fee = default_priority_fee
-        self._fee_cache: tuple[float, float] = (0.0, 0.0)  # (value, fetched_at)
+        self._fee_cache: tuple[float, float] = (0.0, float("-inf"))  # (value, monotonic time)
         self.extra = [SolanaRpc(url, http) for url in cfg.broadcast_rpcs if url != rpc.url]
 
     async def priority_fee(self) -> float:
         if not self.cfg.auto_priority_fee:
             return self.default_fee
         value, at = self._fee_cache
-        if time.time() - at < 10:
+        if time.monotonic() - at < 10:
             return value
         try:
             res = await self.rpc.call("getRecentPrioritizationFees", [[]])
@@ -84,7 +84,7 @@ class TxSender:
         except Exception as e:
             log.debug("priority fee estimate failed: %s", e)
             fee = self.default_fee
-        self._fee_cache = (fee, time.time())
+        self._fee_cache = (fee, time.monotonic())
         return fee
 
     async def send(self, tx: VersionedTransaction, payer: Keypair) -> str:

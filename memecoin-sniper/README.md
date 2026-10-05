@@ -254,12 +254,12 @@ Built to run unattended:
   learning while paused).
 - No web dashboard; Telegram is the UI.
 - EVM chains are alert-only (capped at 20 alerts an hour).
-- The trading code has been tested offline (143 tests) and the Docker image has
+- The trading code has been tested offline (150+ tests, including crash, chaos, clock-jump and malformed-data fuzzing) and the Docker image has
   been built and run, but it hasn't placed real trades against mainnet yet.
   Start in paper mode, then do a first live run with a tiny `buy_amount_sol`.
 
 ## Tests
 
 ```bash
-pip install -e '.[dev]' && pytest     # 143 tests, no network needed
+pip install -e '.[dev]' && pytest     # 150+ tests, no network needed
 ```

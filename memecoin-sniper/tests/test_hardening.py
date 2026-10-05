@@ -192,7 +192,7 @@ async def test_failed_sells_back_off_and_never_abandon_early(tmp_path):
     assert eng.executor.sells == 10 and not pos.closed  # old code gave up after 5
     await eng.check_exit(pos)
     assert eng.executor.sells == 11
-    assert eng._sell_next_try["M"] > time.time()  # backing off
+    assert eng._sell_next_try["M"] > time.monotonic()  # backing off
     await eng.check_exit(pos)
     assert eng.executor.sells == 11  # respected the backoff
     eng.sell_failures["M"] = engine_mod.WRITE_OFF_AFTER - 1
@@ -648,7 +648,7 @@ async def test_failed_sells_retry_with_more_slippage(tmp_path):
     eng.positions["M"] = pos
     for _ in range(4):
         await eng.check_exit(pos)
-        assert eng._sell_next_try["M"] - time.time() <= 10.5  # quick retries early on
+        assert eng._sell_next_try["M"] - time.monotonic() <= 10.5  # quick retries early on
         eng._sell_next_try["M"] = 0
     assert seen == [min(50.0, base * k) for k in (1, 2, 3, 4)]  # capped at 50%
     pos.dev_sold = True

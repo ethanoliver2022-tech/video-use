@@ -214,7 +214,7 @@ class TelegramControl:
                             "wallet use 💼 Wallet → 📥 Import, then send it.")
             return
         if self.pending and not text.startswith("/"):
-            if time.time() > self.pending["expires"]:
+            if time.monotonic() > self.pending["expires"]:
                 self.pending = None
             else:
                 await self.handle_pending(text, msg.get("message_id"))
@@ -409,7 +409,7 @@ class TelegramControl:
     # ---------- pending text replies ----------
 
     def _ask(self, kind: str, data=None) -> None:
-        self.pending = {"kind": kind, "data": data, "expires": time.time() + PENDING_TTL}
+        self.pending = {"kind": kind, "data": data, "expires": time.monotonic() + PENDING_TTL}
 
     async def handle_pending(self, text: str, msg_id: Optional[int]) -> None:
         p, self.pending = self.pending, None
@@ -453,7 +453,7 @@ class TelegramControl:
                 self._bg_reply(e.manual_buy(p["data"], float(text.replace("SOL", "").strip())))
         except Exception as ex:
             self.pending = p  # let them try again
-            p["expires"] = time.time() + PENDING_TTL
+            p["expires"] = time.monotonic() + PENDING_TTL
             await self.send(f"⚠️ {html.escape(str(ex))}\nTry again, or tap Cancel.", [[("✖️ Cancel", "x")]])
 
     # ---------- screens ----------
@@ -583,7 +583,7 @@ class TelegramControl:
         if sol is not None and not (0 < sol < 1e9):  # also rejects nan / inf
             raise ValueError("amount must be a positive number of SOL, or 'all'")
         self.pending = {"kind": "withdraw_confirm", "data": (address, sol),
-                        "expires": time.time() + PENDING_TTL}
+                        "expires": time.monotonic() + PENDING_TTL}
         open_n = sum(1 for p in self.engine.positions.values() if not p.closed)
         warn = f"\n⚠️ You have {open_n} open position(s); keep SOL for sell fees." if open_n else ""
         await self.send(f"Send <b>{'ALL' if sol is None else f'{sol:g} SOL'}</b> to\n"
@@ -592,7 +592,7 @@ class TelegramControl:
 
     async def do_withdraw(self) -> None:
         p, self.pending = self.pending, None
-        if not p or p["kind"] != "withdraw_confirm" or time.time() > p["expires"]:
+        if not p or p["kind"] != "withdraw_confirm" or time.monotonic() > p["expires"]:
             await self.send("That withdrawal expired. Start again from 💼 Wallet.")
             return
         address, sol = p["data"]
