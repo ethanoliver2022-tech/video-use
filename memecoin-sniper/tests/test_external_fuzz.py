@@ -45,6 +45,11 @@ def engine(tmp_path):
     async def tg(*a, **k):
         pass
     eng.notifier.telegram = tg
+
+    async def offline(*a, **k):  # stay offline: no real RPC calls from tests
+        from sniper.solana_rpc import RpcError
+        raise RpcError("offline test")
+    eng.rpc.call = offline
     return eng
 
 

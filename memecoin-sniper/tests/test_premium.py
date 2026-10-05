@@ -331,6 +331,10 @@ async def test_restore_after_restart_and_telegram_controls(tmp_path):
     replies = []
     tg = TelegramControl(eng2, "token", "42", eng2.http)
 
+    async def no_api(*a, **k):  # stay offline: no real Telegram calls from tests
+        return {}
+    tg.api = no_api
+
     async def fake_telegram(text, buttons=None, chat_id=None):
         replies.append((text, buttons))
     eng2.notifier.telegram = fake_telegram

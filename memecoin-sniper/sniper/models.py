@@ -116,6 +116,8 @@ class Position:
     kol_exit_done: bool = False
     initials_taken: bool = False
     migrated: bool = False
+    seen_on_curve: bool = False  # held while still on the bonding curve (so a later
+    #                              graduation really happened while we held it)
     dev_tokens: Optional[float] = None   # creator's balance at entry (RPC dev-sell detection)
     route: str = "jupiter"
     leader: Optional[str] = None

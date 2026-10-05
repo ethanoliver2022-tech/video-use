@@ -79,23 +79,59 @@ async def test_slow_ipfs_never_delays_a_snipe_when_socials_are_optional(monkeypa
 
 
 async def test_sell_on_migration(tmp_path):
+    from sniper import exits
     eng = engine(tmp_path)
     m = str(Keypair().pubkey())
     await eng.manual_buy(m, 0.05, force=True)
     pos = eng.positions[m]
+    pos.seen_on_curve = True  # held while it was still on the bonding curve
+    eng.cfg.exits.sell_on_migration = False
+    await eng.on_migration(m)
+    assert exits.evaluate(pos, eng.cfg.exits) is None or \
+        exits.evaluate(pos, eng.cfg.exits).reason != "migrated"
+    eng.cfg.exits.sell_on_migration = True
+    dec = exits.evaluate(pos, eng.cfg.exits)
+    assert dec.sell_all and dec.reason == "migrated"
+    await eng.http.aclose()
+
+
+async def test_migration_sell_is_retried_when_another_sell_is_running(tmp_path):
+    from sniper import exits
+    eng = engine(tmp_path)
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.05, force=True)
+    pos = eng.positions[m]
+    pos.seen_on_curve = True
+    eng.cfg.exits.sell_on_migration = True
+    lock = eng.sell_locks.setdefault(m, asyncio.Lock())
+    await lock.acquire()  # a take-profit sell is in flight when it graduates
+    await eng.on_migration(m)
+    await eng.check_exit(pos)
+    assert not pos.closed
+    lock.release()
     sold = []
 
     async def sell(mint, tokens, sell_all, pump, curve, slippage_pct=None):
         sold.append(sell_all)
         return Fill(tokens=tokens, sol=0.04, signature="S")
     eng.executor.sell = sell
-    eng.cfg.exits.sell_on_migration = False
-    await eng.on_migration(m)
-    await eng.settle()
-    assert not sold and not pos.closed
-    pos.migrated = False
-    eng.cfg.exits.sell_on_migration = True
-    await eng.on_migration(m)
-    await eng.settle()
+    await eng.check_exit(pos)  # the next exit-loop tick
     assert sold == [True] and pos.closed and pos.close_reason == "migrated"
+    assert exits  # (rule lives in the exit engine)
+    await eng.http.aclose()
+
+
+async def test_buying_an_already_graduated_token_never_triggers_a_migration_sell(tmp_path):
+    from sniper import exits
+    eng = engine(tmp_path)
+    eng.cfg.exits.sell_on_migration = True
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.05, force=True)
+    pos = eng.positions[m]
+    assert not pos.seen_on_curve
+    await eng.on_trade({"mint": m, "txType": "buy", "traderPublicKey": "x", "solAmount": 1,
+                        "pool": "pump-amm", "signature": "s1"})  # trades on PumpSwap
+    assert pos.migrated
+    dec = exits.evaluate(pos, eng.cfg.exits)
+    assert dec is None or dec.reason != "migrated"
     await eng.http.aclose()

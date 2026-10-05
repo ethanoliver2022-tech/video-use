@@ -207,8 +207,10 @@ class LiveExecutor:
         return self.cfg.speed.tip_sol()
 
     def _guard(self, tx: VersionedTransaction, max_sol_out: float) -> None:
+        s = self.cfg.speed  # the priority fee may not exceed what you allow (plus margin)
+        max_fee = 2 * max(s.max_priority_fee_sol, self.cfg.trading.priority_fee_sol) + 0.001
         check_transaction(tx, self.kp.pubkey(), max_sol_out,
-                          frozenset(self.cfg.extra_allowed_programs))
+                          frozenset(self.cfg.extra_allowed_programs), max_fee)
 
     def _check_unsigned(self, unsigned: bytes, max_sol_out: float) -> None:
         """Guard a built transaction before choosing it (raises UnsafeTransaction)."""
@@ -360,14 +362,11 @@ class LiveExecutor:
         else:
             sell_raw = int(tokens * 10 ** decimals)
         unsigned = None
-        if early is not None:
-            if sell_all:
-                try:
-                    unsigned = await early
-                except Exception as e:
-                    log.warning("pumpportal sell build failed (%s); using Jupiter", e)
-            else:
-                early.cancel()
+        if early is not None:  # (only built for a full exit, which stays a full exit)
+            try:
+                unsigned = await early
+            except Exception as e:
+                log.warning("pumpportal sell build failed (%s); using Jupiter", e)
         if pump and unsigned is None and early is None:
             try:  # only *building* falls back; once a tx is sent we never send a second one
                 unsigned = await self._pumpportal_tx(

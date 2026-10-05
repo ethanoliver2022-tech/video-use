@@ -980,3 +980,50 @@ def test_bare_preset_key_means_default(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("preset:\n")
     assert load_config(str(p)).preset == "balanced"
+
+
+# ---------- seventh review ----------
+
+async def test_config_typo_never_stops_the_running_bot_on_preset(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text("trading: [oops\n")
+    eng = engine(tmp_path)
+    eng.config_path = str(p)
+    with pytest.raises(ValueError, match="config.yaml"):
+        await eng.apply_preset("safe")
+    await eng.http.aclose()
+
+
+async def test_withdraw_that_failed_on_chain_says_nothing_was_sent(tmp_path):
+    from solders.hash import Hash
+    from sniper.solana_rpc import TxFailed
+    eng = engine(tmp_path)
+    eng.wallet.create()
+
+    async def bal(*a):
+        return 1.0
+    async def bh():
+        return Hash.new_unique()
+    async def send(raw):
+        return "SIG"
+    async def confirm(sig):
+        raise TxFailed("InsufficientFundsForRent")
+    eng.rpc.get_balance_sol, eng.rpc.get_latest_blockhash = bal, bh
+    eng.rpc.send_raw_transaction, eng.rpc.confirm = send, confirm
+    res = await eng.withdraw(str(Keypair().pubkey()), 0.1)
+    assert "failed on-chain" in res and not eng.store.events("withdraw")
+    await eng.http.aclose()
+
+
+async def test_unconfirmed_buys_reserve_their_sol(tmp_path):
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+    eng.live = True
+    eng.cfg.trading.min_sol_reserve = 0.05
+    eng._add_pending(Candidate(chain="solana", mint=str(Keypair().pubkey()), source="x"), 1.0)
+    # 1.12 SOL in the wallet, but 1 SOL may still go out for the unconfirmed buy
+    assert "balance too low" in (await eng.risk_block(0.1, 1.12) or "")
+    eng._save_pending({})
+    assert await eng.risk_block(0.1, 1.12) is None  # without it, the same buy is fine
+    eng.live = False
+    await eng.http.aclose()

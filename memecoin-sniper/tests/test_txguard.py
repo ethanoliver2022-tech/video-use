@@ -154,3 +154,28 @@ async def test_refused_buy_is_a_plain_failure():
     with pytest.raises(NotSent, match="refused"):
         await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
     assert ex.sender.sent == 0
+
+
+def _price(micro_lamports):
+    return ix(CB, bytes([3]) + struct.pack("<Q", micro_lamports))
+
+
+def _limit(units):
+    return ix(CB, bytes([2]) + struct.pack("<I", units))
+
+
+def test_normal_priority_fee_passes_and_a_fee_drain_is_refused():
+    # 0.003 SOL priority fee over 200k units: what the bot asks PumpPortal/Jupiter for
+    check_transaction(tx(_limit(200_000), _price(15_000_000), pump_buy()), ME.pubkey(), 0.1,
+                      max_fee_sol=0.007)
+    # same price with no explicit limit: Solana's default 200k for the one instruction
+    check_transaction(tx(_price(15_000_000), pump_buy()), ME.pubkey(), 0.1, max_fee_sol=0.007)
+    with pytest.raises(UnsafeTransaction, match="priority fee"):  # 1.4 SOL burned as fees
+        check_transaction(tx(_limit(1_400_000), _price(10**9), pump_buy()), ME.pubkey(), 0.1,
+                          max_fee_sol=0.007)
+
+
+@pytest.mark.parametrize("kind", [3, 4, 6, 7, 8, 10, 12, 13, 26])
+def test_token_instructions_outside_a_swap_are_refused(kind):
+    with pytest.raises(UnsafeTransaction):  # transfer, approve, set authority, mint, burn,
+        check(tx(ix(TOKEN, bytes([kind, 1]) + bytes(16), [WSOL_ATA, ATTACKER, ME.pubkey()])))

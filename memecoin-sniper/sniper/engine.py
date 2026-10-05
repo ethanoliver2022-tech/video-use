@@ -26,7 +26,7 @@ from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
 from .scanners.pumpportal import PumpPortalStream, trade_price
 from .settings import (BY_KEY, apply_overrides, apply_setting, format_value, parse_value,
                        to_storable, update_in_place)
-from .solana_rpc import RpcError, SolanaRpc
+from .solana_rpc import RpcError, SolanaRpc, TxFailed
 from .store import Store
 
 log = logging.getLogger("sniper")
@@ -453,7 +453,11 @@ class Engine:
                 except Exception as e:  # can't verify funds: don't buy blind
                     return f"couldn't check the wallet balance ({str(e)[:80]})"
             tip = self._tip_estimate()
-            needed = sol + sum(self._buying.values()) + tip + self.cfg.speed.max_priority_fee_sol \
+            # unconfirmed buys can still land within their window: reserve their SOL too
+            unconfirmed = sum(num(p.get("sol"), allow_zero=True) or 0.0
+                              for m, p in self.pending_buys().items() if m not in self._buying)
+            needed = sol + sum(self._buying.values()) + unconfirmed + tip \
+                + self.cfg.speed.max_priority_fee_sol \
                 + ATA_RENT_SOL
             if bal - needed < t.min_sol_reserve:
                 return f"balance too low ({bal:.4f} SOL)"
@@ -531,6 +535,7 @@ class Engine:
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,
                            route=c.route, leader=c.leader,
                            migrated=c.source == "pumpfun-migration",  # already off the curve
+                           seen_on_curve=c.source == "pumpfun" or curve is not None,
                            dev_tokens=c.creator_initial_buy_tokens or None)
             self.positions[c.mint] = pos
             self.store.save_position(pos)
@@ -672,6 +677,7 @@ class Engine:
                                tokens_initial=held, tokens_remaining=held, sol_in=info["sol"],
                                route=info.get("route", "jupiter"), leader=info.get("leader"),
                                migrated=info.get("source") == "pumpfun-migration",
+                               seen_on_curve=info.get("source") == "pumpfun",
                                dev_tokens=info.get("dev_tokens"))
                 self.positions[mint] = pos
                 self.store.save_position(pos)
@@ -722,6 +728,8 @@ class Engine:
         if not pos or pos.closed:
             return
         pool = msg.get("pool")
+        if pool == "pump" and not pos.migrated:
+            pos.seen_on_curve = True
         if isinstance(pool, str) and pool and pool != "pump" and not pos.migrated:  # trading on PumpSwap / an AMM now
             await self.on_migration(mint)
         price = trade_price(msg)
@@ -734,10 +742,7 @@ class Engine:
         self.curves.pop(mint, None)  # graduated: that curve no longer prices anything
         pos = self.positions.get(mint)
         if pos and not pos.closed and not pos.migrated:
-            pos.migrated = True
-            if self.cfg.exits.sell_on_migration:  # runs in the websocket loop: don't wait here
-                self._spawn(self.execute_sell(
-                    pos, exits.ExitDecision(pos.tokens_remaining, True, "migrated")))
+            pos.migrated = True  # with sell_on_migration on, the exit loop sells it next tick
             self.store.save_position(pos)
             # runs inside the websocket loop: never wait on Telegram here
             self._spawn(self.notifier.send(f"🎓 {esc(pos.symbol)} graduated off the bonding curve"))
@@ -769,6 +774,7 @@ class Engine:
                     else:
                         self._curve_misses.pop(pos.mint, None)
                         self._set_curve(pos.mint, CurveState(curve.v_sol, curve.v_tokens))
+                        pos.seen_on_curve = True
                         pos.update_price(curve.price)
                 if not self.has_trade_stream and pos.creator and self.cfg.exits.exit_on_dev_sell:
                     dev = await self.rpc.get_token_balance(pos.creator, pos.mint)
@@ -1256,7 +1262,10 @@ class Engine:
         from .config import PRESETS, load_config
         if name not in PRESETS:  # never let load_config's startup exit end the running bot
             raise ValueError(f"unknown preset {name!r}")
-        new = load_config(self.config_path, preset=name)
+        try:
+            new = load_config(self.config_path, preset=name)
+        except SystemExit as e:  # e.g. a typo in config.yaml: report it, never stop the bot
+            raise ValueError(f"couldn't reload config.yaml: {e}") from None
         apply_overrides(new, self.store.overrides())
         update_in_place(self.cfg, new, skip={"private_key", "telegram_bot_token", "telegram_chat_id",
                                              "pumpportal_api_key", "jupiter_api_key",
@@ -1332,6 +1341,8 @@ class Engine:
                              f"https://solscan.io/tx/{sig} before trying again") from None
         try:
             confirmed: Optional[bool] = await self.rpc.confirm(sig)
+        except TxFailed as e:  # landed and failed: nothing moved
+            return f"❌ The withdrawal failed on-chain; no SOL left the wallet ({esc(str(e)[:120])})"
         except RpcError:
             confirmed = None  # outcome unknown
         if confirmed is False:  # the blockhash expired without it landing: nothing was sent

@@ -49,9 +49,14 @@ for _p in ALLOWED_PROGRAMS:  # fail at import on a typo, never at trade time
 # system program instructions a swap can use: create account (0), transfer (2), create
 # with seed (3), allocate (8, 9). Everything else (Assign, nonce authority...) is refused.
 SYSTEM_OK = {0, 2, 3, 8, 9}
-# token instructions that hand control to someone else
-TOKEN_APPROVE, TOKEN_SET_AUTHORITY, TOKEN_APPROVE_CHECKED = 4, 6, 13
-TOKEN_TRANSFER, TOKEN_TRANSFER_CHECKED, TOKEN_CLOSE = 3, 12, 9
+# the only token instructions a swap uses at the top level: set up an account (1, 16, 18,
+# 21, 22), wrap SOL (17) and close a temporary account back into the wallet (9). Anything
+# else (transfers incl. Token-2022 transfer-with-fee, approvals, authority changes, burns,
+# freezes...) is refused.
+TOKEN_OK = {1, 9, 16, 17, 18, 21, 22}
+TOKEN_CLOSE = 9
+COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
+MAX_COMPUTE_UNITS = 1_400_000
 
 
 class UnsafeTransaction(ValueError):
@@ -69,7 +74,8 @@ def _lamports_out(data: bytes, kind: int) -> int:
 
 
 def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: float,
-                      extra_programs: frozenset[str] = frozenset()) -> None:
+                      extra_programs: frozenset[str] = frozenset(),
+                      max_fee_sol: float = 0.01) -> None:
     """Raise UnsafeTransaction unless `tx` looks like a swap for `owner`."""
     msg = tx.message
     keys = list(msg.account_keys)  # program ids are always static keys, never from lookups
@@ -79,6 +85,7 @@ def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: floa
         raise UnsafeTransaction("it needs another signer besides the bot's wallet")
     allowed = ALLOWED_PROGRAMS | set(extra_programs)
     moved = 0
+    cu_limit, cu_price, extra_fee = None, 0, 0  # priority fee = price x limit (micro-lamports)
     for ix in msg.instructions:
         program = str(keys[ix.program_id_index])
         if program not in allowed:
@@ -102,16 +109,31 @@ def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: floa
                     moved += _lamports_out(data, kind)
                 except struct.error:
                     raise UnsafeTransaction("malformed system instruction") from None
-        elif program in (TOKEN, TOKEN_2022) and data:
-            kind = data[0]
-            if kind in (TOKEN_APPROVE, TOKEN_APPROVE_CHECKED, TOKEN_SET_AUTHORITY):
-                raise UnsafeTransaction("it would give someone else control of your tokens")
-            if kind == TOKEN_TRANSFER and key(2) == owner:
-                raise UnsafeTransaction("it transfers your tokens out directly")
-            if kind == TOKEN_TRANSFER_CHECKED and key(3) == owner:
-                raise UnsafeTransaction("it transfers your tokens out directly")
+        elif program in (TOKEN, TOKEN_2022):
+            kind = data[0] if data else -1
+            if kind not in TOKEN_OK:
+                raise UnsafeTransaction(f"token instruction {kind} isn't part of a swap "
+                                        "(it could move, lock or hand over your tokens)")
             if kind == TOKEN_CLOSE and key(1) != owner:
                 raise UnsafeTransaction("it closes a token account into someone else's wallet")
+        elif program == COMPUTE_BUDGET and data:
+            try:
+                if data[0] == 2:    # SetComputeUnitLimit(u32)
+                    cu_limit = struct.unpack_from("<I", data, 1)[0]
+                elif data[0] == 3:  # SetComputeUnitPrice(u64 micro-lamports per unit)
+                    cu_price = struct.unpack_from("<Q", data, 1)[0]
+                elif data[0] == 0:  # deprecated RequestUnits(units, additional_fee)
+                    cu_limit, extra_fee = struct.unpack_from("<II", data, 1)
+            except struct.error:
+                raise UnsafeTransaction("malformed compute budget instruction") from None
+    if cu_limit is None:  # Solana's default: 200k units per (non compute-budget) instruction
+        cu_limit = 200_000 * sum(1 for ix in msg.instructions
+                                 if str(keys[ix.program_id_index]) != COMPUTE_BUDGET)
+    units = min(cu_limit, MAX_COMPUTE_UNITS)
+    fee = cu_price * units / 1e6 + extra_fee  # lamports
+    if fee > max_fee_sol * 1e9:
+        raise UnsafeTransaction(f"its priority fee is {fee / 1e9:.4f} SOL, above your "
+                                f"maximum ({max_fee_sol:.4f})")
     if moved > max_sol_out * 1e9:
         raise UnsafeTransaction(f"it moves {moved / 1e9:.4f} SOL out of the wallet, more than "
                                 f"this trade needs ({max_sol_out:.4f})")

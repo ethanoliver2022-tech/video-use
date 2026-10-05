@@ -79,6 +79,8 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
         return everything("dev sold")
     if pos.leader_sold:
         return everything("copied wallet sold")
+    if cfg.sell_on_migration and pos.migrated and pos.seen_on_curve:
+        return everything("migrated")  # an exit rule: retried like any other until it sells
 
     if in_moonbag(pos, cfg):
         if pos.drawdown_from_peak_pct >= cfg.moonbag_trailing_pct:
