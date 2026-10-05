@@ -82,7 +82,8 @@ def main() -> None:
             if input("Type 'yes' to trade real funds: ").strip().lower() != "yes":
                 sys.exit("aborted")
         try:
-            asyncio.run(Engine(cfg, live=live, scan_only=args.cmd == "scan").run())
+            asyncio.run(Engine(cfg, live=live, scan_only=args.cmd == "scan",
+                               config_path=args.config).run())
         except KeyboardInterrupt:
             pass
 
@@ -113,7 +114,7 @@ async def _sell(cfg, mint: str) -> None:
     async with httpx.AsyncClient(timeout=15) as http:
         rpc = SolanaRpc(cfg.endpoints.rpc_url, http)
         ex = LiveExecutor(cfg, kp, rpc,
-                          Jupiter(cfg.endpoints.jupiter_api, rpc, http), http)
+                          Jupiter(cfg.endpoints.jupiter_api, rpc, http, cfg.jupiter_api_key), http)
         bal = await rpc.get_token_balance(ex.pubkey, mint)
         if bal <= 0:
             sys.exit("no balance for that token")

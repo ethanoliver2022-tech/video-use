@@ -86,7 +86,8 @@ async def test_clock_jump_does_not_dump_healthy_tokens(tmp_path, monkeypatch):
     eng.executor.sell = sell
     task = asyncio.create_task(eng.exit_loop())
     await asyncio.sleep(0.05)
-    clock.offset = eng.cfg.exits.stale_seconds + 600  # wall clock leaps forward
+    # the wall clock leaps forward past both the stale and the max-hold limits
+    clock.offset = max(eng.cfg.exits.stale_seconds, eng.cfg.exits.max_hold_seconds) + 600
     await asyncio.sleep(1.2)
     task.cancel()
     await eng.settle()

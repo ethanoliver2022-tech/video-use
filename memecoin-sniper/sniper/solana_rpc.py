@@ -24,6 +24,9 @@ def _malformed(method: str) -> RpcError:
     return RpcError(f"{method}: malformed response from the RPC node")
 
 
+CONFIRM_EVIDENCE_SECONDS = 15  # a 'not found' must be this recent to mean 'never landed'
+
+
 class TxFailed(RpcError):
     """The transaction landed on-chain but failed (e.g. slippage exceeded): nothing changed."""
 
@@ -138,6 +141,8 @@ class SolanaRpc:
         the transaction can no longer land."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        last_unseen = None   # when a good poll last said "no such transaction"
+        seen = False         # ever seen processed (could still be confirmed)
         while loop.time() < deadline:
             try:
                 res = await self.call(
@@ -158,7 +163,15 @@ class SolanaRpc:
                     raise TxFailed(f"transaction {signature} failed on-chain: {status['err']}")
                 if status.get("confirmationStatus") in ("confirmed", "finalized"):
                     return True
+                seen = True
+            elif res is not None:
+                last_unseen = loop.time()
             await asyncio.sleep(1.0)
+        # "Didn't land" only when the node answered, near the end of the blockhash's
+        # life, that it has never seen it. Polls failing, or a processed-but-unconfirmed
+        # status, leave the outcome unknown: callers then check the wallet instead.
+        if seen or last_unseen is None or deadline - last_unseen > CONFIRM_EVIDENCE_SECONDS:
+            raise RpcError(f"couldn't confirm {signature}: outcome unknown")
         return False
 
     async def get_transaction(self, signature: str) -> Optional[dict]:

@@ -58,9 +58,10 @@ class BuyUncertain(RuntimeError):
     """The buy may or may not have landed and the wallet can't tell us yet. The engine
     keeps watching the wallet so tokens that arrive late are never orphaned."""
 
-    def __init__(self, mint: str, sol: float, detail: str):
+    def __init__(self, mint: str, sol: float, detail: str, pre: Optional[float] = None):
         super().__init__(f"couldn't confirm the buy yet ({detail})")
         self.mint, self.sol = mint, sol
+        self.pre = pre  # tokens of this mint already in the wallet before the buy
 
 
 class NothingToSell(RuntimeError):
@@ -212,19 +213,23 @@ class LiveExecutor:
         if not await self.rpc.confirm(sig):
             raise NotLanded(f"transaction {sig} expired without landing")
         tx = await self.rpc.get_transaction(sig)
+        readable = bool(tx)
         try:
             tok, sol = balance_deltas(tx, self.pubkey, mint) if tx else (0.0, 0.0)
         except (KeyError, TypeError, ValueError, AttributeError, IndexError):
-            tok, sol = 0.0, 0.0  # unreadable: fall back to the wallet below
+            tok, sol, readable = 0.0, 0.0, False  # unreadable: fall back to the wallet below
         tok, sol = abs(tok), abs(sol)
+        from_wallet = False
         if tok <= 0:
             log.warning("could not read fill for %s from the transaction; using wallet balance", sig)
             if side == "buy":
                 tok = await self.rpc.get_token_balance(self.pubkey, mint)
+                from_wallet = True
         # the Jito tip is a separate transaction in the bundle: count it as a cost
         tip = await self._tip_paid(sig)
         sol = sol + tip if side == "buy" else max(0.0, sol - tip)
-        return Fill(tokens=tok, sol=sol, signature=sig)
+        return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
+                    sol_known=readable)
 
     async def _tip_paid(self, sig: str) -> float:
         """The tip only lands with its bundle. If the trade went through plain RPC instead
@@ -245,14 +250,32 @@ class LiveExecutor:
             return self.cfg.speed.jito_tip_sol
         return 0.0
 
-    async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
-        if cand.route == "pump":
-            unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
-        else:
-            q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
-            unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
+    async def _held_or_none(self, mint: str) -> Optional[float]:
         try:
-            return await self._submit(unsigned, cand.mint, "buy")
+            return await self.rpc.get_token_balance(self.pubkey, mint)
+        except Exception:
+            return None
+
+    async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
+        # Tokens of this mint already in the wallet (e.g. a written-off bag) must never be
+        # mistaken for this buy's fill. Read alongside building the tx: no added latency.
+        pre_task = asyncio.ensure_future(self._held_or_none(cand.mint))
+        try:
+            if cand.route == "pump":
+                unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
+            else:
+                q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
+                unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
+        except BaseException:
+            pre_task.cancel()
+            raise
+        pre = await pre_task
+        base = pre or 0.0
+        try:
+            fill = await self._submit(unsigned, cand.mint, "buy")
+            if fill.from_wallet:
+                fill.tokens = max(0.0, fill.tokens - base)
+            return fill
         except (NotLanded, TxFailed):
             raise  # definitely didn't buy
         except Exception as e:
@@ -264,11 +287,11 @@ class LiveExecutor:
                 except Exception:
                     await asyncio.sleep(delay)
                     continue
-                if held > 0:
+                if held > base:
                     log.warning("buy %s errored (%s) but tokens arrived; tracking them", cand.mint, e)
-                    return Fill(tokens=held, sol=sol + self._tip(), signature="unconfirmed")
+                    return Fill(tokens=held - base, sol=sol + self._tip(), signature="unconfirmed")
                 break
-            raise BuyUncertain(cand.mint, sol + self._tip(), str(e)) from e
+            raise BuyUncertain(cand.mint, sol + self._tip(), str(e), pre=pre) from e
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
@@ -295,6 +318,7 @@ class LiveExecutor:
         fill = await self._submit(unsigned, mint, "sell")
         if fill.tokens <= 0:
             fill.tokens = tokens
+        fill.emptied = sell_all  # incl. a partial that asked for more than the wallet held
         return fill
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:

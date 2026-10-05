@@ -8,6 +8,7 @@ coordinated dumps.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -39,9 +40,12 @@ MAX_TRANSFER_FEE_BPS = 100
 def static_checks(c: Candidate, f: FilterConfig) -> SafetyReport:
     """Cheap checks that need no network calls."""
     r = SafetyReport(passed=True)
-    text = f"{c.name} {c.symbol}".lower()
+    # whole words, ignoring punctuation ("RUG!", "scam-coin"); phrases work too ("rug pull").
+    # Not substrings: "test" must not block "Contest".
+    text = " " + " ".join(re.findall(r"[a-z0-9]+", f"{c.name} {c.symbol}".lower())) + " "
     for word in f.name_blocklist:
-        if word and word.lower() in text.split():
+        phrase = " ".join(re.findall(r"[a-z0-9]+", str(word).lower()))
+        if phrase and f" {phrase} " in text:
             r.fail(f"name contains blocked word '{word}'")
     if c.creator and c.creator in f.creator_blocklist:
         r.fail("creator is blocklisted")

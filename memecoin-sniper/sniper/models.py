@@ -79,6 +79,9 @@ class Fill:
     tokens: float          # UI units of the memecoin bought or sold
     sol: float             # SOL spent (buy) or received (sell), net of fees where known
     signature: str = "paper"
+    from_wallet: bool = False  # tokens is a whole-wallet balance, not this trade's delta
+    sol_known: bool = True     # False: the trade landed but its SOL amount couldn't be read
+    emptied: bool = False      # the sell took everything left in the wallet
 
 
 @dataclass

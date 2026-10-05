@@ -99,7 +99,7 @@ class EarlyFlow:
             if n >= cfg.max_identical_buys and len(wallets) >= cfg.max_identical_buys:
                 problems.append(f"{len(wallets)} wallets bought exactly {size} SOL (bundle)")
         net = vol - sum(s for _, s in self.sells)
-        if net < cfg.min_net_flow_sol:
+        if net <= cfg.min_net_flow_sol:  # must exceed it (config docs)
             problems.append(f"net flow {net:+.2f} SOL")
         if cfg.max_market_cap_sol and self.market_cap_sol > cfg.max_market_cap_sol:
             problems.append(f"market cap already {self.market_cap_sol:.0f} SOL")

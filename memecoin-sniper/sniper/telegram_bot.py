@@ -134,7 +134,10 @@ class TelegramControl:
                     ("settings", "Settings"), ("stats", "Performance"), ("help", "Help")]])
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
-        await self._drop_backlog()
+        wait = 2.0
+        while not await self._drop_backlog():  # never run stale taps: retry until it works
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, 60)
         if self.pair_code:  # only now: a code sent from here on is never dropped as backlog
             log.warning("📱 Telegram not paired yet. Send this to your bot:  /start %s", self.pair_code)
         backoff = 5.0
@@ -157,23 +160,25 @@ class TelegramControl:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
-    async def _drop_backlog(self) -> None:
+    async def _drop_backlog(self) -> bool:
         """Ignore taps and commands sent while the bot was down. Running a "Buy" tapped an
-        hour ago, or re-running one handled just before a crash, would be dangerous."""
-        for _ in range(3):
-            try:
-                last = await self.api("getUpdates", offset=-1, timeout=0)
-                if last:
-                    self.offset = last[-1]["update_id"] + 1
-                    await self.api("getUpdates", offset=self.offset, timeout=0)  # confirm
-                    log.info("ignored Telegram updates sent while the bot was offline")
-                    if self.owner:
-                        await self.send("ℹ️ Restarted. Anything tapped while I was offline was "
-                                        "ignored for safety: tap /menu to continue.")
-                return
-            except Exception as e:
-                log.debug("backlog drop failed: %s", e)
-                await asyncio.sleep(2)
+        hour ago, or re-running one handled just before a crash, would be dangerous.
+        Returns False if Telegram couldn't be reached (the caller retries)."""
+        try:
+            last = await self.api("getUpdates", offset=-1, timeout=0)
+            if last:
+                self.offset = last[-1]["update_id"] + 1
+                await self.api("getUpdates", offset=self.offset, timeout=0)  # confirm
+                log.info("ignored Telegram updates sent while the bot was offline")
+                if self.owner:
+                    await self.send("ℹ️ Restarted. Anything tapped while I was offline was "
+                                    "ignored for safety: tap /menu to continue.")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("can't reach Telegram yet (%s); retrying", e)
+            return False
 
     # ---------- routing ----------
 
@@ -421,6 +426,11 @@ class TelegramControl:
         p, self.pending = self.pending, None
         kind = p["kind"]
         e = self.engine
+        if kind == "withdraw_confirm":  # a button press is needed, not text: keep it open
+            self.pending = p
+            await self.send("Tap ✅ Confirm withdraw above, or ✖️ Cancel.",
+                            [[("✅ Confirm withdraw", "wd!"), ("✖️ Cancel", "x")]])
+            return
         try:
             if kind == "import":
                 if msg_id:  # never leave a private key sitting in chat history

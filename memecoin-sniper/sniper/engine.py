@@ -61,6 +61,14 @@ def _finite(*values: float) -> None:
             raise ValueError("please send a normal number")
 
 
+def _boottime() -> float:
+    """Seconds since boot, counting time suspended (Linux); monotonic elsewhere."""
+    try:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    except (AttributeError, OSError):
+        return time.monotonic()
+
+
 def keyword_hit(text: str, keywords: list[str]) -> Optional[str]:
     """Words of 4+ letters match anywhere ("trump" in "TRUMP2028"); shorter ones must be a
     whole word, so "ai" matches "AI Agent" but not "pain" or "daisy"."""
@@ -289,6 +297,8 @@ class Engine:
         problems = []
         if start_sol is not None:
             inflow = curve.v_sol - start_sol
+            # must exceed min_net_flow_sol, and be positive: without the stream we can't
+            # count buyers, so some inflow is the only sign anyone is buying at all
             if inflow <= max(0.0, self.cfg.entry.min_net_flow_sol):
                 problems.append(f"net flow {inflow:+.2f} SOL in {self.cfg.entry.confirm_seconds:g}s")
         mcap = curve.price * PUMP_TOTAL_SUPPLY
@@ -426,7 +436,7 @@ class Engine:
                                          logging.WARNING)
                 return f"buy didn't land: {e}"
             except BuyUncertain as e:
-                self._add_pending(c, e.sol)
+                self._add_pending(c, e.sol, getattr(e, "pre", None))
                 await self.notifier.send(f"⏳ buy {esc(c.symbol)}: {esc(str(e))}. Watching the wallet; "
                                          "if the tokens arrive they'll be managed automatically.",
                                          logging.WARNING)
@@ -464,10 +474,10 @@ class Engine:
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
                 f"({self.mode}, {c.source}) {esc(why)} {esc(notes)}\n<code>{c.mint}</code> "
                 f"{esc(c.url or '')}")
+        if c.route == "pump":  # exits first: a slow Telegram must never delay the feed
+            await self.stream.watch_token(c.mint)
         await self.notifier.send(text, buttons=[[("Sell 50%", f"s:{c.mint}:50"),
                                                  ("Sell 100%", f"s:{c.mint}:100")]])
-        if c.route == "pump":
-            await self.stream.watch_token(c.mint)
         return text
 
     # ---------- unconfirmed buys ----------
@@ -485,11 +495,12 @@ class Engine:
         if pending.pop(mint, None) is not None:
             self._save_pending(pending)
 
-    def _add_pending(self, c: Candidate, sol: float) -> None:
+    def _add_pending(self, c: Candidate, sol: float, pre: Optional[float] = None) -> None:
         pending = self.pending_buys()
         pending[c.mint] = {"sol": sol, "ts": time.time(), "symbol": c.symbol, "source": c.source,
                            "trigger": c.trigger, "route": c.route, "creator": c.creator,
-                           "leader": c.leader, "dev_tokens": c.creator_initial_buy_tokens}
+                           "leader": c.leader, "dev_tokens": c.creator_initial_buy_tokens,
+                           "pre": pre or 0.0}  # tokens already held before this buy
         self._save_pending(pending)
 
     async def reconcile_loop(self) -> None:
@@ -505,6 +516,7 @@ class Engine:
                 continue  # still being confirmed by try_buy in this process
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, mint) if self.live else 0.0
+                held -= num(info.get("pre"), allow_zero=True) or 0.0  # only what this buy added
             except Exception as e:
                 log.debug("reconcile %s: %s", mint, e)
                 continue  # try again next round; never drop a buy we couldn't check
@@ -633,11 +645,20 @@ class Engine:
 
     async def exit_loop(self) -> None:
         offset = time.time() - time.monotonic()
+        step_offset = time.time() - _boottime()
         while True:
-            # In-memory timers use the monotonic clock. Price timestamps are wall-clock, so if
-            # the wall clock steps (NTP fix, VM migration) or the server was suspended, every
-            # price would suddenly look stale and healthy tokens would be dumped as "dead":
-            # give the feeds a fresh window instead.
+            # Position timestamps are wall-clock. A clock *step* (NTP fix, VM migration) moves
+            # them all without any real time passing: shift them with it, or max-hold and
+            # stale exits fire on healthy tokens. A suspend/resume is real time (max hold may
+            # rightly expire), but prices weren't polled: give the feeds a fresh window.
+            new_step = time.time() - _boottime()
+            if abs(new_step - step_offset) > CLOCK_JUMP_SECONDS:
+                step = new_step - step_offset
+                log.warning("system clock stepped %+.0fs; shifting position timers", step)
+                for pos in self.positions.values():
+                    pos.opened_at += step
+                    pos.last_update += step
+            step_offset = new_step
             new_offset = time.time() - time.monotonic()
             if abs(new_offset - offset) > CLOCK_JUMP_SECONDS:
                 log.warning("clock jumped %+.0fs; refreshing price timers", new_offset - offset)
@@ -689,12 +710,18 @@ class Engine:
             self._sell_next_try.pop(pos.mint, None)
             fill.sol = num(fill.sol, allow_zero=True) or 0.0  # a bad fill never corrupts the books
             fill.tokens = min(num(fill.tokens) or dec.tokens, pos.tokens_remaining)
+            if fill.emptied and not dec.sell_all:  # the wallet held less than the position
+                dec = exits.ExitDecision(fill.tokens, True, dec.reason, dec.tp_index, dec.kind)
+            estimated = not fill.sol_known
+            if estimated:  # landed, but the tx couldn't be read: never book it as 0 SOL
+                fill.sol = max(0.0, fill.tokens * pos.last_price * 0.97)
             exits.apply_fill(pos, dec, fill.tokens, fill.sol, self.cfg.exits)
             self.store.save_position(pos)
             self.store.event("sell", pos.mint, pos.symbol, reason=dec.reason, tokens=fill.tokens,
                              sol=fill.sol, sig=fill.signature)
             text = (f"🔴 SELL {esc(pos.symbol)} {'ALL' if dec.sell_all else f'{dec.tokens:,.0f}'} "
-                    f"→ {fill.sol:.4f} SOL — {esc(dec.reason)} (pnl {pos.pnl_pct:+.0f}%)")
+                    f"→ {fill.sol:.4f} SOL{' (estimated)' if estimated else ''} — "
+                    f"{esc(dec.reason)} (pnl {pos.pnl_pct:+.0f}%)")
             await self.notifier.send(text)
             if pos.closed:
                 await self._closed(pos)
@@ -724,7 +751,9 @@ class Engine:
                     self.store.save_position(pos)
                     await self._closed(pos)
                     return f"{esc(pos.symbol)}: the sell landed late; position closed"
-                if held < pos.tokens_remaining * 0.999:
+                if held < pos.tokens_remaining * 0.999:  # part of it landed: book that part
+                    sold = pos.tokens_remaining - held
+                    pos.sol_out += max(0.0, sold * pos.last_price * 0.97)
                     pos.tokens_remaining = held
                     self.store.save_position(pos)
             except Exception as e:
@@ -779,6 +808,10 @@ class Engine:
             if self.live and len(key) >= 32:
                 return await self.sell_wallet_token(key)
             return f"no open position for {esc(key)}"
+        try:
+            _finite(pct)  # min/max let NaN straight through
+        except ValueError as e:
+            return str(e)
         pct = min(max(pct, 1.0), 100.0)
         dec = exits._partial(pos, pos.tokens_remaining * pct / 100, "manual")
         if pct >= 100 or dec is None:
@@ -960,6 +993,11 @@ class Engine:
             if not ok:
                 await self.notifier.send(f"⚠️ Order #{o['id']} triggered but didn't fill: "
                                          f"{esc(result)}", logging.WARNING)
+        except Exception as e:  # never leave an order stuck in "executing"
+            log.exception("order %s failed", o["id"])
+            self.store.set_order_status(o["id"], "failed", from_status="executing")
+            await self.notifier.send(f"⚠️ Order #{o['id']} failed: {esc(str(e)[:200])}",
+                                     logging.WARNING)
         finally:
             self._orders_running.discard(o["id"])
 

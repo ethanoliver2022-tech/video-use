@@ -13,7 +13,7 @@ from solders.pubkey import Pubkey
 from sniper import engine as engine_mod
 from sniper.config import SpeedConfig, load_config
 from sniper.engine import Engine
-from sniper.execution.executors import LiveExecutor, NothingToSell, NotLanded
+from sniper.execution.executors import BuyUncertain, LiveExecutor, NothingToSell, NotLanded
 from sniper.execution.sender import TxSender, tip_transaction
 from sniper.models import Candidate, Fill, Position
 from sniper.notify import Notifier
@@ -386,10 +386,38 @@ async def test_live_buy_rpc_error_after_send_tracks_tokens_that_arrived():
     async def pp(*a, **k):
         return b"tx"
     ex._pumpportal_tx = pp
-    rpc.confirm_raises = RpcError("getSignatureStatuses: HTTP 502")
-    rpc.balance_raw = 5_000_000_000  # 5000 tokens arrived anyway
+    rpc.balance_raw = 0
+
+    async def confirm(sig, timeout=90):
+        rpc.balance_raw = 5_000_000_000  # 5000 tokens arrived anyway
+        raise RpcError("getSignatureStatuses: HTTP 502")
+    rpc.confirm = confirm
     fill = await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
     assert fill.tokens == 5000 and fill.sol > 0.1  # sol includes the Jito tip
+
+
+async def test_uncertain_buy_never_counts_tokens_already_in_the_wallet():
+    cfg = load_config(None)
+    ex, rpc = live_executor(cfg)
+
+    async def pp(*a, **k):
+        return b"tx"
+    ex._pumpportal_tx = pp
+    rpc.balance_raw = 3_000_000_000  # a written-off bag of 3000 tokens
+
+    async def confirm(sig, timeout=90):
+        raise RpcError("getSignatureStatuses: HTTP 502")
+    rpc.confirm = confirm
+    with pytest.raises(BuyUncertain) as err:  # nothing new arrived: not a fill
+        await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+    assert err.value.pre == 3000
+
+    async def confirm2(sig, timeout=90):
+        rpc.balance_raw = 5_000_000_000
+        raise RpcError("getSignatureStatuses: HTTP 502")
+    rpc.confirm = confirm2
+    fill = await ex.buy(Candidate(chain="solana", mint="M", source="pumpfun", route="pump"), 0.1, None)
+    assert fill.tokens == 2000  # only what this buy added
 
 
 async def test_live_sell_sends_at_most_one_transaction():
@@ -673,7 +701,8 @@ async def test_buy_that_failed_on_chain_is_never_tracked():
 
 
 async def test_confirmed_launch_that_is_not_bought_stops_its_trade_feed(tmp_path):
-    eng = make_engine(tmp_path, api_key="k", entry={"confirm_seconds": 0.01, "min_unique_buyers": 0},
+    eng = make_engine(tmp_path, api_key="k", entry={"confirm_seconds": 0.01, "min_unique_buyers": 0,
+                                                     "min_net_flow_sol": -1},
                       trading={"max_open_positions": 0})
     c = Candidate(chain="solana", mint=wallet(), source="pumpfun", creator=wallet(), route="pump",
                   v_sol=30.0, v_tokens=1.07e9)
