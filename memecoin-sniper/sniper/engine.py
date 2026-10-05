@@ -848,9 +848,12 @@ class Engine:
                                     "kind": dec.kind}
                 self.store.save_position(pos)
             try:
+                extra = {"value_sol": dec.tokens * pos.last_price} \
+                    if isinstance(self.executor, LiveExecutor) else {}  # caps the tx guard
                 fill = await self.executor.sell(pos.mint, dec.tokens, dec.sell_all,
                                                 pump=pos.route == "pump", curve=curve,
-                                                slippage_pct=self._sell_slippage(pos, dec))
+                                                slippage_pct=self._sell_slippage(pos, dec),
+                                                **extra)
             except NothingToSell:
                 self._clear_leftover(pos.mint)  # the wallet holds none at all
                 pos.sol_out += self._estimate_value(pos)
@@ -1258,6 +1261,7 @@ class Engine:
         update_in_place(self.cfg, new, skip={"private_key", "telegram_bot_token", "telegram_chat_id",
                                              "pumpportal_api_key", "jupiter_api_key",
                                              "withdraw_allowlist", "allow_key_export",
+                                             "extra_allowed_programs",
                                              "data_dir", "endpoints"})
         self.store.set_setting("preset", name)
         for key in ("discovery.pumpfun_new_tokens", "copytrade.enabled", "trading.buy_amount_sol",

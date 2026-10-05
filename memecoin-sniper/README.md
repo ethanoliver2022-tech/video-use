@@ -182,6 +182,12 @@ Who can do what:
   anywhere and never written to a log. The database (your trades, your chat id) is
   private to the server's owner too. Whoever can log into the server as root can
   read the key, so use SSH keys (not passwords) and keep the server updated.
+- **Every swap is checked before it's signed.** Transactions built by PumpPortal or
+  Jupiter must be paid for and signed only by your wallet, may only call known swap
+  programs, can't approve or hand over your tokens or wallet, and can't move out more
+  SOL than the trade needs. So even a compromised trading API couldn't use your
+  signature to drain the wallet: the bot refuses to sign it (a refused PumpPortal sell
+  goes through Jupiter instead, so exits still happen).
 - **Lock it down further from `.env`** (Telegram can't change these, so they hold
   even if someone got into your Telegram account):
   `WITHDRAW_ALLOWLIST=<your Phantom address>` allows withdrawals only there, and

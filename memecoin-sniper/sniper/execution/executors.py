@@ -23,6 +23,7 @@ from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
 from ..solana_rpc import SolanaRpc, TxFailed, balance_deltas
 from .sender import TxSender
+from .txguard import UnsafeTransaction, check_transaction
 
 log = logging.getLogger(__name__)
 
@@ -205,7 +206,30 @@ class LiveExecutor:
     def _tip(self) -> float:
         return self.cfg.speed.tip_sol()
 
-    async def _submit(self, unsigned: bytes, mint: str, side: str) -> Fill:
+    def _guard(self, tx: VersionedTransaction, max_sol_out: float) -> None:
+        check_transaction(tx, self.kp.pubkey(), max_sol_out,
+                          frozenset(self.cfg.extra_allowed_programs))
+
+    def _check_unsigned(self, unsigned: bytes, max_sol_out: float) -> None:
+        """Guard a built transaction before choosing it (raises UnsafeTransaction)."""
+        try:
+            tx = VersionedTransaction.from_bytes(unsigned)
+        except Exception:
+            return  # not a transaction at all: _submit refuses it as unbuildable
+        self._guard(tx, max_sol_out)
+
+    def _buy_cap(self, sol: float) -> float:
+        # top-level SOL out on a buy: the swap amount (Jupiter wraps it) or PumpPortal's
+        # 0.5% fee, plus room for rent; the bonding-curve payment itself runs in the program
+        return sol * 1.05 + 0.01
+
+    @staticmethod
+    def _sell_cap(value_sol: Optional[float]) -> float:
+        # top-level SOL out on a sell is only PumpPortal's 0.5% fee
+        return 0.01 + 0.02 * value_sol if value_sol else 0.05
+
+    async def _submit(self, unsigned: bytes, mint: str, side: str,
+                      max_sol_out: float = 0.05) -> Fill:
         """Sign, send, confirm and read back the real fill.
 
         Raises NotLanded if the transaction expired without landing. Any other error
@@ -215,6 +239,12 @@ class LiveExecutor:
             signed = self._sign(unsigned)
         except Exception as e:  # e.g. an error body instead of a transaction: nothing was sent
             raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
+        if isinstance(signed, VersionedTransaction):
+            try:
+                self._guard(signed, max_sol_out)
+            except UnsafeTransaction as e:
+                log.error("refused to sign a %s for %s: %s", side, mint, e)
+                raise NotSent(f"🛡 refused to sign it: {e}") from e
         sig = await self.sender.send(signed, self.kp)
         log.info("sent %s %s", side, sig)
         if not await self.rpc.confirm(sig):
@@ -282,7 +312,7 @@ class LiveExecutor:
         pre = await pre_task
         base = pre or 0.0
         try:
-            fill = await self._submit(unsigned, cand.mint, "buy")
+            fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol))
             if fill.from_wallet:
                 fill.tokens = max(0.0, fill.tokens - base)
             fill.pre = pre
@@ -305,7 +335,8 @@ class LiveExecutor:
             raise BuyUncertain(cand.mint, sol + self._tip(), str(e), pre=pre) from e
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
-                   curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
+                   curve: Optional[CurveState], slippage_pct: Optional[float] = None,
+                   value_sol: Optional[float] = None) -> Fill:
         slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
         # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
         # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
@@ -344,10 +375,16 @@ class LiveExecutor:
                     in_sol=False, slippage_pct=slippage)
             except Exception as e:
                 log.warning("pumpportal sell build failed (%s); using Jupiter", e)
+        if unsigned is not None:
+            try:  # a refused PumpPortal tx must never strand an exit: use Jupiter instead
+                self._check_unsigned(unsigned, self._sell_cap(value_sol))
+            except UnsafeTransaction as e:
+                log.error("refused PumpPortal's sell for %s (%s); using Jupiter", mint, e)
+                unsigned = None
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        fill = await self._submit(unsigned, mint, "sell")
+        fill = await self._submit(unsigned, mint, "sell", self._sell_cap(value_sol))
         if fill.tokens <= 0:
             fill.tokens = tokens
         fill.emptied = sell_all  # incl. a partial that asked for more than the wallet held

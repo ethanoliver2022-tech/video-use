@@ -187,6 +187,7 @@ class Config:
     # .env-only locks: Telegram can't change them, so they hold even if the chat is compromised
     withdraw_allowlist: list[str] = field(default_factory=list)  # WITHDRAW_ALLOWLIST
     allow_key_export: bool = True                                # ALLOW_KEY_EXPORT
+    extra_allowed_programs: list[str] = field(default_factory=list)  # EXTRA_ALLOWED_PROGRAMS
 
 
 # Presets sit underneath your config.yaml: anything you set there wins.
@@ -273,6 +274,8 @@ def load_config(path: str | os.PathLike | None = None, preset: str | None = None
     cfg.pumpportal_api_key = os.getenv("PUMPPORTAL_API_KEY", "").strip()
     cfg.withdraw_allowlist = [a.strip() for a in os.getenv("WITHDRAW_ALLOWLIST", "").split(",")
                               if a.strip()]
+    cfg.extra_allowed_programs = [a.strip() for a in
+                                  os.getenv("EXTRA_ALLOWED_PROGRAMS", "").split(",") if a.strip()]
     cfg.allow_key_export = os.getenv("ALLOW_KEY_EXPORT", "true").strip().lower() not in (
         "0", "false", "no", "off")
     cfg.jupiter_api_key = os.getenv("JUPITER_API_KEY", "").strip()
