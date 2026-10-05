@@ -804,3 +804,78 @@ async def test_reconciler_leaves_in_flight_buys_alone(tmp_path):
     assert (await task).startswith("🟢")
     assert not eng.pending_buys() and len(eng.store.events("buy")) == 1
     await eng.http.aclose()
+
+
+# ---------- crash-safety audit ----------
+
+async def test_limit_order_interrupted_by_crash_is_never_rerun(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    p = pump_pos("O", symbol="OO", entry_price=1.0)
+    eng.positions["O"] = p
+    await eng.place_limit_sell("O", 50, 100)
+    p.update_price(2.5)
+
+    gate = asyncio.Event()
+
+    class Ex(SlowExecutor):
+        async def sell(self, *a, **k):
+            self.sells += 1
+            await gate.wait()  # the crash happens while the sell is in flight
+    eng.executor = Ex(0)
+    await eng.check_orders()
+    await asyncio.sleep(0.01)
+    assert eng.executor.sells == 1 and not eng.store.open_orders()
+    for t in list(eng._bg):  # hard crash
+        t.cancel()
+    await asyncio.gather(*list(eng._bg), return_exceptions=True)
+    await eng.http.aclose()
+
+    eng2 = make_engine(tmp_path, api_key="k")
+    msgs = []
+
+    async def cap(text, *a, **k):
+        msgs.append(text)
+    eng2.notifier.send = cap
+    await eng2.restore()
+    assert not eng2.store.open_orders()  # not re-run
+    assert any("Order #1 was executing" in m for m in msgs)
+    await eng2.http.aclose()
+
+
+async def test_restore_credits_tokens_sold_while_down(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    p = pump_pos("S", entry_price=1e-6, tokens_initial=1000, tokens_remaining=1000, sol_in=0.001)
+    p.last_price = 2e-6
+    eng.store.save_position(p)
+    await eng.http.aclose()
+    eng2 = make_engine(tmp_path, api_key="k")
+    eng2.live, eng2.own_wallet = True, "ME"
+
+    async def zero(owner, m):
+        return 0.0
+    eng2.rpc.get_token_balance = zero
+    await eng2.restore()
+    closes = eng2.store.events("close")
+    assert len(closes) == 1 and closes[0]["pnl_sol"] > 0  # not booked as a total loss
+    assert "estimated" in closes[0]["reason"]
+    await eng2.http.aclose()
+
+
+def test_wallet_replacement_is_atomic(tmp_path, monkeypatch):
+    from sniper.execution import wallet as wmod
+    w = wmod.WalletManager(str(tmp_path))
+    old = w.create()
+    real_replace = wmod.os.replace
+
+    def crash(*a):
+        raise KeyboardInterrupt  # power cut at the worst moment
+    monkeypatch.setattr(wmod.os, "replace", crash)
+    with pytest.raises(KeyboardInterrupt):
+        w.create()
+    assert w.keypair().pubkey() == old.pubkey()  # still the old key, never missing
+    monkeypatch.setattr(wmod.os, "replace", real_replace)
+    new = w.create()
+    assert w.keypair().pubkey() == new.pubkey()
+    import os
+    backups = [f for f in os.listdir(tmp_path) if f.startswith("wallet.key.bak-")]
+    assert backups and all(os.stat(tmp_path / f).st_mode & 0o777 == 0o600 for f in backups)

@@ -909,7 +909,7 @@ class Engine:
                         continue
                 price = prices[o["mint"]]
             hit = price <= o["trigger_price"] if o["direction"] == "<=" else price >= o["trigger_price"]
-            if hit:
+            if hit and self.store.set_order_status(o["id"], "executing"):  # write-ahead
                 self._orders_running.add(o["id"])
                 self._spawn(self._fill_order(o))
 
@@ -924,14 +924,15 @@ class Engine:
             else:
                 pos = self.positions.get(o["mint"])
                 if not pos or pos.closed:
-                    self.store.set_order_status(o["id"], "cancelled")
+                    self.store.set_order_status(o["id"], "cancelled", from_status="executing")
                     return
                 dec = exits._partial(pos, pos.tokens_remaining * o["pct"] / 100, "limit sell")
                 if o["pct"] >= 100 or dec is None:
                     dec = exits.ExitDecision(pos.tokens_remaining, True, "limit sell")
                 result = await self.execute_sell(pos, dec)
                 ok = result.startswith("🔴")
-            self.store.set_order_status(o["id"], "filled" if ok else "failed")
+            self.store.set_order_status(o["id"], "filled" if ok else "failed",
+                                        from_status="executing")
             if not ok:
                 await self.notifier.send(f"⚠️ Order #{o['id']} triggered but didn't fill: "
                                          f"{esc(result)}", logging.WARNING)
@@ -1133,11 +1134,17 @@ class Engine:
                     bal = await self.rpc.get_token_balance(self.own_wallet, pos.mint)
                 except Exception:
                     bal = pos.tokens_remaining
+                if bal < pos.tokens_remaining * 0.999:  # a sell landed while we were down
+                    sold = pos.tokens_remaining - max(bal, 0.0)
+                    pos.sol_out += max(0.0, sold * pos.last_price * 0.97)
                 if bal <= 0:
-                    pos.closed, pos.close_reason = True, "not in wallet on restart"
+                    pos.tokens_remaining, pos.closed = 0.0, True
+                    pos.close_reason = "sold before restart (PnL estimated)"
                     self.store.save_position(pos)
+                    await self._closed(pos)
                     continue
                 pos.tokens_remaining = bal
+                self.store.save_position(pos)
             pos.last_update = time.time()
             self.positions[pos.mint] = pos
             self.seen[("solana", pos.mint)] = time.time()
@@ -1145,6 +1152,10 @@ class Engine:
                 await self.stream.watch_token(pos.mint)
         if self.positions:
             await self.notifier.send(f"♻️ restored {len(self.positions)} open position(s)")
+        for oid in self.store.interrupted_orders():
+            await self.notifier.send(f"⚠️ Order #{oid} was executing when the bot stopped, so it "
+                                     "was not re-run. Check 📊 Positions to see if it filled.",
+                                     logging.WARNING)
 
     async def run(self) -> None:
         d, e = self.cfg.discovery, self.cfg.endpoints

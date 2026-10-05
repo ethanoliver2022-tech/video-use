@@ -151,9 +151,17 @@ class Store:
                 "created", "expires", "note")
         return [dict(zip(keys, r)) for r in rows]
 
-    def set_order_status(self, order_id: int, status: str) -> bool:
-        return self.db.execute("UPDATE orders SET status = ? WHERE id = ? AND status = 'open'",
-                               (status, order_id)).rowcount > 0
+    def set_order_status(self, order_id: int, status: str, from_status: str = "open") -> bool:
+        return self.db.execute("UPDATE orders SET status = ? WHERE id = ? AND status = ?",
+                               (status, order_id, from_status)).rowcount > 0
+
+    def interrupted_orders(self) -> list[int]:
+        """Orders that were executing when the bot stopped: never re-run them blindly."""
+        rows = self.db.execute("SELECT id FROM orders WHERE mode = ? AND status = 'executing'",
+                               (self.mode,)).fetchall()
+        for (oid,) in rows:
+            self.set_order_status(oid, "interrupted", from_status="executing")
+        return [r[0] for r in rows]
 
     def remove_copy_wallet(self, address: str) -> bool:
         return self.db.execute("DELETE FROM copy_wallets WHERE address = ?", (address,)).rowcount > 0

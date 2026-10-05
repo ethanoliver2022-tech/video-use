@@ -58,11 +58,12 @@ class WalletManager:
         if self.from_env:
             raise PermissionError("wallet is set by SOLANA_PRIVATE_KEY in .env; change it there")
         self.dir.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            self.path.rename(self.dir / f"wallet.key.bak-{time.time_ns()}")
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(base58.b58encode(bytes(kp)).decode())
+        stamp = time.time_ns()
+        tmp = self.dir / f"wallet.key.new-{stamp}"
+        _write_secret(tmp, base58.b58encode(bytes(kp)).decode())
+        if self.path.exists():  # keep the old key: copy it aside first
+            _write_secret(self.dir / f"wallet.key.bak-{stamp}", self.path.read_text())
+        os.replace(tmp, self.path)  # atomic: wallet.key is always the old or the new key
         return kp
 
     def create(self) -> Keypair:
@@ -76,6 +77,14 @@ class WalletManager:
         if not kp:
             raise ValueError("no wallet yet")
         return base58.b58encode(bytes(kp)).decode()
+
+
+def _write_secret(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def transfer_tx(payer: Keypair, to: str, lamports: int, blockhash) -> VersionedTransaction:
