@@ -57,6 +57,7 @@ def test_trending_pools_parse_with_and_without_5m_fields():
                         gecko_pool(b, dex="pump-fun"),                 # no 5m fields at all
                         gecko_pool(c, base_is_sol=True),               # listed as SOL / NEW
                         gecko_pool(a),                                 # same token twice
+                        gecko_pool("abc:def" + "1" * 30),             # not an address
                         {"junk": 1}, "x", None]}
     rows = parse_trending(payload)
     assert [r["mint"] for r in rows] == [a, b, c]
@@ -77,6 +78,9 @@ def test_dexscreener_numbers_win_and_gecko_fills_gaps():
     alone = build_signal(t, None)                      # DexScreener down: GeckoTerminal only
     assert (alone.change_5m, alone.symbol, alone.dex) == (5.0, "FROG", "raydium")
     assert alone.url.endswith(m)
+    evil = dex_pair(m)
+    evil["url"] = "javascript:alert(1)"
+    assert build_signal(t, evil).url == f"https://dexscreener.com/solana/{m}"
     weird = build_signal(t, {"priceChange": {"m5": "NaN"}, "txns": {"m5": "x"}, "volume": None})
     assert weird.change_5m == 5.0 and weird.buys_5m == 3
 

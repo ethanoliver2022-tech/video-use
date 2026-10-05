@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
 import httpx
+from solders.pubkey import Pubkey
 
 from ..config import DiscoveryConfig
 from ..models import num
@@ -52,6 +53,14 @@ class MomentumSignal:
         return self.dex.lower() in PUMP_DEXES or self.mint.endswith("pump")
 
 
+def _is_address(v: str) -> bool:
+    try:
+        Pubkey.from_string(v)
+    except (ValueError, TypeError):
+        return False
+    return 32 <= len(v) <= 44
+
+
 def _int(v) -> Optional[int]:
     f = num(v, allow_zero=True)
     return int(f) if f is not None else None
@@ -79,8 +88,8 @@ def parse_trending(payload) -> list[dict]:
         mint = _token_id(pool, "base_token")
         if mint.lower() in _QUOTES:
             mint = _token_id(pool, "quote_token")  # listed as SOL/NEW
-        if not mint or mint.lower() in _QUOTES or mint in seen or not 32 <= len(mint) <= 44:
-            continue
+        if not mint or mint.lower() in _QUOTES or mint in seen or not _is_address(mint):
+            continue  # (it ends up in buttons and buy commands: a real Solana address only)
         seen.add(mint)
         dex = _get(pool, "relationships", "dex", "data", "id")
         tx5 = _get(attrs, "transactions", "m5")
@@ -126,7 +135,6 @@ def build_signal(t: dict, pair: Optional[dict]) -> MomentumSignal:
     name = _get(pair, "baseToken", "name")
     created = num(pair.get("pairCreatedAt"))
     dex = pair.get("dexId") if isinstance(pair.get("dexId"), str) else ""
-    url = pair.get("url") if isinstance(pair.get("url"), str) else ""
     gname = t.get("name") or ""
     return MomentumSignal(
         mint=t["mint"],
@@ -141,7 +149,7 @@ def build_signal(t: dict, pair: Optional[dict]) -> MomentumSignal:
         market_cap_usd=num(pair.get("marketCap")) or num(pair.get("fdv")) or t.get("market_cap_usd"),
         created_at=created / 1000 if created else None,
         dex=dex or t.get("dex") or "",
-        url=url or f"https://dexscreener.com/solana/{t['mint']}",
+        url=f"https://dexscreener.com/solana/{t['mint']}",  # built here, never taken from the API
     )
 
 
