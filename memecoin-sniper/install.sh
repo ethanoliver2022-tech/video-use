@@ -66,9 +66,19 @@ JUPITER_API_KEY=$JUP
 EOF
   umask 022
 fi
-# older installs: add any newer optional keys so they're easy to fill in later
-grep -q '^PUMPPORTAL_API_KEY=' .env || echo 'PUMPPORTAL_API_KEY=' >> .env
-grep -q '^JUPITER_API_KEY=' .env || echo 'JUPITER_API_KEY=' >> .env
+# every optional setting gets a line (with what it does), so it's there to fill in later;
+# older installs get the ones they're missing. Existing values are never touched.
+add_key() {  # add_key KEY DEFAULT "explanation"
+  if ! grep -q "^$1=" .env; then
+    printf '# %s\n%s=%s\n' "$3" "$1" "$2" >> .env
+  fi
+}
+add_key PUMPPORTAL_API_KEY "" "Optional: live trade feed + copy trading (pumpportal.fun, billed per message)"
+add_key JUPITER_API_KEY "" "Recommended: free key from portal.jup.ag (faster Jupiter quotes)"
+add_key JUPITER_RPM "" "Only on a paid Jupiter plan: its requests per minute"
+add_key WITHDRAW_ALLOWLIST "" "Security: withdrawals only to these addresses (comma-separated), e.g. your Phantom wallet"
+add_key ALLOW_KEY_EXPORT "true" "Security: set to false so the private key can never be shown in Telegram"
+add_key EXTRA_ALLOWED_PROGRAMS "" "Advanced: extra program ids the transaction check may allow (only if the bot asks)"
 chmod 600 .env                     # bot token, API keys: owner only
 mkdir -p data && chmod 700 data    # wallet key + database: owner only
 
