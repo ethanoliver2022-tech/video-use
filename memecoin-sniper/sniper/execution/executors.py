@@ -27,6 +27,8 @@ from .sender import TxSender
 log = logging.getLogger(__name__)
 
 PUMP_FEE = 0.0125  # protocol + creator fee on the bonding curve, approx.
+PUMPPORTAL_FEE = 0.005     # PumpPortal's fee on trades it builds (paper estimate; see pumpportal.fun)
+NETWORK_FEE_SOL = 0.000005  # base signature fee
 
 
 @dataclass
@@ -124,23 +126,37 @@ class Jupiter:
 
 
 class PaperExecutor:
-    """Simulates fills from live prices. No wallet, no transactions."""
+    """Simulates fills from live prices. No wallet, no transactions.
 
-    def __init__(self, jupiter: Jupiter, slippage_pct: float):
-        self.jupiter, self.slippage_pct = jupiter, slippage_pct
+    Fills are charged what a live trade pays on top of the price (pump.fun's fee is
+    already in the curve math): network + priority fee, the Jito tip and PumpPortal's
+    fee on pump.fun trades. Without them paper results would look better than live."""
+
+    def __init__(self, jupiter: Jupiter, slippage_pct: float, cfg: Optional[Config] = None):
+        self.jupiter, self.slippage_pct, self.cfg = jupiter, slippage_pct, cfg
+
+    def _costs(self) -> float:
+        if self.cfg is None:
+            return 0.0
+        tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+        return NETWORK_FEE_SOL + self.cfg.trading.priority_fee_sol + tip
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
         if curve:
-            return Fill(tokens=curve.buy_out(sol), sol=sol)
+            pp = sol * PUMPPORTAL_FEE if self.cfg else 0.0
+            return Fill(tokens=curve.buy_out(sol), sol=sol + pp + self._costs())
         q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.slippage_pct)
-        return Fill(tokens=await self.jupiter.out_ui(q), sol=sol)
+        return Fill(tokens=await self.jupiter.out_ui(q), sol=sol + self._costs())
 
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None) -> Fill:
         if curve:
-            return Fill(tokens=tokens, sol=curve.sell_out(tokens))
-        q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct)
-        return Fill(tokens=tokens, sol=await self.jupiter.out_ui(q))
+            out = curve.sell_out(tokens)
+            out -= out * PUMPPORTAL_FEE if self.cfg else 0.0
+        else:
+            q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct)
+            out = await self.jupiter.out_ui(q)
+        return Fill(tokens=tokens, sol=max(0.0, out - self._costs()))
 
     async def quote_sell(self, mint: str, tokens: float) -> Optional[float]:
         q = await self.jupiter.quote(mint, SOL_MINT, tokens, self.slippage_pct)

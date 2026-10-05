@@ -210,7 +210,7 @@ async def test_paper_engine_snipe_and_exit(tmp_path):
     c = eng.queue.get_nowait()
     await eng.handle_candidate(c)
     p = eng.positions["Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]
-    assert p.sol_in == 0.05 and p.tokens_initial > 0
+    assert 0.05 < p.sol_in < 0.053 and p.tokens_initial > 0  # buy size + live-like costs
     assert {"method": "subscribeTokenTrade", "keys": ["Mint1pumpxxxxxxxxxxxxxxxxxxxxxxxxxxxpump"]} in sent
 
     # price pumps +60% -> first take-profit

@@ -51,6 +51,9 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
   launches skip those: the pump.fun program already guarantees revoked
   authorities, and the lookups would only cost speed.
 - **Paper mode with the same logic.** Test any strategy risk-free before going live.
+  Paper fills pay what live trades pay: price impact, pump.fun's fee, the priority
+  fee, the Jito tip and PumpPortal's fee. What paper can't show is latency: live, you
+  sometimes fill a little later (and higher) than the price paper uses.
 
 ## Run it all from Telegram
 

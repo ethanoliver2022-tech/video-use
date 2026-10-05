@@ -484,3 +484,28 @@ async def test_telegram_snipers_orders_and_tracking(tmp_path):
     await tap("c")
     assert "🔔 whale" in sent[-1][0]
     await eng.http.aclose()
+
+
+async def test_paper_fills_pay_what_live_trades_pay():
+    """A paper round trip at an unchanged price must lose at least the real per-trade costs,
+    or paper results would look better than live ones."""
+    from sniper.config import load_config
+    from sniper.execution.executors import (NETWORK_FEE_SOL, PUMP_FEE, PUMPPORTAL_FEE, CurveState,
+                                            PaperExecutor)
+    from sniper.models import Candidate
+    cfg = load_config("config.example.yaml")
+    cfg.speed.jito_enabled, cfg.speed.jito_tip_sol = True, 0.001
+    cfg.trading.priority_fee_sol = 0.0005
+    ex = PaperExecutor(None, 20, cfg)
+    curve = CurveState(30.0, 1.07e9)
+    buy = await ex.buy(Candidate(chain="solana", mint="M", source="x"), 0.05, curve)
+    per_trade = NETWORK_FEE_SOL + 0.0005 + 0.001
+    assert abs(buy.sol - (0.05 * (1 + PUMPPORTAL_FEE) + per_trade)) < 1e-12
+    sell = await ex.sell("M", buy.tokens, True, True, curve)
+    loss = buy.sol - sell.sol
+    floor = 2 * per_trade + 0.05 * (2 * PUMP_FEE + 2 * PUMPPORTAL_FEE) * 0.95
+    assert loss >= floor, (loss, floor)
+    assert loss / 0.05 > 0.08  # ~8%+ of a 0.05 SOL trade: what a user sees live too
+    # changing the tip from Telegram applies to paper immediately
+    cfg.speed.jito_enabled = False
+    assert (await ex.buy(Candidate(chain="solana", mint="M", source="x"), 0.05, curve)).sol < buy.sol

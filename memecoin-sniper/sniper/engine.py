@@ -143,7 +143,7 @@ class Engine:
     def _build_executor(self, live: bool) -> Executor:
         if not live:
             self.own_wallet = ""
-            return PaperExecutor(self.jupiter, self.cfg.trading.slippage_pct)
+            return PaperExecutor(self.jupiter, self.cfg.trading.slippage_pct, self.cfg)
         kp = self.wallet.keypair()
         if kp is None:
             raise ValueError("no wallet yet — create or import one first")

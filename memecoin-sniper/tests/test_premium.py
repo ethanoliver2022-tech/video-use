@@ -263,7 +263,7 @@ async def test_copy_trade_follows_buy_and_sell(tmp_path):
     await eng.on_trade(pump_trade("CopyMint", "buy", WHALE, 2.0, 32.0))
     await eng.settle()
     p = eng.positions["CopyMint"]
-    assert p.sol_in == 0.1 and p.leader == WHALE and p.route == "pump"
+    assert 0.1 < p.sol_in < 0.103 and p.leader == WHALE and p.route == "pump"  # + costs
 
     # duplicate delivery (token + account subscription) is ignored
     msg = pump_trade("CopyMint", "buy", wallet(), 0.5, 33.0, sig="dup")
