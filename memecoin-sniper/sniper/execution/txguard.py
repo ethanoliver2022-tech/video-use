@@ -7,10 +7,13 @@ anything a real swap never needs, so a hostile transaction is refused, not signe
 - the bot's wallet must be the fee payer and the only signer;
 - only known programs may be called (a swap's DEX hops run inside Jupiter or pump.fun);
 - no system instruction that could hand the wallet over (Assign, nonce authority);
-- no token Approve / SetAuthority, no top-level token transfer out of the wallet, and no
-  account close that pays anyone but the wallet;
+- top-level token instructions are limited to what a swap needs (account setup, wrapping
+  SOL, closing a temporary account back into the wallet): no transfers, approvals,
+  authority changes, burns or freezes;
 - the SOL moved out by top-level transfers is capped to what the trade needs (the swap
-  amount on a buy, the PumpPortal fee on a sell).
+  amount on a buy, the PumpPortal fee on a sell), the priority fee to your maximum, and
+  the most SOL a pump.fun / PumpSwap buy may pull from inside the program to the swap
+  amount plus your slippage. A sell may not contain a buy at all.
 
 Programs a future pump.fun or PumpPortal update starts using can be allowed without a code
 change through EXTRA_ALLOWED_PROGRAMS in .env (a trusted file Telegram can't change).
@@ -23,12 +26,18 @@ from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
 SYSTEM = "11111111111111111111111111111111"
+COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
+PUMP_PROGRAMS = {"6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",   # bonding curve
+                 "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"}   # PumpSwap AMM
+# Anchor instruction ids (first 8 bytes of sha256("global:<name>"))
+PUMP_BUY = bytes.fromhex("66063d1201daebea")          # buy(amount, max_sol_cost)
+PUMP_BUY_EXACT_SOL = bytes.fromhex("38fc74089edfcd5f")  # buy_exact_sol_in(sol_in, min_out)
 TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 
 ALLOWED_PROGRAMS = {
     SYSTEM,
-    "ComputeBudget111111111111111111111111111111",
+    COMPUTE_BUDGET,
     TOKEN,
     TOKEN_2022,
     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",   # associated token accounts
@@ -47,15 +56,15 @@ for _p in ALLOWED_PROGRAMS:  # fail at import on a typo, never at trade time
     Pubkey.from_string(_p)
 
 # system program instructions a swap can use: create account (0), transfer (2), create
-# with seed (3), allocate (8, 9). Everything else (Assign, nonce authority...) is refused.
-SYSTEM_OK = {0, 2, 3, 8, 9}
+# with seed (3), allocate a derived account (9). Everything else is refused: Assign or
+# Allocate on the wallet itself would lock or hand over every SOL in it.
+SYSTEM_OK = {0, 2, 3, 9}
 # the only token instructions a swap uses at the top level: set up an account (1, 16, 18,
 # 21, 22), wrap SOL (17) and close a temporary account back into the wallet (9). Anything
 # else (transfers incl. Token-2022 transfer-with-fee, approvals, authority changes, burns,
 # freezes...) is refused.
 TOKEN_OK = {1, 9, 16, 17, 18, 21, 22}
 TOKEN_CLOSE = 9
-COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
 MAX_COMPUTE_UNITS = 1_400_000
 
 
@@ -75,7 +84,8 @@ def _lamports_out(data: bytes, kind: int) -> int:
 
 def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: float,
                       extra_programs: frozenset[str] = frozenset(),
-                      max_fee_sol: float = 0.01) -> None:
+                      max_fee_sol: float = 0.01, side: str = "buy",
+                      max_curve_sol: float = 0.0) -> None:
     """Raise UnsafeTransaction unless `tx` looks like a swap for `owner`."""
     msg = tx.message
     keys = list(msg.account_keys)  # program ids are always static keys, never from lookups
@@ -116,6 +126,16 @@ def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: floa
                                         "(it could move, lock or hand over your tokens)")
             if kind == TOKEN_CLOSE and key(1) != owner:
                 raise UnsafeTransaction("it closes a token account into someone else's wallet")
+        elif program in PUMP_PROGRAMS and data[:8] in (PUMP_BUY, PUMP_BUY_EXACT_SOL):
+            if side != "buy":
+                raise UnsafeTransaction("a sell that also buys")
+            try:  # the most SOL the program may take from the wallet for this buy
+                cost = struct.unpack_from("<Q", data, 16 if data[:8] == PUMP_BUY else 8)[0]
+            except struct.error:
+                raise UnsafeTransaction("malformed pump.fun buy") from None
+            if cost > max_curve_sol * 1e9:
+                raise UnsafeTransaction(f"its buy may spend up to {cost / 1e9:.4f} SOL, more "
+                                        f"than this trade allows ({max_curve_sol:.4f})")
         elif program == COMPUTE_BUDGET and data:
             try:
                 if data[0] == 2:    # SetComputeUnitLimit(u32)

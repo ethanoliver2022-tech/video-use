@@ -206,19 +206,23 @@ class LiveExecutor:
     def _tip(self) -> float:
         return self.cfg.speed.tip_sol()
 
-    def _guard(self, tx: VersionedTransaction, max_sol_out: float) -> None:
+    def _guard(self, tx: VersionedTransaction, max_sol_out: float, side: str = "buy",
+               swap_sol: float = 0.0) -> None:
         s = self.cfg.speed  # the priority fee may not exceed what you allow (plus margin)
         max_fee = 2 * max(s.max_priority_fee_sol, self.cfg.trading.priority_fee_sol) + 0.001
+        # a pump.fun buy may pull at most the swap amount plus your slippage (plus margin)
+        curve_cap = swap_sol * (1 + self.cfg.trading.slippage_pct / 100) * 1.05 + 0.01
         check_transaction(tx, self.kp.pubkey(), max_sol_out,
-                          frozenset(self.cfg.extra_allowed_programs), max_fee)
+                          frozenset(self.cfg.extra_allowed_programs), max_fee, side,
+                          curve_cap if side == "buy" else 0.0)
 
-    def _check_unsigned(self, unsigned: bytes, max_sol_out: float) -> None:
+    def _check_unsigned(self, unsigned: bytes, max_sol_out: float, side: str = "sell") -> None:
         """Guard a built transaction before choosing it (raises UnsafeTransaction)."""
         try:
             tx = VersionedTransaction.from_bytes(unsigned)
         except Exception:
             return  # not a transaction at all: _submit refuses it as unbuildable
-        self._guard(tx, max_sol_out)
+        self._guard(tx, max_sol_out, side)
 
     def _buy_cap(self, sol: float) -> float:
         # top-level SOL out on a buy: the swap amount (Jupiter wraps it) or PumpPortal's
@@ -231,7 +235,7 @@ class LiveExecutor:
         return 0.01 + 0.02 * value_sol if value_sol else 0.05
 
     async def _submit(self, unsigned: bytes, mint: str, side: str,
-                      max_sol_out: float = 0.05) -> Fill:
+                      max_sol_out: float = 0.05, swap_sol: float = 0.0) -> Fill:
         """Sign, send, confirm and read back the real fill.
 
         Raises NotLanded if the transaction expired without landing. Any other error
@@ -243,7 +247,7 @@ class LiveExecutor:
             raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
         if isinstance(signed, VersionedTransaction):
             try:
-                self._guard(signed, max_sol_out)
+                self._guard(signed, max_sol_out, side, swap_sol)
             except UnsafeTransaction as e:
                 log.error("refused to sign a %s for %s: %s", side, mint, e)
                 raise NotSent(f"🛡 refused to sign it: {e}") from e
@@ -314,7 +318,7 @@ class LiveExecutor:
         pre = await pre_task
         base = pre or 0.0
         try:
-            fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol))
+            fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol), sol)
             if fill.from_wallet:
                 fill.tokens = max(0.0, fill.tokens - base)
             fill.pre = pre

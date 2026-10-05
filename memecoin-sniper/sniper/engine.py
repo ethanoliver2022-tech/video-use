@@ -203,6 +203,9 @@ class Engine:
         self.seen[key] = time.time()
         if c.age_seconds > self.cfg.discovery.max_candidate_age_seconds:
             return
+        if (c.source == "pumpfun-migration" and self.cfg.exits.sell_on_migration
+                and c.mint in self.positions):
+            return  # we're exiting this one *because* it migrated: don't buy it straight back
         if self.paused and not self.scan_only:
             return  # don't spend RPC calls (or Telegram alerts) while paused
         if not self._targeted(c):
@@ -553,6 +556,8 @@ class Engine:
                 f"{esc(c.url or '')}")
         if c.route == "pump":  # exits first: a slow Telegram must never delay the feed
             await self.stream.watch_token(c.mint)
+            if not (pos.seen_on_curve or pos.migrated):  # in the background: off the hot path
+                self._spawn(self._note_curve_state(pos))
         await self.notifier.send(text, buttons=[[("Sell 50%", f"s:{c.mint}:50"),
                                                  ("Sell 100%", f"s:{c.mint}:100")]])
         return text
@@ -588,6 +593,29 @@ class Engine:
             self._set_curve(c.mint, fresh)
             return fresh
         return None  # no current curve: price it with a Jupiter quote instead
+
+    def _mark_on_curve(self, pos: Position) -> None:
+        if not pos.seen_on_curve:
+            pos.seen_on_curve = True
+            self.store.save_position(pos)  # survives a restart (the migration exit needs it)
+
+    async def _note_curve_state(self, pos: Position) -> None:
+        """Right after a buy: is this token on the bonding curve, or already graduated?
+        (a buy of a graduated token must never look like a migration later)"""
+        try:
+            info = await fetch_curve(self.rpc, pos.mint)
+        except Exception as e:
+            log.debug("curve check %s failed: %s", pos.mint, e)
+            return
+        if info is None or pos.closed:
+            return
+        if info.complete:
+            if not pos.migrated:
+                pos.migrated = True
+                self.curves.pop(pos.mint, None)
+                self.store.save_position(pos)
+        elif not pos.migrated:
+            self._mark_on_curve(pos)
 
     def _tip_estimate(self) -> float:
         return self.cfg.speed.tip_sol()
@@ -729,7 +757,7 @@ class Engine:
             return
         pool = msg.get("pool")
         if pool == "pump" and not pos.migrated:
-            pos.seen_on_curve = True
+            self._mark_on_curve(pos)
         if isinstance(pool, str) and pool and pool != "pump" and not pos.migrated:  # trading on PumpSwap / an AMM now
             await self.on_migration(mint)
         price = trade_price(msg)
@@ -774,7 +802,7 @@ class Engine:
                     else:
                         self._curve_misses.pop(pos.mint, None)
                         self._set_curve(pos.mint, CurveState(curve.v_sol, curve.v_tokens))
-                        pos.seen_on_curve = True
+                        self._mark_on_curve(pos)
                         pos.update_price(curve.price)
                 if not self.has_trade_stream and pos.creator and self.cfg.exits.exit_on_dev_sell:
                     dev = await self.rpc.get_token_balance(pos.creator, pos.mint)
@@ -1280,6 +1308,11 @@ class Engine:
         return f"Preset {name} applied" + (f" (your {n} custom setting(s) still win)" if n else "")
 
     async def reset_settings(self) -> str:
+        from .config import load_config
+        try:  # check config.yaml loads before wiping anything: a typo must change nothing
+            load_config(self.config_path, preset=self.cfg.preset)
+        except SystemExit as e:
+            raise ValueError(f"couldn't reload config.yaml: {e}") from None
         self.store.clear_overrides()
         return await self.apply_preset(self.cfg.preset)
 
@@ -1342,7 +1375,9 @@ class Engine:
         try:
             confirmed: Optional[bool] = await self.rpc.confirm(sig)
         except TxFailed as e:  # landed and failed: nothing moved
-            return f"❌ The withdrawal failed on-chain; no SOL left the wallet ({esc(str(e)[:120])})"
+            self.store.event("withdraw", to=to, sol=0.0, sig=sig, failed=True)
+            return (f"❌ The withdrawal failed on-chain, so the SOL stayed in the wallet (only the "
+                    f"network fee was spent) ({esc(str(e)[:120])})")
         except RpcError:
             confirmed = None  # outcome unknown
         if confirmed is False:  # the blockhash expired without it landing: nothing was sent

@@ -1011,7 +1011,9 @@ async def test_withdraw_that_failed_on_chain_says_nothing_was_sent(tmp_path):
     eng.rpc.get_balance_sol, eng.rpc.get_latest_blockhash = bal, bh
     eng.rpc.send_raw_transaction, eng.rpc.confirm = send, confirm
     res = await eng.withdraw(str(Keypair().pubkey()), 0.1)
-    assert "failed on-chain" in res and not eng.store.events("withdraw")
+    assert "failed on-chain" in res and "stayed in the wallet" in res
+    [ev] = eng.store.events("withdraw")
+    assert ev["failed"] and ev["sol"] == 0  # the history never shows SOL that didn't move
     await eng.http.aclose()
 
 
@@ -1026,4 +1028,79 @@ async def test_unconfirmed_buys_reserve_their_sol(tmp_path):
     eng._save_pending({})
     assert await eng.risk_block(0.1, 1.12) is None  # without it, the same buy is fine
     eng.live = False
+    await eng.http.aclose()
+
+
+async def _pump_buy(eng, monkeypatch, complete):
+    from sniper.models import Candidate
+    import sniper.engine as em
+
+    async def buy(c, sol, curve):
+        return Fill(tokens=1000.0, sol=sol, signature="S")
+    eng.executor.buy = buy
+
+    class Info:
+        v_sol, v_tokens, creator, real_tokens = 40.0, 8e8, None, 5e8
+    Info.complete = complete
+    async def fetch(rpc, mint):
+        return Info()
+    monkeypatch.setattr(em, "fetch_curve", fetch)
+    m = str(Keypair().pubkey())
+    await eng.try_buy(Candidate(chain="solana", mint=m, source="manual", route="pump", force=True))
+    await eng.settle()
+    return eng.positions[m]
+
+
+async def test_buy_on_the_curve_is_remembered_across_a_restart(tmp_path, monkeypatch):
+    eng = engine(tmp_path)
+    pos = await _pump_buy(eng, monkeypatch, complete=False)
+    assert pos.seen_on_curve and not pos.migrated
+    pos.seen_on_curve = False
+    eng.store.save_position(pos)
+    eng._mark_on_curve(pos)  # what the trade stream and the curve poll call
+    eng.positions.clear()
+    await eng.restore()
+    assert eng.positions[pos.mint].seen_on_curve  # the migration exit still fires after a restart
+    await eng.http.aclose()
+
+
+async def test_buy_of_a_graduated_token_never_counts_as_a_migration(tmp_path, monkeypatch):
+    eng = engine(tmp_path)
+    eng.cfg.exits.sell_on_migration = True
+    pos = await _pump_buy(eng, monkeypatch, complete=True)
+    assert pos.migrated and not pos.seen_on_curve
+    dec = exits.evaluate(pos, eng.cfg.exits)
+    assert dec is None or dec.reason != "migrated"
+    await eng.http.aclose()
+
+
+async def test_reset_with_a_broken_config_keeps_custom_settings(tmp_path):
+    eng = engine(tmp_path)
+    p = tmp_path / "config.yaml"
+    p.write_text("trading: [this is: not valid\n")
+    eng.config_path = str(p)
+    eng.store.set_override("trading.buy_amount_sol", 0.2)
+    with pytest.raises(ValueError, match="config.yaml"):
+        await eng.reset_settings()
+    assert eng.store.overrides()  # nothing was wiped
+    await eng.http.aclose()
+
+
+async def test_migration_of_a_held_token_is_not_bought_back(tmp_path):
+    from sniper.models import Candidate
+    eng = engine(tmp_path)
+    eng.cfg.exits.sell_on_migration = True
+    eng.cfg.discovery.auto_snipe = "all"
+    eng.paused = False
+    pos = await bought(eng)
+    while not eng.queue.empty():
+        eng.queue.get_nowait()
+    await eng.on_candidate(Candidate(chain="solana", mint=pos.mint, source="pumpfun-migration",
+                                     route="pump"))
+    assert eng.queue.empty()
+    eng.cfg.exits.sell_on_migration = False  # control: otherwise the same candidate is queued
+    eng.seen.clear()
+    await eng.on_candidate(Candidate(chain="solana", mint=pos.mint, source="pumpfun-migration",
+                                     route="pump"))
+    assert eng.queue.qsize() == 1
     await eng.http.aclose()

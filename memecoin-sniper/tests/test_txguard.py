@@ -179,3 +179,34 @@ def test_normal_priority_fee_passes_and_a_fee_drain_is_refused():
 def test_token_instructions_outside_a_swap_are_refused(kind):
     with pytest.raises(UnsafeTransaction):  # transfer, approve, set authority, mint, burn,
         check(tx(ix(TOKEN, bytes([kind, 1]) + bytes(16), [WSOL_ATA, ATTACKER, ME.pubkey()])))
+
+
+PUMP_BUY = bytes.fromhex("66063d1201daebea")
+
+
+def pump_buy_ix(max_sol_cost_lamports, tokens=10**12):
+    return ix(PUMP, PUMP_BUY + struct.pack("<QQ", tokens, max_sol_cost_lamports) + b"\x00",
+              [ME.pubkey(), Keypair().pubkey()])
+
+
+def test_pump_buy_within_slippage_passes():
+    # 0.1 SOL buy at 20% slippage: PumpPortal sets max_sol_cost = 0.12 SOL
+    check_transaction(tx(budget(), pump_buy_ix(120_000_000), sol(500_000)), ME.pubkey(), 0.115,
+                      side="buy", max_curve_sol=0.1 * 1.2 * 1.05 + 0.01)
+
+
+def test_pump_buy_that_could_spend_the_whole_wallet_is_refused():
+    with pytest.raises(UnsafeTransaction, match="may spend up to"):
+        check_transaction(tx(budget(), pump_buy_ix(10 * 10**9), sol(500_000)), ME.pubkey(),
+                          0.115, side="buy", max_curve_sol=0.136)
+
+
+def test_a_sell_that_hides_a_buy_is_refused():
+    with pytest.raises(UnsafeTransaction, match="sell that also buys"):
+        check_transaction(tx(pump_buy_ix(1_000)), ME.pubkey(), 0.05, side="sell")
+
+
+def test_allocate_on_the_wallet_is_refused():
+    from solders.system_program import AllocateParams, allocate
+    with pytest.raises(UnsafeTransaction):
+        check(tx(allocate(AllocateParams(pubkey=ME.pubkey(), space=1))))
