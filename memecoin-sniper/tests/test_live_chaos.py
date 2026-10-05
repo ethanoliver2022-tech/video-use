@@ -50,6 +50,7 @@ class FakeChain:
         self.txs[sig] = {"outcome": outcome, "mint": intent["mint"], "pre_sol": pre_sol,
                          "post_sol": self.sol, "pre_tok": pre_tok,
                          "post_tok": self.tokens.get(intent["mint"], 0.0)}
+        await asyncio.sleep(0)  # a crash can strike right after landing
         return sig
 
     async def priority_fee(self):
@@ -188,7 +189,10 @@ async def test_live_chaos(tmp_path, seed):
             m = rng.choice(mints)
             r = rng.random()
             if r < 0.25:
-                await eng.manual_buy(m, rng.choice([0.05, 0.2]), force=True)
+                if rng.random() < 0.5:
+                    await eng.manual_buy(m, rng.choice([0.05, 0.2]), force=True)
+                else:  # in flight when a crash may hit
+                    eng._spawn(eng.manual_buy(m, rng.choice([0.05, 0.2]), force=True))
             elif r < 0.45:
                 await eng.manual_sell(m, rng.choice([25, 50, 100]))
             elif r < 0.75:  # price moves -> exits
@@ -200,8 +204,13 @@ async def test_live_chaos(tmp_path, seed):
                     if not p.closed:
                         eng._sell_next_try.pop(p.mint, None)
                         eng._spawn(eng.check_exit(p))
-            elif r < 0.8:  # restart
-                await eng.settle()
+            elif r < 0.8:  # restart: graceful, or a hard crash mid-transaction
+                if rng.random() < 0.5:
+                    await eng.settle()
+                else:
+                    for task in list(eng._bg):
+                        task.cancel()
+                    await asyncio.gather(*list(eng._bg), return_exceptions=True)
                 await eng.http.aclose()
                 eng, chain = build(tmp_path, rng, chain)
                 await eng.restore()
@@ -220,6 +229,7 @@ async def test_live_chaos(tmp_path, seed):
         # drain: a calm chain, and every position must end up fully sold
         chain.reliable = True
         eng.cfg.exits.max_hold_seconds = 0
+        await eng.settle()                                     # let in-flight buys finish
         await eng.reconcile_pending()                          # adopt anything that landed
         await eng.reconcile_pending(now=time.time() + 10_000)  # and expire what never will
         assert not eng.pending_buys(), seed

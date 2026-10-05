@@ -773,3 +773,34 @@ async def test_reconcile_never_adopts_twice(tmp_path):
     assert not eng.pending_buys() and eng.positions[mint].tokens_remaining == 1e6
     assert eng.store.events("buy") == []
     await eng.http.aclose()
+
+
+async def test_reconciler_leaves_in_flight_buys_alone(tmp_path):
+    eng = make_engine(tmp_path, api_key="k")
+    eng.live, eng.own_wallet = True, "ME"
+    mint = wallet()
+
+    async def sol_bal(owner):
+        return 10.0
+    eng.rpc.get_balance_sol = sol_bal
+
+    async def held(owner, m):
+        return 1000.0  # tokens already visible while the buy is still confirming
+    eng.rpc.get_token_balance = held
+    gate = asyncio.Event()
+
+    class Ex:
+        async def buy(self, c, sol, curve):
+            await gate.wait()
+            return Fill(tokens=1000.0, sol=sol)
+    eng.executor = Ex()
+    task = asyncio.create_task(eng.try_buy(Candidate(chain="solana", mint=mint, source="manual",
+                                                     symbol="F", force=True)))
+    await asyncio.sleep(0.01)
+    assert mint in eng.pending_buys()  # write-ahead record exists during the buy
+    await eng.reconcile_pending()      # must not adopt it underneath try_buy
+    assert mint not in eng.positions
+    gate.set()
+    assert (await task).startswith("🟢")
+    assert not eng.pending_buys() and len(eng.store.events("buy")) == 1
+    await eng.http.aclose()

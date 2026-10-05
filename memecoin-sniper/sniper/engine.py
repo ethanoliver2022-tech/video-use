@@ -378,7 +378,7 @@ class Engine:
         t = self.cfg.trading
         open_n = sum(1 for p in self.positions.values()   # moonbags don't take up a slot
                      if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
-            + len(self._buying) + len(self.pending_buys())
+            + len(set(self._buying) | set(self.pending_buys()))  # in-flight buys are also pending
         if open_n >= t.max_open_positions:
             return "max open positions"
         if -self.store.realized_today() >= t.daily_loss_limit_sol:
@@ -405,11 +405,17 @@ class Engine:
                 log.info("skip %s %s: %s", c.symbol, c.mint, blocked)
                 return f"skipped: {blocked}"
             self._buying[c.mint] = sol
+            if self.live:
+                # write-ahead: if the bot dies anywhere from here on, the reconciler still
+                # knows this buy may have landed and will adopt or expire it after restart
+                tip = self.cfg.speed.jito_tip_sol if self.cfg.speed.jito_enabled else 0.0
+                self._add_pending(c, sol + tip)
         try:
             curve = self.curves.get(c.mint) if c.route == "pump" else None
             try:
                 fill = await self.executor.buy(c, sol, curve)
             except NotLanded as e:
+                self._drop_pending(c.mint)
                 await self.notifier.send(f"⌛ buy {esc(c.symbol)} didn't land: {esc(str(e))}",
                                          logging.WARNING)
                 return f"buy didn't land: {e}"
@@ -419,12 +425,14 @@ class Engine:
                                          "if the tokens arrive they'll be managed automatically.",
                                          logging.WARNING)
                 return f"buy unconfirmed: {e}"
-            except Exception as e:
+            except Exception as e:  # failed before anything was sent, or failed on-chain
+                self._drop_pending(c.mint)
                 await self.notifier.send(f"❌ buy failed {esc(c.symbol)} {c.mint}: {esc(str(e))}",
                                          logging.WARNING)
                 return f"buy failed: {e}"
-            if fill.tokens <= 0:
-                await self.notifier.send(f"❌ buy {esc(c.symbol)} returned 0 tokens ({fill.signature})")
+            if fill.tokens <= 0:  # confirmed but no tokens visible yet: let the reconciler decide
+                await self.notifier.send(f"⏳ buy {esc(c.symbol)} confirmed but no tokens visible "
+                                         f"yet ({fill.signature}); checking the wallet")
                 return "buy returned 0 tokens"
             tag = c.trigger.split(":")[0]
             source = c.source + (f"/{tag}" if tag and tag != c.source else "")
@@ -435,11 +443,12 @@ class Engine:
                            dev_tokens=c.creator_initial_buy_tokens or None)
             self.positions[c.mint] = pos
             self.store.save_position(pos)
+            self.store.event("buy", c.mint, pos.symbol, source=c.source, sol=fill.sol,
+                             tokens=fill.tokens, sig=fill.signature)
+            self._drop_pending(c.mint)  # only after the position is safely on disk
         finally:
             self._buying.pop(c.mint, None)
 
-        self.store.event("buy", c.mint, pos.symbol, source=c.source, sol=fill.sol,
-                         tokens=fill.tokens, sig=fill.signature)
         why = {"dev": "👀 watched dev launched", "limit": "📋 limit order"}.get(
             c.trigger, f"🔑 {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("keyword") else "")
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
@@ -461,6 +470,11 @@ class Engine:
         import json
         self.store.set_setting(f"pending_buys:{self.mode}", json.dumps(pending))
 
+    def _drop_pending(self, mint: str) -> None:
+        pending = self.pending_buys()
+        if pending.pop(mint, None) is not None:
+            self._save_pending(pending)
+
     def _add_pending(self, c: Candidate, sol: float) -> None:
         pending = self.pending_buys()
         pending[c.mint] = {"sol": sol, "ts": time.time(), "symbol": c.symbol, "source": c.source,
@@ -477,6 +491,8 @@ class Engine:
         """Adopt tokens from buys whose outcome was unknown; forget them once they can no
         longer land."""
         for mint, info in list(self.pending_buys().items()):
+            if mint in self._buying:
+                continue  # still being confirmed by try_buy in this process
             try:
                 held = await self.rpc.get_token_balance(self.own_wallet, mint) if self.live else 0.0
             except Exception as e:
