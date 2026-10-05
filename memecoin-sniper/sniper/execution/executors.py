@@ -30,6 +30,7 @@ from .txguard import UnsafeTransaction, check_transaction
 
 log = logging.getLogger(__name__)
 
+SELL_ESCALATE_SECONDS = 2.5  # a sell bundle not confirmed by then also goes out through RPC
 PREBUILT_MAX_AGE = 5.0  # seconds a transaction built ahead of the buy may be used for
 PUMP_FEE = 0.0125  # protocol + creator fee on the bonding curve, approx.
 PUMPPORTAL_FEE = 0.005     # PumpPortal's fee on trades it builds (paper estimate; see pumpportal.fun)
@@ -335,7 +336,18 @@ class LiveExecutor:
             raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
         sig = await self.sender.send(signed, self.kp)
         log.info("sent %s %s", side, sig)
-        if not await self.rpc.confirm(sig):
+        # An exit must not wait a whole blockhash lifetime on a bundle no leader picked (tip
+        # below the going rate): if it hasn't confirmed shortly, the *same* signed transaction
+        # also goes out through the RPCs. One signature can only land once: never a double sell.
+        escalate = None
+        if side == "sell" and hasattr(self.sender, "rebroadcast"):
+            escalate = asyncio.ensure_future(self._escalate(signed, sig))
+        try:
+            landed = await self.rpc.confirm(sig)
+        finally:
+            if escalate is not None:
+                escalate.cancel()
+        if not landed:
             raise NotLanded(f"transaction {sig} expired without landing")
         tx = await self.rpc.get_transaction(sig)
         readable = bool(tx)
@@ -358,6 +370,15 @@ class LiveExecutor:
         sol = sol + tip if side == "buy" else max(0.0, sol - tip)
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
                     sol_known=readable)
+
+    async def _escalate(self, signed: VersionedTransaction, sig: str) -> None:
+        await asyncio.sleep(SELL_ESCALATE_SECONDS)
+        try:
+            if await self.sender.rebroadcast(signed):
+                log.info("sell %s not confirmed after %.1fs: also sent through RPC",
+                         sig, SELL_ESCALATE_SECONDS)
+        except Exception as e:  # best effort: the bundle is still in flight
+            log.debug("sell rebroadcast failed: %s", e)
 
     async def _tip_paid(self, sig: str) -> float:
         """The tip only lands with its bundle. If the trade went through plain RPC instead

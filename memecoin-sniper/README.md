@@ -288,7 +288,10 @@ Built to run unattended:
 - **One slow trade never blocks the others.** Each exit runs on its own, and
   the live trade stream never waits on a sell or on Telegram.
 - **Jito down or rate limited?** Transactions fall back to plain RPC, because
-  getting out matters more than MEV protection.
+  getting out matters more than MEV protection. And a sell whose bundle isn't
+  confirmed within 2.5s (say the tip was below the going rate at a busy moment)
+  is also sent through your RPCs: the same signed transaction, so it can only
+  ever land once.
 - **Jupiter's rate limit is kept for trades.** Price checks and safety probes only
   ever use part of it, so buys and sells never get "rate limited". If Jupiter
   retires its keyless API, the bot moves itself to the new one.

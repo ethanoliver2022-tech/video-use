@@ -367,3 +367,66 @@ def test_degen_preset_never_waits_on_metadata():
     from sniper.config import load_config
     assert load_config(None, preset="degen").filters.reject_reused_socials is False
     assert load_config(None, preset="balanced").filters.reject_reused_socials is True
+
+
+# ---- exits never wait out a bundle nobody picked ----
+
+class _EscSender:
+    def __init__(self):
+        self.sent, self.rebroadcasts = 0, 0
+
+    async def priority_fee(self):
+        return 0.0001
+
+    async def send(self, tx, payer):
+        self.sent += 1
+        return "SIG"
+
+    async def rebroadcast(self, tx):
+        self.rebroadcasts += 1
+        return True
+
+
+def _esc_executor(confirm_after):
+    from tests.test_hardening import live_executor
+    from sniper.config import load_config
+    from solders.hash import Hash
+    from sniper.execution.wallet import transfer_tx
+    ex, rpc = live_executor(load_config(None))
+    ex.sender = _EscSender()
+    signed = transfer_tx(ex.kp, str(Keypair().pubkey()), 1000, Hash.new_unique())
+    ex._sign = lambda unsigned: signed
+
+    async def confirm(sig):
+        await asyncio.sleep(confirm_after)
+        return True
+    rpc.confirm = confirm
+    return ex
+
+
+async def test_slow_sell_bundle_is_also_sent_through_rpc(monkeypatch):
+    import sniper.execution.executors as ex_mod
+    monkeypatch.setattr(ex_mod, "SELL_ESCALATE_SECONDS", 0.05)
+    ex = _esc_executor(confirm_after=0.2)
+    await ex._submit(b"not-a-tx", "M", "sell")
+    assert ex.sender.sent == 1 and ex.sender.rebroadcasts == 1  # same tx, a second way
+
+
+async def test_quick_sells_and_all_buys_stay_jito_only(monkeypatch):
+    import sniper.execution.executors as ex_mod
+    monkeypatch.setattr(ex_mod, "SELL_ESCALATE_SECONDS", 0.05)
+    ex = _esc_executor(confirm_after=0.0)
+    await ex._submit(b"not-a-tx", "M", "sell")
+    await asyncio.sleep(0.1)
+    assert ex.sender.rebroadcasts == 0                   # landed in time
+    ex = _esc_executor(confirm_after=0.2)
+    await ex._submit(b"not-a-tx", "M", "buy")
+    assert ex.sender.rebroadcasts == 0                   # buys keep sandwich protection
+
+
+async def test_rebroadcast_goes_through_every_rpc_only_when_jito_was_used():
+    s, rpc = _sender(["a"])
+    tx, kp = _signed()
+    assert await s.rebroadcast(tx) is True and rpc.sent == 1
+    s.cfg.jito_also_send_rpc = True                      # RPCs already had it
+    assert await s.rebroadcast(tx) is False and rpc.sent == 1

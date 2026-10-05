@@ -151,6 +151,16 @@ class TxSender:
                 log.debug("one submission path failed: %s", r)
         return sig
 
+    async def rebroadcast(self, tx: VersionedTransaction) -> bool:
+        """Send an already-sent transaction through the RPCs too (same signature, so it can
+        only land once). True if it went out a new way; False if RPCs had it already."""
+        if not (self.cfg.jito_enabled and self.cfg.jito_block_engines) or self.cfg.jito_also_send_rpc:
+            return False  # it was sent through RPC in the first place
+        raw = bytes(tx)
+        results = await asyncio.gather(*[r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]],
+                                       return_exceptions=True)
+        return any(not isinstance(r, Exception) for r in results)
+
     async def _first_ok(self, jobs: list) -> tuple[bool, list]:
         """(True, []) as soon as any path accepts the transaction. The others keep running in
         the background (a far-away Jito region must not delay confirming a fill).
