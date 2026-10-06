@@ -134,7 +134,12 @@ async def report(eng: "Engine") -> str:
     jobs: dict[str, Awaitable] = {"rpc": eng.rpc.call("getSlot")}
     for i, r in enumerate(getattr(getattr(eng.executor, "sender", None), "extra", []) or []):
         jobs[f"extra{i}"] = r.call("getSlot")
-    jobs["pp_api"] = head(f"https://{host(cfg.endpoints.pumpportal_trade)}/")
+    async def pp_probe():
+        # the trade endpoint itself, with an empty request: it answers "bad request" at
+        # once (nothing is built). The homepage can be slow while trading works fine.
+        await http.post(cfg.endpoints.pumpportal_trade, data={}, timeout=PROBE_TIMEOUT)
+
+    jobs["pp_api"] = pp_probe()
     if cfg.speed.jito_enabled:
         for u in dict.fromkeys(cfg.speed.jito_block_engines):
             jobs[f"jito:{host(u)}"] = head(f"https://{host(u)}/")

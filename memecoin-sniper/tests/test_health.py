@@ -118,6 +118,12 @@ async def test_health_report_checks_everything_and_never_shows_the_rpc_key(tmp_p
     assert "✅ <b>Solana RPC</b>" in text and "PumpPortal feed</b> connected" in text
     assert "4/5 regions reachable" in text and "tokyo" in text
     assert "✅ <b>Jupiter</b>" in text and "GeckoTerminal" in text and "DexScreener" in text
+    assert "✅ <b>PumpPortal trading</b>" in text   # its trade endpoint answered
+    down = _mock_http(fail_hosts={"pumpportal.fun"})
+    eng.http = down
+    assert "❌ <b>PumpPortal trading</b>" in await health.report(eng)
+    await down.aclose()
+    eng.http = mock
     eng.stream.feed_ok, eng.stream.feed_error = False, "Minimum balance not met"
     assert "live trade feed refused: Minimum balance not met" in await health.report(eng)
     await mock.aclose()
