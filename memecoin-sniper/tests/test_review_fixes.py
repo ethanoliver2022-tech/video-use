@@ -1328,3 +1328,18 @@ async def test_restart_after_a_sell_that_left_dust_closes_and_counts(tmp_path):
     eng.live = False
     await eng.settle()
     await eng.http.aclose()
+
+
+async def test_bad_addresses_get_a_clear_message_not_a_library_error(tmp_path):
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    h.eng.wallet.create()
+    for bad in ("7xKXabc123...yourPhantomAddress", "So1111111111111111111111111111111111111111211"):
+        await h.text(f"/withdraw {bad} 0.1")
+        assert "not a valid Solana address" in h.last and "wrong size" not in h.last.lower()
+        assert f"has {len(bad)} characters" in h.last
+    await h.text("/withdraw So11111111111111111111111111111111111111112 lots")
+    assert "must be a number of SOL" in h.last
+    await h.text("/copy add notawallet")
+    assert "not a valid Solana wallet address" in h.last
+    await h.close()

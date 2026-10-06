@@ -660,9 +660,12 @@ class TelegramControl:
             pass
 
     async def confirm_withdraw(self, address: str, amount: str) -> None:
-        from solders.pubkey import Pubkey
-        Pubkey.from_string(address)
-        sol = None if amount.lower() == "all" else float(amount)
+        from .engine import solana_address
+        solana_address(address)
+        try:
+            sol = None if amount.lower() == "all" else float(amount)
+        except ValueError:
+            raise ValueError("the amount must be a number of SOL (e.g. 0.1) or 'all'") from None
         if sol is not None and not (0 < sol < 1e9):  # also rejects nan / inf
             raise ValueError("amount must be a positive number of SOL, or 'all'")
         self.pending = {"kind": "withdraw_confirm", "data": (address, sol),

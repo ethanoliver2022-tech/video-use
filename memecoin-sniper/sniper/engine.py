@@ -93,6 +93,21 @@ def _boottime() -> Optional[float]:
     return None
 
 
+def solana_address(text: str, what: str = "address") -> str:
+    """`text` if it's a valid Solana address, else a clear error (not the library's
+    "String is the wrong size")."""
+    from solders.pubkey import Pubkey
+    try:
+        Pubkey.from_string(text)
+    except (ValueError, TypeError):
+        n = len(text or "")
+        raise ValueError(
+            f"That's not a valid Solana {what}: it should be 32-44 letters and numbers, copied in "
+            f"full (yours has {n} characters). Use the copy button in your wallet, and check "
+            "nothing was cut off or added.") from None
+    return text
+
+
 def keyword_hit(text: str, keywords: list[str]) -> Optional[str]:
     """Words of 4+ letters match anywhere ("trump" in "TRUMP2028"); shorter ones must be a
     whole word, so "ai" matches "AI Agent" but not "pain" or "daisy"."""
@@ -446,8 +461,7 @@ class Engine:
 
     async def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0,
                               mode: str = "copy", copy_sells: Optional[bool] = None) -> None:
-        from solders.pubkey import Pubkey
-        Pubkey.from_string(address)  # validates
+        solana_address(address, "wallet address")
         if mode not in ("copy", "alert"):
             raise ValueError("mode must be copy or alert")
         if not 0 <= buy_sol <= 100:
@@ -1320,8 +1334,7 @@ class Engine:
 
     async def place_limit_buy(self, mint: str, sol: float, change_pct: float,
                               hours: float = 24.0) -> str:
-        from solders.pubkey import Pubkey
-        Pubkey.from_string(mint)
+        solana_address(mint, "token address")
         _finite(sol, change_pct, hours)
         if not 0 < sol <= 100:
             raise ValueError("amount must be between 0 and 100 SOL")
@@ -1544,8 +1557,7 @@ class Engine:
 
     async def withdraw(self, to: str, amount: Optional[float]) -> str:
         """Send SOL out of the hot wallet. amount=None sends everything minus the fee."""
-        from solders.pubkey import Pubkey
-        Pubkey.from_string(to)
+        solana_address(to)
         if amount is not None:
             _finite(amount)
         kp = self.wallet.keypair()
