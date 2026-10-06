@@ -57,6 +57,8 @@ Shortcuts:
 /reclaim to take back the ~0.002 SOL rent from empty token accounts
 /stats"""
 
+ANNOUNCED = ("🟢 BUY", "🔴 SELL")
+
 WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
 
 <b>Getting started</b>
@@ -454,7 +456,8 @@ class TelegramControl:
         async def runner():
             try:
                 result = await coro
-                if result:
+                # a fill already went out as its own 🟢 BUY / 🔴 SELL message: don't repeat it
+                if result and not result.startswith(ANNOUNCED):
                     await self.send(result)
             except Exception as e:
                 log.exception("telegram action failed")
