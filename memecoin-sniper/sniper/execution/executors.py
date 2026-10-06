@@ -404,7 +404,7 @@ class LiveExecutor:
             if escalate is not None:
                 escalate.cancel()
         if not landed:
-            why = await self.why_not_landed(signed)
+            why = await self.why_not_landed(signed, sig)
             raise NotLanded(f"transaction {sig} expired without landing"
                             + (f". Likely reason: {why}" if why else ""))
         timings["confirm"] = time.monotonic() - t_confirm
@@ -430,21 +430,52 @@ class LiveExecutor:
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
                     sol_known=readable, timings=timings)
 
-    async def why_not_landed(self, signed: VersionedTransaction) -> str:
+    async def why_not_landed(self, signed: VersionedTransaction, sig: str = "") -> str:
         """The likely reason a transaction expired: it's simulated against the chain as it is
         now (free, read-only). '' when the simulation passes or can't tell."""
         try:
             res = await asyncio.wait_for(self.rpc.simulate(bytes(signed)), SIMULATE_TIMEOUT)
         except Exception as e:
             log.debug("simulation failed: %s", e)
-            return ""
+            res = None  # Jito may still know
+        if res and res.get("err"):
+            return explain_failure(res.get("err"), res.get("logs"))
+        jito = await self._jito_verdict(sig)
+        if jito:
+            return jito
         if not res:
             return ""
-        if not res.get("err"):  # it would work: it simply wasn't picked up in time
-            return ("the trade itself was fine, but no validator picked it up in time (the "
-                    "network was busy and the priority fee too low, or the RPC didn't pass it "
-                    "on). Jito on usually fixes this")
-        return explain_failure(res.get("err"), res.get("logs"))
+        # it would work: it simply wasn't picked up in time
+        sp = self.cfg.speed
+        if getattr(self.sender, "bundles", None) is not None and sp.jito_enabled:
+            more = ("raise the Min priority fee" if sp.jito_also_send_rpc
+                    else "turn on 'Also send via RPC'")
+            return ("the trade itself was fine, but no validator picked it up in time. Try a "
+                    f"higher Jito tip, or {more} (⚙️ Settings → ⚡ Speed)")
+        return ("the trade itself was fine, but no validator picked it up in time (the "
+                "network was busy and the priority fee too low, or the RPC didn't pass it "
+                "on). Jito on usually fixes this")
+
+    async def _jito_verdict(self, sig: str) -> str:
+        """Jito's own record of the bundle (kept ~5 min), as a reason; '' if it can't tell."""
+        status_of = getattr(self.sender, "bundle_status", None)
+        if status_of is None or not sig:
+            return ""
+        try:
+            status = await asyncio.wait_for(status_of(sig), SIMULATE_TIMEOUT)
+        except Exception as e:
+            log.debug("bundle status failed: %s", e)
+            return ""
+        tip = self.cfg.speed.jito_tip_sol
+        if status == "Failed":
+            return (f"Jito ran it in the tip auction, but your {tip:g} SOL tip lost: other "
+                    "bundles paid more. Raise the Jito tip, or turn on 'Also send via RPC' "
+                    "(⚙️ Settings → ⚡ Speed)")
+        if status == "Invalid":
+            return ("Jito accepted the bundle but dropped it before the auction (it rejected "
+                    "the bundle, or was rate-limiting this server). Turn on 'Also send via "
+                    "RPC' (⚙️ Settings → ⚡ Speed) so trades don't depend on Jito alone")
+        return ""
 
     async def close_empty(self, only: Optional[set] = None,
                           keep: frozenset = frozenset()) -> tuple[int, float]:

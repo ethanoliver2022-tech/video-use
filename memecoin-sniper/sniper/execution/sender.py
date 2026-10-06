@@ -78,6 +78,8 @@ class TxSender:
         self._extra: tuple[tuple[str, ...], list[SolanaRpc]] = ((), [])
         # swap signature -> its bundle's tip signature; oldest evicted (in-flight are newest)
         self.tip_sigs: OrderedDict[str, str] = OrderedDict()
+        # swap signature -> [(block engine, bundle id)] of the regions that accepted it
+        self.bundles: OrderedDict[str, list[tuple[str, str]]] = OrderedDict()
         self._inflight: set[asyncio.Task] = set()  # slower submission paths still running
         self.jito_failures: deque[float] = deque(maxlen=200)  # every region refused (health)
 
@@ -130,7 +132,7 @@ class TxSender:
                 self.tip_sigs.popitem(last=False)
             bundle = [base64.b64encode(raw).decode(), base64.b64encode(bytes(tip)).decode()]
             engines = dict.fromkeys(u.rstrip("/") for u in self.cfg.jito_block_engines)  # dedupe
-            jobs += [self._send_bundle(url, bundle) for url in engines]
+            jobs += [self._bundle_to(url, bundle, sig) for url in engines]
         if not use_jito or self.cfg.jito_also_send_rpc:
             jobs += [r.send_raw_transaction(raw) for r in [self.rpc, *self.extra]]
         accepted, results = await self._first_ok(jobs)
@@ -192,6 +194,15 @@ class TxSender:
         if not t.cancelled() and t.exception() is not None:
             log.debug("one submission path failed: %s", t.exception())
 
+    async def _bundle_to(self, engine: str, bundle: list[str], sig: str) -> str:
+        """Send to one region and remember its bundle id (to ask later what became of it)."""
+        result = await self._send_bundle(engine, bundle)
+        if isinstance(result, str) and result:
+            self.bundles.setdefault(sig, []).append((engine, result))
+            while len(self.bundles) > 1000:
+                self.bundles.popitem(last=False)
+        return result
+
     async def _send_bundle(self, engine: str, bundle: list[str]) -> str:
         resp = await self.http.post(f"{engine.rstrip('/')}/api/v1/bundles", json={
             "jsonrpc": "2.0", "id": 1, "method": "sendBundle",
@@ -202,3 +213,25 @@ class TxSender:
         if "error" in data:
             raise RuntimeError(f"jito {engine}: {data['error']}")
         return data.get("result", "")
+
+    async def bundle_status(self, sig: str) -> Optional[str]:
+        """What Jito did with this trade's bundle: 'Landed', 'Failed' (in the auction but no
+        validator took it), 'Invalid' (never entered it), 'Pending', or None (unknown).
+        Each region keeps its own record, for about 5 minutes."""
+        seen = []
+        for engine, bundle_id in self.bundles.get(sig, []):
+            try:
+                resp = await self.http.post(f"{engine.rstrip('/')}/api/v1/getInflightBundleStatuses",
+                                            json={"jsonrpc": "2.0", "id": 1,
+                                                  "method": "getInflightBundleStatuses",
+                                                  "params": [[bundle_id]]}, timeout=5)
+                status = resp.json()["result"]["value"][0]["status"]
+            except Exception as e:
+                log.debug("bundle status from %s failed: %s", engine, e)
+                continue
+            if isinstance(status, str):
+                seen.append(status)
+        for best in ("Landed", "Pending", "Failed", "Invalid"):
+            if best in seen:
+                return best
+        return None

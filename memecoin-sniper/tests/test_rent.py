@@ -266,3 +266,72 @@ async def test_an_expired_buy_says_why():
             await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
     finally:
         ex_mod.SIMULATE_TIMEOUT = old
+
+
+# ---- asking Jito what became of a bundle ----
+
+class _Resp:
+    def __init__(self, data):
+        self.data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.data
+
+
+async def test_bundle_ids_are_remembered_and_their_fate_read_back():
+    from sniper.config import SpeedConfig
+    from sniper.execution.sender import TxSender
+    from tests.test_speed import _Rpc, _signed
+    statuses = {"https://ny": "Invalid", "https://tokyo": "Failed"}
+
+    class Http:
+        async def post(self, url, json=None, timeout=None):
+            engine = url.split("/api")[0]
+            if json["method"] == "sendBundle":
+                return _Resp({"result": f"id-{engine}"})
+            assert json["params"] == [[f"id-{engine}"]]
+            if engine not in statuses:
+                raise RuntimeError("down")
+            return _Resp({"result": {"value": [{"status": statuses[engine]}]}})
+    s = TxSender(SpeedConfig(jito_block_engines=["https://ny", "https://tokyo", "https://slc"]),
+                 _Rpc(), Http(), 0.0001)
+    tx, kp = _signed()
+    sig = await s.send(tx, kp)
+    await asyncio.sleep(0.05)                    # the slower regions finish in the background
+    assert len(s.bundles[sig]) == 3
+    assert await s.bundle_status(sig) == "Failed"   # the most telling answer wins
+    statuses["https://slc"] = "Landed"
+    assert await s.bundle_status(sig) == "Landed"
+    assert await s.bundle_status("unknown") is None
+
+
+async def test_an_expired_jito_buy_names_the_jito_reason():
+    ex, rpc = live_executor(load_config(None))
+    ex.cfg.speed.jito_enabled = True
+
+    async def pp(*a, **k):
+        return b"tx"
+    ex._pumpportal_tx = pp
+    rpc.confirm_result = False
+
+    async def fine(raw):
+        return {"err": None, "logs": []}
+    rpc.simulate = fine
+    ex.sender.bundles = {}
+    from sniper.models import Candidate
+    for status, expect in (("Failed", "tip lost"), ("Invalid", "dropped it before the auction"),
+                           (None, "Try a higher Jito tip")):
+        async def bundle_status(sig, _s=status):
+            return _s
+        ex.sender.bundle_status = bundle_status
+        with pytest.raises(NotLanded, match=expect):
+            await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+
+    async def slippage(raw):
+        return {"err": "x", "logs": ["Error Code: TooMuchSolRequired."]}
+    rpc.simulate = slippage                       # a real on-chain reason beats Jito's
+    with pytest.raises(NotLanded, match="slippage"):
+        await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
