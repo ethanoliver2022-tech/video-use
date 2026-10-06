@@ -78,6 +78,7 @@ add_key JUPITER_API_KEY "" "Recommended: free key from portal.jup.ag (faster Jup
 add_key JUPITER_RPM "" "Only on a paid Jupiter plan: its requests per minute"
 add_key WITHDRAW_ALLOWLIST "" "Security: withdrawals only to these addresses (comma-separated), e.g. your Phantom wallet"
 add_key ALLOW_KEY_EXPORT "true" "Security: set to false so the private key can never be shown in Telegram"
+add_key EXTRA_RPC_URLS "" "Optional: more RPC URLs (comma-separated) every trade is also sent through, so more trades land"
 add_key EXTRA_ALLOWED_PROGRAMS "" "Advanced: extra program ids the transaction check may allow (only if the bot asks)"
 chmod 600 .env                     # bot token, API keys: owner only
 mkdir -p data && chmod 700 data    # wallet key + database: owner only

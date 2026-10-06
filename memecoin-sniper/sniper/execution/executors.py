@@ -469,9 +469,14 @@ class LiveExecutor:
         tip = self.cfg.speed.jito_tip_sol
         if status == "Failed":
             return (f"Jito ran it in the tip auction, but your {tip:g} SOL tip lost: other "
-                    "bundles paid more. Raise the Jito tip, or turn on 'Also send via RPC' "
-                    "(⚙️ Settings → ⚡ Speed)")
+                    "bundles paid more. Raise the Jito tip"
+                    + ("" if self.cfg.speed.jito_also_send_rpc
+                       else ", or turn on 'Also send via RPC' (⚙️ Settings → ⚡ Speed)"))
         if status == "Invalid":
+            if self.cfg.speed.jito_also_send_rpc:
+                return ("Jito dropped the bundle before the auction, and the copy sent through "
+                        "your RPC wasn't picked up either. More paths help: a second RPC in "
+                        "EXTRA_RPC_URLS (.env), a higher Min priority fee, or a paid RPC plan")
             return ("Jito accepted the bundle but dropped it before the auction (it rejected "
                     "the bundle, or was rate-limiting this server). Turn on 'Also send via "
                     "RPC' (⚙️ Settings → ⚡ Speed) so trades don't depend on Jito alone")

@@ -292,6 +292,10 @@ def load_config(path: str | os.PathLike | None = None, preset: str | None = None
                               if a.strip()]
     cfg.extra_allowed_programs = [a.strip() for a in
                                   os.getenv("EXTRA_ALLOWED_PROGRAMS", "").split(",") if a.strip()]
+    # more RPCs every trade is also sent through (more paths to a validator = more trades land)
+    extra = [u.strip() for u in os.getenv("EXTRA_RPC_URLS", "").split(",")
+             if u.strip().startswith(("https://", "http://"))]
+    cfg.speed.broadcast_rpcs = list(dict.fromkeys([*cfg.speed.broadcast_rpcs, *extra]))
     cfg.allow_key_export = os.getenv("ALLOW_KEY_EXPORT", "true").strip().lower() not in (
         "0", "false", "no", "off")
     cfg.jupiter_api_key = os.getenv("JUPITER_API_KEY", "").strip()

@@ -484,3 +484,22 @@ async def test_the_untrusted_call_is_removed_from_sells_too():
     rpc.balance_raw = 5_000_000
     await ex.sell(mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
     assert ex.jupiter.calls == 0 and ARB not in _programs(signed[0])
+
+
+def test_extra_rpc_urls_from_env_join_the_broadcast(monkeypatch):
+    monkeypatch.setenv("EXTRA_RPC_URLS", " https://a.example/k1 , junk, https://b.example ,https://a.example/k1")
+    cfg = load_config(None)
+    assert cfg.speed.broadcast_rpcs == ["https://a.example/k1", "https://b.example"]
+
+
+async def test_dropped_bundle_advice_matches_the_settings():
+    ex, _ = live_executor(load_config(None))
+
+    async def invalid(sig):
+        return "Invalid"
+    ex.sender.bundle_status = invalid
+    ex.cfg.speed.jito_also_send_rpc = False
+    assert "Turn on 'Also send via RPC'" in await ex._jito_verdict("S")
+    ex.cfg.speed.jito_also_send_rpc = True
+    text = await ex._jito_verdict("S")
+    assert "EXTRA_RPC_URLS" in text and "Turn on" not in text
