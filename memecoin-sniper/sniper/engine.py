@@ -1706,15 +1706,16 @@ class Engine:
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm)]
+        # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,
                                          d.geckoterminal_poll_seconds, self.on_candidate, self.http,
-                                         active=self._scanning)
+                                         active=lambda: self._scanning() and d.geckoterminal_enabled)
             loops.append(("geckoterminal", gecko.run))
-        if d.dexscreener_profiles:
-            dex = DexScreenerScanner(e.dexscreener_api, d.dexscreener_poll_seconds,
-                                     self.on_candidate, self.http, active=self._scanning)
-            loops.append(("dexscreener", dex.run))
+        dex = DexScreenerScanner(e.dexscreener_api, d.dexscreener_poll_seconds,
+                                 self.on_candidate, self.http,
+                                 active=lambda: self._scanning() and d.dexscreener_profiles)
+        loops.append(("dexscreener", dex.run))
         # always running, idle until switched on (Telegram main menu → 🚀 Momentum)
         momentum = MomentumScanner(d, e.geckoterminal_api, e.dexscreener_api, self.http,
                                    self.on_momentum)

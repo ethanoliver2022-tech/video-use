@@ -67,6 +67,7 @@ class DiscoveryConfig:
     geckoterminal_networks: list[str] = field(
         default_factory=lambda: ["solana", "base", "bsc", "eth"]
     )
+    geckoterminal_enabled: bool = True     # on/off switch (Telegram), keeps the network list
     geckoterminal_poll_seconds: int = 20
     dexscreener_profiles: bool = True
     dexscreener_poll_seconds: int = 30

@@ -314,3 +314,55 @@ async def test_max_market_cap_is_changed_from_telegram_and_kept(tmp_path):
     assert h.eng.store.overrides()["filters.max_fdv_usd"] == 10_000_000  # survives restarts
     assert any("$10,000,000" in t for t, _, _ in h.sent)
     await h.close()
+
+
+# ---- GeckoTerminal / DexScreener on/off from Telegram ----
+
+class _Captured(Exception):
+    pass
+
+
+async def test_scanner_switches_take_effect_live(tmp_path, monkeypatch):
+    import sniper.engine as em
+    h = Harness(tmp_path)
+    eng = h.eng
+    eng.cfg.discovery.geckoterminal_networks = ["solana"]
+    eng.paused = False
+    active = {}  # scanner -> its "should I poll now?" check, as the engine wires it
+
+    class FakeGecko:
+        def __init__(self, *a, active):
+            self.run = None
+            globals()["_gecko_active"] = active
+
+    class FakeDex:
+        def __init__(self, *a, active):
+            globals()["_dex_active"] = active
+            raise _Captured  # stop run() right after the scanners are wired up
+    monkeypatch.setattr(em, "GeckoTerminalScanner", FakeGecko)
+    monkeypatch.setattr(em, "DexScreenerScanner", FakeDex)
+    with pytest.raises(_Captured):
+        await eng.run()
+    active.update(gecko=globals()["_gecko_active"], dex=globals()["_dex_active"])
+    assert active["gecko"]() and active["dex"]()            # on by default
+    await eng.set_setting("discovery.geckoterminal_enabled", "off")
+    await eng.set_setting("discovery.dexscreener_profiles", "off")
+    assert not active["gecko"]() and not active["dex"]()    # off: no more requests
+    await eng.set_setting("discovery.dexscreener_profiles", "on")
+    assert active["dex"]() and not active["gecko"]()        # and back on, independently
+    eng.paused = True
+    assert not active["dex"]()                              # paused: nothing polls anyway
+    await h.close()
+
+
+async def test_scanner_switches_are_in_the_snipers_menu_and_persist(tmp_path):
+    h = Harness(tmp_path)
+    from sniper.settings import SETTINGS
+    idx = {s.key: i for i, s in enumerate(SETTINGS)}
+    await h.tap("sn")
+    assert f"e:{idx['discovery.geckoterminal_enabled']}" in h.buttons()
+    assert f"e:{idx['discovery.dexscreener_profiles']}" in h.buttons()
+    await h.tap(f"e:{idx['discovery.geckoterminal_enabled']}")   # bools flip on a tap
+    assert h.eng.cfg.discovery.geckoterminal_enabled is False
+    assert h.eng.store.overrides()["discovery.geckoterminal_enabled"] is False
+    await h.close()

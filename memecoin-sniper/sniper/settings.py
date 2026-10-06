@@ -62,6 +62,10 @@ SETTINGS: list[Setting] = [
     # entry / filters
     Setting("discovery.pumpfun_new_tokens", "Snipe new launches", "bool"),
     Setting("discovery.pumpfun_migrations", "Snipe migrations", "bool"),
+    Setting("discovery.geckoterminal_enabled", "GeckoTerminal new pools", "bool",
+            help="new pools from GeckoTerminal (Solana buys; Base/BSC/ETH alerts only)"),
+    Setting("discovery.dexscreener_profiles", "DexScreener new tokens", "bool",
+            help="newly listed tokens from DexScreener"),
     Setting("entry.confirm_seconds", "Confirm window", "float", 0, 120, "s"),
     Setting("entry.min_unique_buyers", "Min early buyers", "int", 0, 1000),
     Setting("filters.max_creator_initial_buy_pct", "Max dev buy", "float", 0, 100, "%"),
@@ -111,7 +115,8 @@ GROUPS = {
 
 SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev_watchlist",
               "discovery.dev_snipe_sol", "discovery.dev_snipe_skip_filters",
-              "discovery.pumpfun_new_tokens", "discovery.pumpfun_migrations"}
+              "discovery.pumpfun_new_tokens", "discovery.pumpfun_migrations",
+              "discovery.geckoterminal_enabled", "discovery.dexscreener_profiles"}
 
 
 def group_of(s: Setting) -> str:

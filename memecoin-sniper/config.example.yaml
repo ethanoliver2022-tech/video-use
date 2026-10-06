@@ -35,7 +35,8 @@ discovery:
   pumpfun_new_tokens: true
   pumpfun_migrations: false
   geckoterminal_networks: [solana, base, bsc, eth]   # non-Solana = alerts only
-  dexscreener_profiles: true
+  geckoterminal_enabled: true   # on/off, also from Telegram (Settings → Snipers)
+  dexscreener_profiles: true    # on/off, also from Telegram (Settings → Snipers)
   geckoterminal_poll_seconds: 20
   dexscreener_poll_seconds: 30
   max_candidate_age_seconds: 1800   # ignore pools / launches older than this
