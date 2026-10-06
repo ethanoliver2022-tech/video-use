@@ -62,6 +62,8 @@ BALANCE_CACHE_SECONDS = 3     # a buy uses it if no newer than this (and no buy 
 PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fill
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
+DEV_CHECK_STREAM_SECONDS = 6  # dev balance check per position while the trade feed is live
+FEED_RETRY_SECONDS = 300      # re-ask PumpPortal for a refused trade feed this often
 KEEPALIVE_SECONDS = 120  # idle connections kept open this long
 WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
 PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
@@ -139,6 +141,7 @@ class Engine:
         self.stream.on_candidate = self.on_candidate
         self.stream.on_trade = self.on_trade
         self.stream.on_migration = self.on_migration
+        self.stream.on_feed_change = self._feed_changed
 
         self.queue: asyncio.Queue[Candidate] = asyncio.Queue(maxsize=500)
         self.seen: dict[tuple, float] = {}
@@ -165,6 +168,7 @@ class Engine:
         self._orders_running: set[int] = set()
         self._curve_misses: dict[str, int] = {}
         self._quoted_at: dict[str, float] = {}  # mint -> monotonic time of its last price quote
+        self._dev_checked: dict[str, float] = {}  # mint -> monotonic time of its last dev check
         self._momentum_seen: dict[str, float] = {}  # mint -> monotonic time it was last signalled
         self._momentum_alerts: deque[float] = deque()
 
@@ -180,7 +184,30 @@ class Engine:
 
     @property
     def has_trade_stream(self) -> bool:
+        """The live trade feed can be relied on (a key, and PumpPortal delivering it)."""
+        return self.stream.trades_live
+
+    @property
+    def has_pumpportal_key(self) -> bool:
         return self.stream.trades_enabled
+
+    def _feed_changed(self, ok: bool, error: str) -> None:
+        """PumpPortal started refusing (or delivering again) the paid trade feed."""
+        if ok:
+            msg = "✅ PumpPortal's live trade feed is working again: instant exits are back on."
+        else:
+            msg = (f"⚠️ PumpPortal refused the live trade feed ({esc(error)}). The bot switched to "
+                   "on-chain checks (slower exits) until it's fixed. Usually the wallet linked to "
+                   "your PumpPortal API key needs topping up (minimum 0.02 SOL). It retries every "
+                   "5 minutes on its own.")
+        self._spawn(self.notifier.send(msg, logging.INFO if ok else logging.WARNING))
+
+    async def feed_watch(self) -> None:
+        """While PumpPortal refuses the trade feed, ask again every few minutes."""
+        while True:
+            await asyncio.sleep(FEED_RETRY_SECONDS)
+            if self.stream.trades_enabled and not self.stream.feed_ok:
+                await self.stream.resubscribe()
 
     def _build_executor(self, live: bool) -> Executor:
         self._bal_cache = None  # belongs to the previous wallet / mode
@@ -414,7 +441,7 @@ class Engine:
             raise ValueError("mode must be copy or alert")
         if not 0 <= buy_sol <= 100:
             raise ValueError("size per trade must be between 0 and 100 SOL (0 = your buy size)")
-        if not self.has_trade_stream:
+        if not self.has_pumpportal_key:
             raise ValueError("Copy trading and wallet tracking need a PumpPortal API key "
                              "(PUMPPORTAL_API_KEY in .env).")
         if copy_sells is None:  # keep what the wallet already had (default: follow their sells)
@@ -936,7 +963,13 @@ class Engine:
                         self._set_curve(pos.mint, CurveState(curve.v_sol, curve.v_tokens))
                         self._mark_on_curve(pos)
                         pos.update_price(curve.price)
-                if not self.has_trade_stream and pos.creator and self.cfg.exits.exit_on_dev_sell:
+                # The dev's balance is checked even with the trade feed: the feed only shows
+                # sells from the dev's own wallet, not tokens moved elsewhere and sold there
+                # (and it can stop). Less often while the feed is live, to spare the RPC.
+                every = DEV_CHECK_STREAM_SECONDS if self.has_trade_stream else 0.0
+                if (pos.creator and self.cfg.exits.exit_on_dev_sell and time.monotonic()
+                        - self._dev_checked.get(pos.mint, float("-inf")) >= every):
+                    self._dev_checked[pos.mint] = time.monotonic()
                     dev = await self.rpc.get_token_balance(pos.creator, pos.mint)
                     if pos.dev_tokens is None:
                         pos.dev_tokens = dev
@@ -1154,6 +1187,7 @@ class Engine:
         self._sell_next_try.pop(pos.mint, None)
         self._curve_misses.pop(pos.mint, None)
         self._quoted_at.pop(pos.mint, None)
+        self._dev_checked.pop(pos.mint, None)
         self._spawn(self.notifier.send(  # callers may hold the sell lock: don't wait on Telegram
             f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
             f" — today {self.store.realized_today():+.4f} SOL"))
@@ -1402,13 +1436,13 @@ class Engine:
             raise ValueError(f"unknown setting {key}")
         s = BY_KEY[key]
         value = parse_value(s, raw)
-        if key == "copytrade.enabled" and value and not self.has_trade_stream:
+        if key == "copytrade.enabled" and value and not self.has_pumpportal_key:
             raise ValueError("Copy trading needs a PumpPortal API key (PUMPPORTAL_API_KEY in .env).")
         apply_setting(self.cfg, key, value)
         self.store.set_override(key, to_storable(s, value))
         await self._setting_changed(key)
         note = ""
-        if key == "exits.kol_wallets" and value and not self.has_trade_stream:
+        if key == "exits.kol_wallets" and value and not self.has_pumpportal_key:
             note = " (needs a PumpPortal API key to see their buys)"
         return f"{s.label}: {format_value(s, value)}{note}"
 
@@ -1686,7 +1720,7 @@ class Engine:
                 mode = "LIVE"
             except Exception as ex:
                 log.warning("could not resume live mode: %s", ex)
-        if not self.has_trade_stream:
+        if not self.has_pumpportal_key:
             log.warning("No PUMPPORTAL_API_KEY: live trade stream off. Prices and dev-dump checks "
                         "use on-chain polling; copy trading, KOL and sell-pressure exits are off.")
             if self.cfg.copytrade.enabled:
@@ -1705,7 +1739,8 @@ class Engine:
         loops = [("pumpportal", self.stream.run), ("exits", self.exit_loop),
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
-                 ("balance", self.balance_loop), ("keep-warm", self.keep_warm)]
+                 ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
+                 ("feed-watch", self.feed_watch)]
         # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,

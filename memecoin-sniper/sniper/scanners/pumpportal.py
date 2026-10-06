@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -56,6 +57,10 @@ def _f(v) -> Optional[float]:
     return num(v, allow_zero=True)
 
 
+# PumpPortal error texts that mean "no paid trade feed for you" (balance / key problems)
+REFUSED = re.compile(r"balance|api.?key|unauthori|insufficient|fund|invalid key|not authori", re.I)
+
+
 def _valid_address(v) -> bool:
     return isinstance(v, str) and 32 <= len(v) <= 44 and v.isalnum()
 
@@ -77,10 +82,38 @@ class PumpPortalStream:
         self.on_migration: Optional[MigrationHandler] = None
         self._ws = None
         self._send_lock = asyncio.Lock()
+        # PumpPortal can accept the connection yet refuse the paid trade feed (e.g. the
+        # wallet linked to the key is below its minimum balance). Then nothing arrives, and
+        # the bot must not rely on it: it falls back to on-chain checks until trades flow.
+        self.feed_ok = True
+        self.feed_error = ""
+        self.on_feed_change: Optional[Callable[[bool, str], None]] = None
 
     @property
     def trades_enabled(self) -> bool:
+        """A key is configured: trade subscriptions are sent."""
         return bool(self.api_key)
+
+    @property
+    def trades_live(self) -> bool:
+        """The trade feed can be relied on (a key, and PumpPortal isn't refusing it)."""
+        return self.trades_enabled and self.feed_ok
+
+    def _set_feed(self, ok: bool, error: str = "") -> None:
+        if ok == self.feed_ok:
+            return
+        self.feed_ok, self.feed_error = ok, error
+        if self.on_feed_change:
+            self.on_feed_change(ok, error)
+
+    async def resubscribe(self) -> None:
+        """Ask for the trade feeds again (e.g. after the PumpPortal wallet was topped up)."""
+        if self.trades_enabled:
+            if self.token_subs:
+                await self._send({"method": "subscribeTokenTrade", "keys": sorted(self.token_subs)})
+            if self.account_subs:
+                await self._send({"method": "subscribeAccountTrade",
+                                  "keys": sorted(self.account_subs)})
 
     @property
     def connect_url(self) -> str:
@@ -179,10 +212,16 @@ class PumpPortalStream:
             if key in msg and not isinstance(msg[key], str):
                 msg.pop(key)
         if "mint" not in msg:
-            if msg.get("errors") or msg.get("error"):  # e.g. bad / unfunded API key
-                log.warning("pumpportal: %s", msg.get("errors") or msg.get("error"))
+            err = msg.get("errors") or msg.get("error")
+            if err:  # e.g. bad / unfunded API key
+                text = str(err)[:200]
+                log.warning("pumpportal: %s", text)
+                if self.trades_enabled and REFUSED.search(text):
+                    self._set_feed(False, text)
             return  # subscription acks etc.
         tx_type = msg.get("txType")
+        if tx_type in ("buy", "sell") and not self.feed_ok:
+            self._set_feed(True)  # trades are flowing again
         try:
             if tx_type == "create" and self.on_candidate and self.want_new_tokens:
                 await self.on_candidate(candidate_from_create(msg))

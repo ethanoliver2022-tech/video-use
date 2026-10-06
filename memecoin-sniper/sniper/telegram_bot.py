@@ -541,8 +541,11 @@ class TelegramControl:
         pending = len(e.pending_buys())
         if pending:
             lines.append(f"⏳ {pending} unconfirmed buy(s): checking the wallet")
-        if not e.has_trade_stream:
+        if not e.has_pumpportal_key:
             lines.append("ℹ️ No PumpPortal key: prices use on-chain polling, and copy trading is off.")
+        elif not e.has_trade_stream:
+            lines.append("⚠️ PumpPortal is refusing the live trade feed: using on-chain checks. "
+                         "Top up the wallet linked to your PumpPortal key (min 0.02 SOL).")
         if "api.mainnet-beta.solana.com" in e.cfg.endpoints.rpc_url:
             lines.append("⚠️ Public Solana RPC: set SOLANA_RPC_URL before going live.")
         toggle = ("⏸ Pause sniping", "stop") if not e.paused else ("▶️ Start sniping", "go")
@@ -813,7 +816,7 @@ class TelegramControl:
         status = "✅ on" if e.cfg.copytrade.enabled else "❌ off"
         lines = [f"👥 <b>Copy trading & wallet tracker</b> (copying {status})",
                  "👥 copy = mirror their buys · 🔔 track = just alert me"]
-        if not e.has_trade_stream:
+        if not e.has_pumpportal_key:
             lines.append("Needs a PumpPortal API key: add PUMPPORTAL_API_KEY to .env on the "
                          "server and restart.")
         rows = []
