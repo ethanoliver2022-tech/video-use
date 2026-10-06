@@ -151,8 +151,9 @@ class TxSender:
             ok = [r for r in results if not isinstance(r, Exception)]
         if not ok:
             # every distinct reason, the RPCs' first (they say why: e.g. too large, no funds)
-            why = list(dict.fromkeys(str(e).split("\n")[0][:160] for e in reversed(results)
-                                     if isinstance(e, Exception)))
+            why = sorted(dict.fromkeys(str(e).split("\n")[0][:160] for e in results
+                                       if isinstance(e, Exception)),
+                         key=lambda m: "jito" in m.lower() or "bundles" in m)
             raise RuntimeError("every submission path failed: " + (" | ".join(why[:3]) or "-"))
         for r in results:
             if isinstance(r, Exception):

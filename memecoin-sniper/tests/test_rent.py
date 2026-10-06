@@ -527,7 +527,9 @@ async def test_when_every_path_refuses_each_reason_is_shown_rpc_first():
 
     class Http:
         async def post(self, *a, **k):
-            raise RuntimeError("Client error '400 Bad Request' for url 'https://x'\nFor more information")
+            raise RuntimeError("Client error '400 Bad Request' for url "
+                               "'https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles'"
+                               "\nFor more information")
     cfg = SpeedConfig(jito_block_engines=["https://x"], jito_also_send_rpc=True)
     s = TxSender(cfg, Rpc(), Http(), 0.0001)
     tx, kp = _signed()
