@@ -115,3 +115,32 @@ async def test_paper_results_can_start_over_and_live_ones_cannot(tmp_path):
     with pytest.raises(ValueError):
         st.clear_results("live")
     await h.close()
+
+
+async def test_a_paper_sell_without_a_curve_in_memory_reads_it_from_the_chain(tmp_path, monkeypatch):
+    from sniper import exits
+    h = Harness(tmp_path)
+    eng = h.eng
+    async def buy(c, sol, curve):
+        return Fill(tokens=1_000_000.0, sol=sol)
+    eng.executor.buy = buy
+    res = await eng.manual_buy(str(Keypair().pubkey()), 0.03, force=True)
+    assert res.startswith("🟢"), res
+    pos = next(iter(eng.positions.values()))
+    eng.curves.pop(pos.mint, None)                     # nothing seen for it lately
+    reads = []
+
+    async def chain_curve(rpc, mint):
+        reads.append(mint)
+        return pump_curve.CurveInfo(v_sol=STD_SOL, v_tokens=STD_TOK, complete=False)
+    monkeypatch.setattr(engine_mod, "fetch_curve", chain_curve)
+    used = []
+
+    async def sell(mint, tokens, sell_all, pump, curve, slippage_pct=None):
+        used.append(curve)
+        return Fill(tokens=tokens, sol=0.02, signature="S")
+    eng.executor.sell = sell
+    pos.route, pos.migrated = "pump", False
+    await eng.execute_sell(pos, exits.ExitDecision(pos.tokens_remaining, True, "manual"))
+    assert reads == [pos.mint] and used[0] is not None and used[0].v_sol == STD_SOL
+    await h.close()

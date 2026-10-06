@@ -785,6 +785,22 @@ class Engine:
             return fresh
         return None  # no current curve: price it with a Jupiter quote instead
 
+    async def _paper_sell_curve(self, pos: Position) -> Optional[CurveState]:
+        """A paper sell with no curve in memory (none seen lately): read it from the chain,
+        as a live sell would trade against it, instead of asking Jupiter, which can't price
+        a token still on its bonding curve."""
+        try:
+            info = await fetch_curve(self.rpc, pos.mint)
+        except Exception as e:
+            log.debug("curve refresh %s failed: %s", pos.mint, e)
+            return None
+        if (info is None or info.complete or not getattr(info, "sol_quoted", True)
+                or not is_standard(info.v_sol, info.v_tokens)):
+            return None
+        curve = CurveState(info.v_sol, info.v_tokens)
+        self._set_curve(pos.mint, curve)
+        return curve
+
     def _mark_on_curve(self, pos: Position) -> None:
         if not pos.seen_on_curve:
             pos.seen_on_curve = True
@@ -1114,6 +1130,8 @@ class Engine:
             if not self.live:  # a live sell fills ~1s later too: price it then (see above)
                 await asyncio.sleep(PAPER_SELL_DELAY)
             curve = self.curves.get(pos.mint) if not pos.migrated else None
+            if curve is None and not self.live and not pos.migrated:
+                curve = await self._paper_sell_curve(pos)
             if self.live:
                 pos.pending_exit = {"reason": dec.reason, "tp_index": dec.tp_index,
                                     "kind": dec.kind}
