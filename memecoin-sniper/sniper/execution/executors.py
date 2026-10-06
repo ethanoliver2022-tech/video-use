@@ -30,6 +30,7 @@ from solders.transaction import VersionedTransaction
 from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
 from ..solana_rpc import SolanaRpc, TxFailed, balance_deltas
+from .pump_native import NotNative, PumpNative
 from .sender import TxSender
 from .txguard import UnsafeTransaction, check_transaction, describe, strip_untrusted
 
@@ -309,6 +310,11 @@ class LiveExecutor:
         self.cfg, self.kp, self.rpc, self.jupiter, self.http = cfg, keypair, rpc, jupiter, http
         self.pubkey = str(keypair.pubkey())
         self.sender = sender or TxSender(cfg.speed, rpc, http, lambda: cfg.trading.priority_fee_sol)
+        self.native = PumpNative(rpc)
+        # direct pump.fun trades: None = not checked yet, True = checked and used,
+        # False = the check failed this session (pump.fun changed): other routes are used
+        self.native_ok: Optional[bool] = None
+        self.notice = None  # set by the engine: a one-line Telegram message
 
     def _sign(self, unsigned: bytes) -> VersionedTransaction:
         tx = VersionedTransaction.from_bytes(unsigned)
@@ -548,13 +554,26 @@ class LiveExecutor:
         except Exception:
             return None
 
+    async def _native_buy(self, cand: Candidate, sol: float) -> bytes:
+        return await self.native.buy_tx(self.kp.pubkey(), cand.mint, sol,
+                                        self.cfg.trading.slippage_pct,
+                                        await self.sender.priority_fee())
+
+    async def _pump_buy_tx(self, cand: Candidate, sol: float) -> bytes:
+        """Once direct pump.fun trading passed its check: built here (one RPC round trip,
+        no PumpPortal). Otherwise, or if that fails: PumpPortal."""
+        if self.native_ok:
+            native = await self._native("buy", lambda: self._native_buy(cand, sol))
+            if native is not None:
+                return native
+        return await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
+
     async def prepare_buy(self, cand: Candidate, sol: float) -> tuple[bytes, Optional[float], float]:
         """Build a pump.fun buy (and read the pre-buy balance) ahead of time, while the filters
         are still running: (unsigned tx, tokens already held, monotonic time built). If the
         token passes, only signing and sending are left on the critical path."""
-        unsigned, pre = await asyncio.gather(
-            self._pumpportal_tx("buy", cand.mint, sol, in_sol=True),
-            self._held_or_none(cand.mint))
+        unsigned, pre = await asyncio.gather(self._pump_buy_tx(cand, sol),
+                                             self._held_or_none(cand.mint))
         return unsigned, pre, time.monotonic()
 
     async def _prebuilt(self, cand: Candidate, sol: float):
@@ -575,6 +594,58 @@ class LiveExecutor:
         if time.monotonic() - built_at > PREBUILT_MAX_AGE:
             return None  # the price has moved on: build a fresh one
         return unsigned, pre
+
+    async def _native(self, side: str, build) -> Optional[bytes]:
+        """A pump.fun trade built directly (see pump_native), or None to use another route.
+        Before the first one is ever used it's test-run on the chain (free, nothing sent)."""
+        if self.native_ok is False:
+            return None
+        try:
+            unsigned = await build()
+        except NotNative as e:
+            log.info("direct pump.fun %s not possible: %s", side, e)
+            return None
+        except Exception as e:
+            log.warning("direct pump.fun %s couldn't be built: %s", side, e)
+            return None
+        if self.native_ok is None and not await self._check_native(unsigned, side):
+            return None
+        return unsigned
+
+    async def _check_native(self, unsigned: bytes, side: str) -> bool:
+        try:
+            res = await asyncio.wait_for(self.rpc.simulate(bytes(self._sign(unsigned))),
+                                         SIMULATE_TIMEOUT)
+        except Exception as e:
+            log.info("direct pump.fun check couldn't run (%s); trying again next trade", e)
+            return False
+        if not isinstance(res, dict):
+            return False
+        err = res.get("err")
+        if not err:
+            self.native_ok = True
+            log.info("direct pump.fun trading checked: on")
+            self._notify("✅ Direct pump.fun trading passed its check: buys and sells now go "
+                         "straight to pump.fun (no PumpPortal transactions).")
+            return True
+        why = explain_failure(err, res.get("logs"))
+        if why.startswith(("the price moved", "the token graduated", "not enough SOL")):
+            log.info("direct pump.fun check inconclusive (%s); trying again next trade", why)
+            return False  # the trade itself, not how it's built: check again next time
+        self.native_ok = False
+        logs = [x for x in res.get("logs") or [] if isinstance(x, str)][-6:]
+        log.error("direct pump.fun %s failed its check: %s | %s", side, err, " | ".join(logs))
+        self._notify(f"⚠️ Direct pump.fun trading failed its check ({why}). Trades use "
+                     "Jupiter instead until the bot restarts. Send this to whoever maintains "
+                     "the bot.")
+        return False
+
+    def _notify(self, text: str) -> None:
+        if self.notice is not None:
+            try:
+                self.notice(text)
+            except Exception as e:
+                log.debug("notice failed: %s", e)
 
     def _without_untrusted(self, built: VersionedTransaction, max_sol_out: float, side: str,
                            swap_sol: float = 0.0, mint: Optional[str] = None) -> Optional[bytes]:
@@ -610,6 +681,11 @@ class LiveExecutor:
             log.info("removed an untrusted program from PumpPortal's buy for %s (%s). Its "
                      "calls: %s", cand.mint, refused, describe(built))
             return clean
+        native = await self._native("buy", lambda: self._native_buy(cand, sol))
+        if native is not None:
+            log.info("PumpPortal's buy for %s refused (%s); built it directly instead",
+                     cand.mint, refused)
+            return native
         log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter. Its "
                     "calls: %s", cand.mint, refused, describe(built))
         try:
@@ -630,7 +706,7 @@ class LiveExecutor:
             pre_task = asyncio.ensure_future(self._held_or_none(cand.mint))
             try:
                 if cand.route == "pump":
-                    unsigned = await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
+                    unsigned = await self._pump_buy_tx(cand, sol)
                 else:
                     q = await self.jupiter.quote(SOL_MINT, cand.mint, sol,
                                                  self.cfg.trading.slippage_pct)
@@ -676,7 +752,7 @@ class LiveExecutor:
         # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
         # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
         early = None
-        if pump and sell_all:
+        if pump and sell_all and not self.native_ok:
             early = asyncio.ensure_future(self._pumpportal_tx("sell", mint, "100%", in_sol=False,
                                                               slippage_pct=slippage))
         try:
@@ -695,6 +771,11 @@ class LiveExecutor:
         else:
             sell_raw = int(tokens * 10 ** decimals)
         unsigned = None
+        async def native_sell() -> bytes:
+            return await self.native.sell_tx(self.kp.pubkey(), mint, sell_raw, slippage,
+                                             await self.sender.priority_fee())
+        if pump and self.native_ok:
+            unsigned = await self._native("sell", native_sell)
         if early is not None:  # (only built for a full exit, which stays a full exit)
             try:
                 unsigned = await early
@@ -713,9 +794,10 @@ class LiveExecutor:
             except UnsafeTransaction as e:
                 clean = self._without_untrusted(VersionedTransaction.from_bytes(unsigned),
                                                 self._sell_cap(value_sol), "sell")
+                if clean is None:
+                    clean = await self._native("sell", native_sell)
                 if clean is not None:
-                    log.info("removed an untrusted program from PumpPortal's sell for %s (%s)",
-                             mint, e)
+                    log.info("PumpPortal's sell for %s refused (%s); using a clean one", mint, e)
                 else:
                     log.error("refused PumpPortal's sell for %s (%s); using Jupiter. Its "
                               "calls: %s", mint, e, describe(VersionedTransaction.from_bytes(unsigned)))

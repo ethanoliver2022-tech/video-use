@@ -244,7 +244,9 @@ class Engine:
         self.own_wallet = str(kp.pubkey())
         sender = TxSender(self.cfg.speed, self.rpc, self.http,
                           lambda: self.cfg.trading.priority_fee_sol)  # follows setting changes
-        return LiveExecutor(self.cfg, kp, self.rpc, self.jupiter, self.http, sender)
+        ex = LiveExecutor(self.cfg, kp, self.rpc, self.jupiter, self.http, sender)
+        ex.notice = lambda text: self._spawn(self.notifier.send(text))
+        return ex
 
     def _load_copy_wallets(self) -> None:
         """Copy-mode wallets only while copy trading is on; alert-mode (tracked) wallets always."""

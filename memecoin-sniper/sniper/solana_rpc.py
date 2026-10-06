@@ -144,6 +144,24 @@ class SolanaRpc:
         raw, decimals = await self.get_token_balance_raw(owner, mint)
         return raw / 10 ** decimals if raw else 0.0
 
+    async def get_accounts_raw(self, addresses: list[str]) -> list[Optional[tuple[str, bytes]]]:
+        """[(owner program, data) or None] for each address, in one call."""
+        res = await self.call("getMultipleAccounts", [addresses, {"encoding": "base64",
+                                                                  "commitment": "confirmed"}])
+        try:
+            out = []
+            for value in res["value"]:
+                if not value:
+                    out.append(None)
+                    continue
+                out.append((str(value["owner"]),
+                            base64.b64decode(value["data"][0], validate=True)))
+            if len(out) != len(addresses):
+                raise ValueError(len(out))
+            return out
+        except (*PARSE_ERRORS, binascii.Error):
+            raise _malformed("getMultipleAccounts") from None
+
     async def get_account_bytes(self, address: str) -> Optional[bytes]:
         res = await self.call("getAccountInfo", [address, {"encoding": "base64",
                                                            "commitment": "confirmed"}])

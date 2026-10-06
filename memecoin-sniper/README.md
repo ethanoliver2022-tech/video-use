@@ -40,6 +40,7 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 🩺 **Health check** | `/health` (or 🩺 on the main menu) checks every service live: your RPC (with its recent failure rate), PumpPortal's feed and trade feed, each Jito region, Jupiter, GeckoTerminal and DexScreener, plus your wallet. Automatic alerts when one starts failing quietly (RPC refusing requests, PumpPortal disconnected or refusing the trade feed, Jito refusing bundles, Jupiter rate-limiting), and again when it's fixed. | |
 | 🧹 **Rent back** | Every buy opens a token account in your wallet (~0.002 SOL rent). After a full exit the bot closes the now-empty account, so the rent comes back and shows in that trade's PnL. `/reclaim` (or 💼 Wallet → 🧹) sweeps any empty accounts left from before. Only empty accounts are closed: Solana refuses to close one that still holds tokens. | |
 | ⌛ **Why it didn't land** | When a buy expires without landing, the bot replays it in a free, read-only simulation and tells you the likely reason (e.g. the price moved past your slippage). | |
+| ⚡ **Direct pump.fun trades** | pump.fun buys and sells are built by the bot itself from the chain's own state (no third-party transaction builder). The first one is test-run on the chain (free, nothing sent) before any is used; if pump.fun ever changes in a way the bot doesn't know, it says so in Telegram and trades go through PumpPortal / Jupiter instead. | |
 
 ### Where it beats the paid bots
 
