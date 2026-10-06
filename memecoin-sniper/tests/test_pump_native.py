@@ -17,10 +17,12 @@ CREATOR = Keypair().pubkey()
 FEE_RECIPIENT = Keypair().pubkey()
 
 
-def curve_bytes(v_tok=1_000_000_000_000_000, v_sol=30_000_000_000, complete=False, mayhem=False):
+def curve_bytes(v_tok=1_000_000_000_000_000, v_sol=30_000_000_000, complete=False, mayhem=False,
+                cashback=False, quote=bytes(32)):
     return (pn.CURVE_DISC + struct.pack("<QQQQQ?", v_tok, v_sol, 793_000_000_000_000, 0,
                                         1_000_000_000_000_000, complete)
-            + bytes(CREATOR) + bytes([1 if mayhem else 0]) + bytes(20))
+            + bytes(CREATOR) + bytes([1 if mayhem else 0, 1 if cashback else 0]) + quote
+            + bytes(20))
 
 
 def global_bytes():
@@ -106,7 +108,10 @@ async def test_direct_buy_has_pump_funs_exact_accounts_and_passes_the_guard():
         pn.SYSTEM, t22, Pubkey.find_program_address([b"creator-vault", bytes(CREATOR)], pn.PUMP)[0],
         pn.EVENT_AUTHORITY, pn.PUMP, pn.GLOBAL_VOLUME,
         Pubkey.find_program_address([b"user_volume_accumulator", bytes(user)], pn.PUMP)[0],
-        pn.FEE_CONFIG, pn.FEE_PROGRAM]
+        pn.FEE_CONFIG, pn.FEE_PROGRAM,
+        Pubkey.find_program_address([b"bonding-curve-v2", bytes(mint)], pn.PUMP)[0],
+        FEE_RECIPIENT]                  # the buyback fee recipient: read from the chain
+    assert len(accts) == 18
     check_transaction(tx, user, 0.04, max_fee_sol=0.002, side="buy",
                       max_curve_sol=0.03 * 1.2 * 1.05 + 0.01, mint=str(mint))
 
@@ -123,13 +128,17 @@ async def test_direct_sell_accounts_and_floor():
     expected = 30_000_000_000 * 1_000_000_000 // (1_000_000_000_000_000 + 1_000_000_000)
     assert floor == int(int(expected * (1 - pn.FEE_ESTIMATE)) * 0.7)
     assert accts[8] == Pubkey.find_program_address([b"creator-vault", bytes(CREATOR)], pn.PUMP)[0]
-    assert accts[9] == pn.TOKEN and len(accts) == 14
+    assert accts[9] == pn.TOKEN and len(accts) == 16
+    assert accts[14] == Pubkey.find_program_address([b"bonding-curve-v2", bytes(mint)], pn.PUMP)[0]
+    assert accts[15] == FEE_RECIPIENT and accts[1] == FEE_RECIPIENT
     check_transaction(tx, user, 0.01, max_fee_sol=0.002, side="sell")
 
 
 @pytest.mark.parametrize("curve,owner,why", [
     (curve_bytes(complete=True), str(pn.TOKEN), "graduated"),
     (curve_bytes(mayhem=True), str(pn.TOKEN), "mayhem"),
+    (curve_bytes(cashback=True), str(pn.TOKEN), "cashback"),
+    (curve_bytes(quote=bytes(Keypair().pubkey())), str(pn.TOKEN), "another coin"),
     (b"\x00" * 120, str(pn.TOKEN), "not a pump.fun"),
     (curve_bytes(), "SomethingElse111111111111111111111111111111", "token program"),
     (b"", str(pn.TOKEN), "no bonding curve"),
@@ -202,3 +211,12 @@ async def test_a_slippage_failure_in_the_check_doesnt_turn_it_off():
     rpc.sim = None
     assert await ex._native("buy", lambda: ex._native_buy(_pump_cand(), 0.01)) is not None
     assert ex.native_ok is True
+
+
+async def test_sol_quoted_curves_old_and_new_layouts_trade_directly():
+    from sniper.models import SOL_MINT
+    for data in (curve_bytes(quote=bytes(Pubkey.from_string(SOL_MINT))), curve_bytes(),
+                 curve_bytes()[:pn.CURVE_CREATOR_AT + 32]):   # before newer fields existed
+        raw = await pn.PumpNative(ChainRpc(curve=data)).buy_tx(
+            Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
+        assert raw

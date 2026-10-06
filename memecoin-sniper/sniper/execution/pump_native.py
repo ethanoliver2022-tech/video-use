@@ -17,6 +17,8 @@ Account order follows pump.fun's published IDL:
   sell: global, fee_recipient, mint, bonding_curve, associated_bonding_curve, associated_user,
         user, system_program, creator_vault, token_program, event_authority, program,
         fee_config, fee_program
+then, for both (pump.fun's fee update): bonding_curve_v2 ["bonding-curve-v2", mint] and a
+buyback fee recipient: pump.fun's fee recipient, read from its Global account on the chain.
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
+from ..models import SOL_MINT
 from ..pump_curve import TOKEN_DECIMALS
 
 P = Pubkey.from_string
@@ -49,6 +52,8 @@ GLOBAL_DISC = bytes.fromhex("a7e8e8b1c86c727f")
 FEE_RECIPIENT_AT = 8 + 1 + 32              # discriminator, initialized, authority
 CURVE_CREATOR_AT = 8 + 5 * 8 + 1           # discriminator, 5 x u64, complete
 CURVE_MAYHEM_AT = CURVE_CREATOR_AT + 32    # is_mayhem_mode (different fee recipients)
+CURVE_CASHBACK_AT = CURVE_MAYHEM_AT + 1    # is_cashback_coin (sells take another account)
+CURVE_QUOTE_AT = CURVE_CASHBACK_AT + 1     # quote_mint: SOL, or another coin for newer ones
 FEE_ESTIMATE = 0.0125                      # protocol + creator fee, for the token estimate
 COMPUTE_UNITS = 150_000
 
@@ -88,6 +93,12 @@ def parse(curve_data: bytes, mint_owner: str) -> Curve:
         raise NotNative("graduated off the curve")
     if len(curve_data) > CURVE_MAYHEM_AT and curve_data[CURVE_MAYHEM_AT] == 1:
         raise NotNative("mayhem-mode token (other fee rules)")
+    if len(curve_data) > CURVE_CASHBACK_AT and curve_data[CURVE_CASHBACK_AT] == 1:
+        raise NotNative("cashback token (other sell accounts)")
+    if len(curve_data) >= CURVE_QUOTE_AT + 32:
+        quote = curve_data[CURVE_QUOTE_AT:CURVE_QUOTE_AT + 32]
+        if any(quote) and quote != bytes(P(SOL_MINT)):
+            raise NotNative("traded against another coin than SOL")
     if v_tok <= 0 or v_sol <= 0:
         raise NotNative("empty curve")
     program = {str(TOKEN): TOKEN, str(TOKEN_2022): TOKEN_2022}.get(mint_owner)
@@ -113,6 +124,14 @@ def _meta(key: Pubkey, writable: bool = False, signer: bool = False) -> AccountM
     return AccountMeta(key, signer, writable)
 
 
+def _v2_tail(mint: Pubkey, fee_recipient: Pubkey) -> list[AccountMeta]:
+    """What pump.fun now wants after the IDL's accounts (pump-fun/pump-public-docs,
+    BREAKING_FEE_RECIPIENT.md): the bonding-curve-v2 account, then one of pump.fun's fee
+    recipients as the buyback fee recipient. That one is pump.fun's own fee recipient as read
+    from its Global account on the chain: no address here comes from anywhere else."""
+    return [_meta(_pda(b"bonding-curve-v2", bytes(mint)), True), _meta(fee_recipient, True)]
+
+
 def buy_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pubkey,
                     amount: int, max_sol_cost: int) -> Instruction:
     bc = _pda(b"bonding-curve", bytes(mint))
@@ -122,7 +141,7 @@ def buy_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pub
         _meta(user, True, True), _meta(SYSTEM), _meta(curve.token_program),
         _meta(_pda(b"creator-vault", bytes(curve.creator)), True), _meta(EVENT_AUTHORITY), _meta(PUMP),
         _meta(GLOBAL_VOLUME, True), _meta(_pda(b"user_volume_accumulator", bytes(user)), True),
-        _meta(FEE_CONFIG), _meta(FEE_PROGRAM),
+        _meta(FEE_CONFIG), _meta(FEE_PROGRAM), *_v2_tail(mint, fee_recipient),
     ]
     return Instruction(PUMP, BUY + struct.pack("<QQ", amount, max_sol_cost) + b"\x00", accts)
 
@@ -136,6 +155,7 @@ def sell_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pu
         _meta(user, True, True), _meta(SYSTEM),
         _meta(_pda(b"creator-vault", bytes(curve.creator)), True), _meta(curve.token_program),
         _meta(EVENT_AUTHORITY), _meta(PUMP), _meta(FEE_CONFIG), _meta(FEE_PROGRAM),
+        *_v2_tail(mint, fee_recipient),
     ]
     return Instruction(PUMP, SELL + struct.pack("<QQ", amount, min_sol_output), accts)
 
