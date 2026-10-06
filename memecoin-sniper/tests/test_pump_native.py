@@ -15,6 +15,7 @@ from tests.test_hardening import live_executor
 
 CREATOR = Keypair().pubkey()
 FEE_RECIPIENT = Keypair().pubkey()
+BUYBACK = [Keypair().pubkey() for _ in range(8)]
 
 
 def curve_bytes(v_tok=1_000_000_000_000_000, v_sol=30_000_000_000, complete=False, mayhem=False,
@@ -25,14 +26,19 @@ def curve_bytes(v_tok=1_000_000_000_000_000, v_sol=30_000_000_000, complete=Fals
             + bytes(20))
 
 
-def global_bytes():
-    return pn.GLOBAL_DISC + b"\x01" + bytes(32) + bytes(FEE_RECIPIENT) + bytes(200)
+def global_bytes(buyback=None):
+    data = bytearray(pn.GLOBAL_DISC + b"\x01" + bytes(32) + bytes(FEE_RECIPIENT) + bytes(1200))
+    for i, key in enumerate(BUYBACK if buyback is None else buyback):
+        data[pn.BUYBACK_AT + 32 * i:pn.BUYBACK_AT + 32 * (i + 1)] = bytes(key)
+    return bytes(data)
 
 
 class ChainRpc:
     """Just enough chain for building and checking direct trades."""
 
-    def __init__(self, curve=None, token_program=str(pn.TOKEN_2022), sim=None):
+    def __init__(self, curve=None, token_program=str(pn.TOKEN_2022), sim=None, glob=None):
+        self.glob = glob if glob is not None else global_bytes()
+        self.global_reads = 0
         self.curve = curve if curve is not None else curve_bytes()
         self.token_program, self.sim = token_program, sim
         self.simulated, self.balance_raw, self.confirm_result, self.tx = [], 5_000_000, True, None
@@ -41,7 +47,8 @@ class ChainRpc:
         out = []
         for a in addresses:
             if a == str(pn.GLOBAL):
-                out.append((str(pn.PUMP), global_bytes()))
+                self.global_reads += 1
+                out.append((str(pn.PUMP), self.glob))
             elif len(out) == 1:  # [bonding curve, mint, (global)]
                 out.append((self.token_program, bytes(82)))
             else:
@@ -110,8 +117,9 @@ async def test_direct_buy_has_pump_funs_exact_accounts_and_passes_the_guard():
         Pubkey.find_program_address([b"user_volume_accumulator", bytes(user)], pn.PUMP)[0],
         pn.FEE_CONFIG, pn.FEE_PROGRAM,
         Pubkey.find_program_address([b"bonding-curve-v2", bytes(mint)], pn.PUMP)[0],
-        FEE_RECIPIENT]                  # the buyback fee recipient: read from the chain
+        accts[17]]
     assert len(accts) == 18
+    assert accts[17] in BUYBACK         # a buyback fee recipient from pump.fun's own settings
     check_transaction(tx, user, 0.04, max_fee_sol=0.002, side="buy",
                       max_curve_sol=0.03 * 1.2 * 1.05 + 0.01, mint=str(mint))
 
@@ -130,7 +138,7 @@ async def test_direct_sell_accounts_and_floor():
     assert accts[8] == Pubkey.find_program_address([b"creator-vault", bytes(CREATOR)], pn.PUMP)[0]
     assert accts[9] == pn.TOKEN and len(accts) == 16
     assert accts[14] == Pubkey.find_program_address([b"bonding-curve-v2", bytes(mint)], pn.PUMP)[0]
-    assert accts[15] == FEE_RECIPIENT and accts[1] == FEE_RECIPIENT
+    assert accts[15] in BUYBACK and accts[1] == FEE_RECIPIENT
     check_transaction(tx, user, 0.01, max_fee_sol=0.002, side="sell")
 
 
@@ -220,3 +228,32 @@ async def test_sol_quoted_curves_old_and_new_layouts_trade_directly():
         raw = await pn.PumpNative(ChainRpc(curve=data)).buy_tx(
             Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
         assert raw
+
+
+def test_buyback_recipients_are_read_at_the_idl_offset():
+    fees = pn.parse_global(global_bytes())
+    assert fees.recipient == FEE_RECIPIENT and fees.buyback == BUYBACK
+    assert pn.BUYBACK_AT == 741
+
+
+@pytest.mark.parametrize("glob", [
+    global_bytes(buyback=[BUYBACK[0]] * 8),                  # not distinct
+    global_bytes(buyback=BUYBACK[:7] + [Pubkey.default()]),  # one unset
+    global_bytes()[:900],                                    # too short (older layout)
+    b"\x00" * 8 + global_bytes()[8:],                       # not pump.fun's Global
+])
+async def test_unexpected_settings_never_build_a_trade(glob):
+    rpc = ChainRpc(glob=glob)
+    with pytest.raises(pn.NotNative, match="settings"):
+        await pn.PumpNative(rpc).buy_tx(Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
+
+
+async def test_settings_are_cached_then_refreshed(monkeypatch):
+    rpc = ChainRpc()
+    native = pn.PumpNative(rpc)
+    for _ in range(3):
+        await native.buy_tx(Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
+    assert rpc.global_reads == 1
+    monkeypatch.setattr(pn, "SETTINGS_TTL", -1)
+    await native.buy_tx(Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
+    assert rpc.global_reads == 2

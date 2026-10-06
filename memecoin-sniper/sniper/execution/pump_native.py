@@ -18,12 +18,14 @@ Account order follows pump.fun's published IDL:
         user, system_program, creator_vault, token_program, event_authority, program,
         fee_config, fee_program
 then, for both (pump.fun's fee update): bonding_curve_v2 ["bonding-curve-v2", mint] and a
-buyback fee recipient: pump.fun's fee recipient, read from its Global account on the chain.
+buyback fee recipient: one of Global.buyback_fee_recipients, read from the chain.
 """
 from __future__ import annotations
 
 import asyncio
+import random
 import struct
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,6 +52,15 @@ SELL = bytes.fromhex("33e685a4017f83ad")   # sell(amount, min_sol_output)
 CURVE_DISC = bytes.fromhex("17b7f83760d8ac60")
 GLOBAL_DISC = bytes.fromhex("a7e8e8b1c86c727f")
 FEE_RECIPIENT_AT = 8 + 1 + 32              # discriminator, initialized, authority
+# Global's buyback_fee_recipients ([pubkey; 8]), after (pump.json IDL, in order): initialized
+# bool, authority, fee_recipient, 5 x u64, withdraw_authority, enable_migrate bool,
+# pool_migration_fee u64, creator_fee_basis_points u64, fee_recipients [pubkey; 7],
+# set_creator_authority, admin_set_creator_authority, create_v2_enabled bool, whitelist_pda,
+# reserved_fee_recipient, mayhem_mode_enabled bool, reserved_fee_recipients [pubkey; 7],
+# is_cashback_enabled bool
+BUYBACK_AT = 8 + 1 + 32 + 32 + 5 * 8 + 32 + 1 + 8 + 8 + 7 * 32 + 32 + 32 + 1 + 32 + 32 + 1 + 7 * 32 + 1
+BUYBACK_COUNT = 8
+SETTINGS_TTL = 600                         # re-read pump.fun's settings this often
 CURVE_CREATOR_AT = 8 + 5 * 8 + 1           # discriminator, 5 x u64, complete
 CURVE_MAYHEM_AT = CURVE_CREATOR_AT + 32    # is_mayhem_mode (different fee recipients)
 CURVE_CASHBACK_AT = CURVE_MAYHEM_AT + 1    # is_cashback_coin (sells take another account)
@@ -124,16 +135,35 @@ def _meta(key: Pubkey, writable: bool = False, signer: bool = False) -> AccountM
     return AccountMeta(key, signer, writable)
 
 
-def _v2_tail(mint: Pubkey, fee_recipient: Pubkey) -> list[AccountMeta]:
+def _v2_tail(mint: Pubkey, buyback: Pubkey) -> list[AccountMeta]:
     """What pump.fun now wants after the IDL's accounts (pump-fun/pump-public-docs,
-    BREAKING_FEE_RECIPIENT.md): the bonding-curve-v2 account, then one of pump.fun's fee
-    recipients as the buyback fee recipient. That one is pump.fun's own fee recipient as read
-    from its Global account on the chain: no address here comes from anywhere else."""
-    return [_meta(_pda(b"bonding-curve-v2", bytes(mint)), True), _meta(fee_recipient, True)]
+    BREAKING_FEE_RECIPIENT.md): the bonding-curve-v2 account, then a buyback fee recipient:
+    one of the buyback_fee_recipients in pump.fun's own Global account, read from the chain.
+    No address here comes from anywhere else."""
+    return [_meta(_pda(b"bonding-curve-v2", bytes(mint)), True), _meta(buyback, True)]
+
+
+@dataclass
+class Fees:
+    recipient: Pubkey            # Global.fee_recipient
+    buyback: list[Pubkey]        # Global.buyback_fee_recipients
+
+
+def parse_global(data: bytes) -> Fees:
+    if data[:8] != GLOBAL_DISC or len(data) < BUYBACK_AT + BUYBACK_COUNT * 32:
+        raise NotNative("couldn't read pump.fun's settings")
+    recipient = Pubkey.from_bytes(data[FEE_RECIPIENT_AT:FEE_RECIPIENT_AT + 32])
+    buyback = [Pubkey.from_bytes(data[BUYBACK_AT + 32 * i:BUYBACK_AT + 32 * (i + 1)])
+               for i in range(BUYBACK_COUNT)]
+    # pump.fun itself requires all 8 set and distinct: anything else means the layout moved
+    if not any(bytes(recipient)) or any(not any(bytes(b)) for b in buyback) \
+            or len(set(map(str, buyback))) != BUYBACK_COUNT:
+        raise NotNative("pump.fun's settings look different than expected")
+    return Fees(recipient, buyback)
 
 
 def buy_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pubkey,
-                    amount: int, max_sol_cost: int) -> Instruction:
+                    amount: int, max_sol_cost: int, buyback: Pubkey) -> Instruction:
     bc = _pda(b"bonding-curve", bytes(mint))
     accts = [
         _meta(GLOBAL), _meta(fee_recipient, True), _meta(mint), _meta(bc, True),
@@ -141,13 +171,13 @@ def buy_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pub
         _meta(user, True, True), _meta(SYSTEM), _meta(curve.token_program),
         _meta(_pda(b"creator-vault", bytes(curve.creator)), True), _meta(EVENT_AUTHORITY), _meta(PUMP),
         _meta(GLOBAL_VOLUME, True), _meta(_pda(b"user_volume_accumulator", bytes(user)), True),
-        _meta(FEE_CONFIG), _meta(FEE_PROGRAM), *_v2_tail(mint, fee_recipient),
+        _meta(FEE_CONFIG), _meta(FEE_PROGRAM), *_v2_tail(mint, buyback),
     ]
     return Instruction(PUMP, BUY + struct.pack("<QQ", amount, max_sol_cost) + b"\x00", accts)
 
 
 def sell_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pubkey,
-                     amount: int, min_sol_output: int) -> Instruction:
+                     amount: int, min_sol_output: int, buyback: Pubkey) -> Instruction:
     bc = _pda(b"bonding-curve", bytes(mint))
     accts = [
         _meta(GLOBAL), _meta(fee_recipient, True), _meta(mint), _meta(bc, True),
@@ -155,7 +185,7 @@ def sell_instruction(user: Pubkey, mint: Pubkey, curve: Curve, fee_recipient: Pu
         _meta(user, True, True), _meta(SYSTEM),
         _meta(_pda(b"creator-vault", bytes(curve.creator)), True), _meta(curve.token_program),
         _meta(EVENT_AUTHORITY), _meta(PUMP), _meta(FEE_CONFIG), _meta(FEE_PROGRAM),
-        *_v2_tail(mint, fee_recipient),
+        *_v2_tail(mint, buyback),
     ]
     return Instruction(PUMP, SELL + struct.pack("<QQ", amount, min_sol_output), accts)
 
@@ -179,29 +209,31 @@ def unsigned(payer: Pubkey, ixs: list[Instruction], blockhash) -> bytes:
 class PumpNative:
     def __init__(self, rpc):
         self.rpc = rpc
-        self._fee_recipient: Optional[Pubkey] = None
+        self._fees: Optional[Fees] = None
+        self._fees_at = 0.0
 
-    async def _state(self, mint: Pubkey) -> tuple[Curve, Pubkey, object]:
+    async def _state(self, mint: Pubkey) -> tuple[Curve, Fees, object]:
         want = [str(_pda(b"bonding-curve", bytes(mint))), str(mint)]
-        if self._fee_recipient is None:
+        stale = self._fees is None or time.monotonic() - self._fees_at > SETTINGS_TTL
+        if stale:
             want.append(str(GLOBAL))
         accounts, blockhash = await asyncio.gather(self.rpc.get_accounts_raw(want),
                                                    self.rpc.get_latest_blockhash())
         if accounts[0] is None or accounts[1] is None:
             raise NotNative("no bonding curve for this token")
-        if self._fee_recipient is None:
+        if stale:
             glob = accounts[2]
-            if glob is None or len(glob[1]) < FEE_RECIPIENT_AT + 32 or glob[1][:8] != GLOBAL_DISC:
+            if glob is None or glob[0] != str(PUMP):
                 raise NotNative("couldn't read pump.fun's settings")
-            self._fee_recipient = Pubkey.from_bytes(glob[1][FEE_RECIPIENT_AT:FEE_RECIPIENT_AT + 32])
+            self._fees, self._fees_at = parse_global(glob[1]), time.monotonic()
         if accounts[0][0] != str(PUMP):
             raise NotNative("bonding curve not owned by pump.fun")
-        return parse(accounts[0][1], accounts[1][0]), self._fee_recipient, blockhash
+        return parse(accounts[0][1], accounts[1][0]), self._fees, blockhash
 
     async def buy_tx(self, user: Pubkey, mint: str, sol: float, slippage_pct: float,
                      priority_fee_sol: float) -> bytes:
         m = P(mint)
-        curve, fee_recipient, blockhash = await self._state(m)
+        curve, fees, blockhash = await self._state(m)
         lamports = int(sol * 1e9)
         amount = tokens_for(curve, lamports)
         if amount <= 0:
@@ -209,16 +241,18 @@ class PumpNative:
         max_cost = int(lamports * (1 + max(0.0, slippage_pct) / 100))
         return unsigned(user, [*budget(priority_fee_sol),
                                create_ata_idempotent(user, user, m, curve.token_program),
-                               buy_instruction(user, m, curve, fee_recipient, amount, max_cost)],
+                               buy_instruction(user, m, curve, fees.recipient, amount, max_cost,
+                                               random.choice(fees.buyback))],
                         blockhash)
 
     async def sell_tx(self, user: Pubkey, mint: str, raw_tokens: int, slippage_pct: float,
                       priority_fee_sol: float) -> bytes:
         m = P(mint)
-        curve, fee_recipient, blockhash = await self._state(m)
+        curve, fees, blockhash = await self._state(m)
         floor = int(sol_for(curve, raw_tokens) * (1 - min(100.0, max(0.0, slippage_pct)) / 100))
         return unsigned(user, [*budget(priority_fee_sol),
-                               sell_instruction(user, m, curve, fee_recipient, raw_tokens, max(0, floor))],
+                               sell_instruction(user, m, curve, fees.recipient, raw_tokens,
+                                                max(0, floor), random.choice(fees.buyback))],
                         blockhash)
 
 
