@@ -69,6 +69,8 @@ PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fil
 PAPER_BUY_DELAY = 1.0
 PAPER_SELL_DELAY = 0.8
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
+ROUTE_WAIT_SECONDS = 30  # a just-graduated coin may wait this long for Jupiter to route it
+ROUTE_POLL_SECONDS = 4
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
 DEV_CHECK_STREAM_SECONDS = 6  # dev balance check per position while the trade feed is live
 FEED_RETRY_SECONDS = 300      # re-ask PumpPortal for a refused trade feed this often
@@ -412,7 +414,28 @@ class Engine:
             if not pos or pos.closed:  # skipped/failed after watching: stop the (billed) feed
                 await self.stream.unwatch_token(c.mint)
             return result
+        if c.source == "pumpfun-migration" and not await self._route_ready(c):
+            return "❌ rejected: no trading route yet after graduating"
         return await self.try_buy(c, notes)
+
+    async def _route_ready(self, c: Candidate) -> bool:
+        """A coin that just graduated off pump.fun trades in a new PumpSwap pool, and Jupiter
+        (which prices and buys it) needs a few seconds to a minute to pick that pool up.
+        Wait for a quote rather than failing the buy straight away."""
+        from .execution.executors import JupiterBusy
+        deadline = time.monotonic() + ROUTE_WAIT_SECONDS
+        while True:
+            try:
+                await self.jupiter.quote(SOL_MINT, c.mint, self.cfg.trading.buy_amount_sol,
+                                         self.cfg.trading.slippage_pct, urgent=False)
+                return True
+            except JupiterBusy:
+                pass  # rate budget in use by trades: try again shortly
+            except Exception as e:
+                log.debug("no route for %s yet: %s", c.mint, e)
+            if time.monotonic() + ROUTE_POLL_SECONDS > deadline:
+                return False
+            await asyncio.sleep(ROUTE_POLL_SECONDS)
 
     def _alert_allowed(self, q: Optional[deque] = None, per_hour: int = ALERTS_PER_HOUR) -> bool:
         q = self._alerts if q is None else q
