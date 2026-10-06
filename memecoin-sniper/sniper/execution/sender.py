@@ -150,7 +150,10 @@ class TxSender:
                 return_exceptions=True)
             ok = [r for r in results if not isinstance(r, Exception)]
         if not ok:
-            raise RuntimeError(f"every submission path failed: {results[0] if results else '-'}")
+            # every distinct reason, the RPCs' first (they say why: e.g. too large, no funds)
+            why = list(dict.fromkeys(str(e).split("\n")[0][:160] for e in reversed(results)
+                                     if isinstance(e, Exception)))
+            raise RuntimeError("every submission path failed: " + (" | ".join(why[:3]) or "-"))
         for r in results:
             if isinstance(r, Exception):
                 log.debug("one submission path failed: %s", r)

@@ -512,3 +512,26 @@ def test_describe_shows_the_shape_without_amounts():
     parts = text.split()
     assert [p.split(":")[0] for p in parts] == ["Comp", "Comp", "6EF8", "FAdo"]
     assert parts[2] == "6EF8:66063d1201daebea/7" and parts[3] == "FAdo:07/2"
+
+
+async def test_when_every_path_refuses_each_reason_is_shown_rpc_first():
+    from sniper.config import SpeedConfig
+    from sniper.execution.sender import TxSender
+    from tests.test_speed import _signed
+
+    class Rpc:
+        url = "http://rpc"
+
+        async def send_raw_transaction(self, raw):
+            raise RuntimeError("sendTransaction: Transaction too large: 1300 > 1232")
+
+    class Http:
+        async def post(self, *a, **k):
+            raise RuntimeError("Client error '400 Bad Request' for url 'https://x'\nFor more information")
+    cfg = SpeedConfig(jito_block_engines=["https://x"], jito_also_send_rpc=True)
+    s = TxSender(cfg, Rpc(), Http(), 0.0001)
+    tx, kp = _signed()
+    with pytest.raises(RuntimeError) as e:
+        await s.send(tx, kp)
+    text = str(e.value)
+    assert text.index("too large") < text.index("400 Bad Request") and "more information" not in text
