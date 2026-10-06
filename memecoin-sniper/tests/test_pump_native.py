@@ -171,15 +171,21 @@ async def test_first_direct_trade_is_checked_then_used_without_pumpportal():
     ex._pumpportal_tx = wrapped
     await ex.buy(_pump_cand(), 0.01, None)
     assert ex.native_ok is True and len(rpc.simulated) == 1      # checked once
-    assert "passed its check" in notices[0]
+    assert "buys passed their check" in notices[0]
     assert str(pn.PUMP)[:4] in [str(p)[:4] for p, _, _ in _ixs(signed[-1])[1]]
 
     async def never(*a, **k):
         raise AssertionError("PumpPortal isn't asked once direct trading is checked")
     ex._pumpportal_tx = never
     await ex.buy(_pump_cand(), 0.01, None)
-    await ex.sell(_pump_cand().mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
     assert len(rpc.simulated) == 1                               # no more test runs: fast
+    mint = _pump_cand().mint
+    await ex.sell(mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
+    assert ex.native_state["sell"] is True and len(rpc.simulated) == 2  # sells: their own check
+    assert "sells passed their check" in notices[1]
+    assert _ixs(signed[-1])[1][-1][1][:8] == pn.SELL
+    await ex.sell(mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
+    assert len(rpc.simulated) == 2 and _ixs(signed[-1])[1][-1][1][:8] == pn.SELL
 
 
 async def test_a_failed_check_turns_direct_trading_off_and_says_so():
@@ -206,7 +212,7 @@ async def test_a_failed_check_turns_direct_trading_off_and_says_so():
     ex._pumpportal_tx = wrapped
     await ex.buy(_pump_cand(), 0.01, None)
     assert ex.native_ok is False and jup_calls == [1]           # this trade: Jupiter
-    assert "failed its check" in notices[0] and "ConstraintSeeds" in notices[0]
+    assert "buys failed their check" in notices[0] and "ConstraintSeeds" in notices[0]
     await ex.buy(_pump_cand(), 0.01, None)
     assert len(rpc.simulated) == 1                               # never retried this session
 
@@ -257,3 +263,24 @@ async def test_settings_are_cached_then_refreshed(monkeypatch):
     monkeypatch.setattr(pn, "SETTINGS_TTL", -1)
     await native.buy_tx(Keypair().pubkey(), str(Keypair().pubkey()), 0.01, 20, 0)
     assert rpc.global_reads == 2
+
+
+async def test_a_failed_sell_check_leaves_direct_buys_on():
+    rpc = ChainRpc()
+    ex, notices, signed = _executor(rpc)
+    ex.native_state["buy"] = True
+    rpc.sim = {"err": "x", "logs": ["Error Code: AccountNotEnoughKeys."]}
+
+    class Jup:
+        async def quote(self, *a, **k):
+            return {}
+
+        async def swap_tx(self, *a):
+            from tests.test_rent import _tx_calling
+            from sniper.execution.txguard import COMPUTE_BUDGET
+            return _tx_calling(ex, COMPUTE_BUDGET)
+    ex.jupiter = Jup()
+    await ex.sell(_pump_cand().mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
+    assert ex.native_state == {"buy": True, "sell": False}
+    assert "sells failed their check" in notices[0]
+    assert _ixs(signed[-1])[1][-1][0] != pn.PUMP                 # this sell: Jupiter

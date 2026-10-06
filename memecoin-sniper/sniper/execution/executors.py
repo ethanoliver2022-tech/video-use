@@ -311,10 +311,16 @@ class LiveExecutor:
         self.pubkey = str(keypair.pubkey())
         self.sender = sender or TxSender(cfg.speed, rpc, http, lambda: cfg.trading.priority_fee_sol)
         self.native = PumpNative(rpc)
-        # direct pump.fun trades: None = not checked yet, True = checked and used,
-        # False = the check failed this session (pump.fun changed): other routes are used
-        self.native_ok: Optional[bool] = None
+        # direct pump.fun trades, per side: None = not checked yet, True = checked and used,
+        # False = the check failed this session (pump.fun changed): other routes are used.
+        # Buys and sells are checked separately: each has its own accounts.
+        self.native_state: dict[str, Optional[bool]] = {"buy": None, "sell": None}
         self.notice = None  # set by the engine: a one-line Telegram message
+
+    @property
+    def native_ok(self) -> Optional[bool]:
+        """Direct pump.fun buys: checked and on (True), off (False) or not checked yet."""
+        return self.native_state["buy"]
 
     def _sign(self, unsigned: bytes) -> VersionedTransaction:
         tx = VersionedTransaction.from_bytes(unsigned)
@@ -598,7 +604,7 @@ class LiveExecutor:
     async def _native(self, side: str, build) -> Optional[bytes]:
         """A pump.fun trade built directly (see pump_native), or None to use another route.
         Before the first one is ever used it's test-run on the chain (free, nothing sent)."""
-        if self.native_ok is False:
+        if self.native_state[side] is False:
             return None
         try:
             unsigned = await build()
@@ -608,7 +614,7 @@ class LiveExecutor:
         except Exception as e:
             log.warning("direct pump.fun %s couldn't be built: %s", side, e)
             return None
-        if self.native_ok is None and not await self._check_native(unsigned, side):
+        if self.native_state[side] is None and not await self._check_native(unsigned, side):
             return None
         return unsigned
 
@@ -623,21 +629,21 @@ class LiveExecutor:
             return False
         err = res.get("err")
         if not err:
-            self.native_ok = True
-            log.info("direct pump.fun trading checked: on")
-            self._notify("✅ Direct pump.fun trading passed its check: buys and sells now go "
-                         "straight to pump.fun (no PumpPortal transactions).")
+            self.native_state[side] = True
+            log.info("direct pump.fun %ss checked: on", side)
+            self._notify(f"✅ Direct pump.fun {side}s passed their check: they now go straight "
+                         "to pump.fun (no PumpPortal transactions).")
             return True
         why = explain_failure(err, res.get("logs"))
         if why.startswith(("the price moved", "the token graduated", "not enough SOL")):
             log.info("direct pump.fun check inconclusive (%s); trying again next trade", why)
             return False  # the trade itself, not how it's built: check again next time
-        self.native_ok = False
+        self.native_state[side] = False
         logs = [x for x in res.get("logs") or [] if isinstance(x, str)][-6:]
         log.error("direct pump.fun %s failed its check: %s | %s", side, err, " | ".join(logs))
-        self._notify(f"⚠️ Direct pump.fun trading failed its check ({why}). Trades use "
-                     "Jupiter instead until the bot restarts. Send this to whoever maintains "
-                     "the bot.")
+        self._notify(f"⚠️ Direct pump.fun {side}s failed their check ({why}). {side.title()}s "
+                     "use Jupiter instead until the bot restarts. Send this to whoever "
+                     "maintains the bot.")
         return False
 
     def _notify(self, text: str) -> None:
@@ -752,7 +758,7 @@ class LiveExecutor:
         # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
         # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
         early = None
-        if pump and sell_all and not self.native_ok:
+        if pump and sell_all and not self.native_state["sell"]:
             early = asyncio.ensure_future(self._pumpportal_tx("sell", mint, "100%", in_sol=False,
                                                               slippage_pct=slippage))
         try:
@@ -774,7 +780,7 @@ class LiveExecutor:
         async def native_sell() -> bytes:
             return await self.native.sell_tx(self.kp.pubkey(), mint, sell_raw, slippage,
                                              await self.sender.priority_fee())
-        if pump and self.native_ok:
+        if pump and self.native_state["sell"]:
             unsigned = await self._native("sell", native_sell)
         if early is not None:  # (only built for a full exit, which stays a full exit)
             try:
@@ -802,6 +808,8 @@ class LiveExecutor:
                     log.error("refused PumpPortal's sell for %s (%s); using Jupiter. Its "
                               "calls: %s", mint, e, describe(VersionedTransaction.from_bytes(unsigned)))
                 unsigned = clean
+        if pump and unsigned is None and self.native_state["sell"] is None:
+            unsigned = await self._native("sell", native_sell)  # PumpPortal couldn't build it
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
