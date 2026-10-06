@@ -31,7 +31,7 @@ from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
 from ..solana_rpc import SolanaRpc, TxFailed, balance_deltas
 from .sender import TxSender
-from .txguard import UnsafeTransaction, check_transaction, strip_untrusted
+from .txguard import UnsafeTransaction, check_transaction, describe, strip_untrusted
 
 log = logging.getLogger(__name__)
 
@@ -607,11 +607,11 @@ class LiveExecutor:
             refused = e
         clean = self._without_untrusted(built, self._buy_cap(sol), "buy", sol, cand.mint)
         if clean is not None:
-            log.info("removed an untrusted program from PumpPortal's buy for %s (%s)",
-                     cand.mint, refused)
+            log.info("removed an untrusted program from PumpPortal's buy for %s (%s). Its "
+                     "calls: %s", cand.mint, refused, describe(built))
             return clean
-        log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter", cand.mint,
-                    refused)
+        log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter. Its "
+                    "calls: %s", cand.mint, refused, describe(built))
         try:
             q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
             return await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
@@ -717,7 +717,8 @@ class LiveExecutor:
                     log.info("removed an untrusted program from PumpPortal's sell for %s (%s)",
                              mint, e)
                 else:
-                    log.error("refused PumpPortal's sell for %s (%s); using Jupiter", mint, e)
+                    log.error("refused PumpPortal's sell for %s (%s); using Jupiter. Its "
+                              "calls: %s", mint, e, describe(VersionedTransaction.from_bytes(unsigned)))
                 unsigned = clean
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)

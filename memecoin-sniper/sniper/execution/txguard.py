@@ -101,6 +101,17 @@ def _owner_atas(owner: str, mint: str) -> frozenset:
                                                  ATA_PROGRAM)[0] for p in (TOKEN, TOKEN_2022))
 
 
+def describe(tx: VersionedTransaction) -> str:
+    """The transaction's shape for the logs: each top-level call as program:first-8-bytes
+    (no amounts or accounts), e.g. 'Comp:02 6EF8:66063d12 FAdo:1a2b3c4d'."""
+    try:
+        keys = list(tx.message.account_keys)
+        return " ".join(f"{str(keys[ix.program_id_index])[:4]}:{bytes(ix.data)[:8].hex()}"
+                        f"/{len(ix.accounts)}" for ix in tx.message.instructions)
+    except Exception as e:
+        return f"unreadable ({type(e).__name__})"
+
+
 def strip_untrusted(tx: VersionedTransaction, extra_programs: frozenset[str] = frozenset(),
                     side: str = "buy") -> Optional[VersionedTransaction]:
     """`tx` (unsigned) with its calls to programs this bot doesn't trust taken out, when what

@@ -503,3 +503,12 @@ async def test_dropped_bundle_advice_matches_the_settings():
     ex.cfg.speed.jito_also_send_rpc = True
     text = await ex._jito_verdict("S")
     assert "EXTRA_RPC_URLS" in text and "Turn on" not in text
+
+
+def test_describe_shows_the_shape_without_amounts():
+    from sniper.execution.txguard import describe
+    ex, _ = live_executor(load_config(None))
+    text = describe(VersionedTransaction.from_bytes(_pp_trade(ex, str(Keypair().pubkey()))))
+    parts = text.split()
+    assert [p.split(":")[0] for p in parts] == ["Comp", "Comp", "6EF8", "FAdo"]
+    assert parts[2] == "6EF8:66063d1201daebea/7" and parts[3] == "FAdo:07/2"
