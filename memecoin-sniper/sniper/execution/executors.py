@@ -31,7 +31,7 @@ from ..config import Config
 from ..models import SOL_MINT, Candidate, Fill
 from ..solana_rpc import SolanaRpc, TxFailed, balance_deltas
 from .sender import TxSender
-from .txguard import UnsafeTransaction, check_transaction
+from .txguard import UnsafeTransaction, check_transaction, strip_untrusted
 
 log = logging.getLogger(__name__)
 
@@ -571,10 +571,26 @@ class LiveExecutor:
             return None  # the price has moved on: build a fresh one
         return unsigned, pre
 
+    def _without_untrusted(self, built: VersionedTransaction, max_sol_out: float, side: str,
+                           swap_sol: float = 0.0, mint: Optional[str] = None) -> Optional[bytes]:
+        """PumpPortal's trade with its calls to untrusted programs removed, if what's left is
+        the plain pump.fun trade and passes the whole guard again; else None."""
+        stripped = strip_untrusted(built, frozenset(self.cfg.extra_allowed_programs), side)
+        if stripped is None:
+            return None
+        try:
+            self._guard(stripped, max_sol_out, side, swap_sol, mint)
+        except UnsafeTransaction as e:
+            log.warning("PumpPortal's %s for %s is unsafe even without the extra program: %s",
+                        side, mint, e)
+            return None
+        return bytes(stripped)
+
     async def _jupiter_if_refused(self, unsigned: bytes, cand: Candidate, sol: float) -> bytes:
-        """PumpPortal's buy, unless the guard refuses it (e.g. it calls a program this bot
-        doesn't trust): then the same buy is built through Jupiter instead, which the guard
-        checks again when it's sent. Nothing PumpPortal built is ever signed if refused."""
+        """PumpPortal's buy, unless the guard refuses it. If it only adds a call to a program
+        this bot doesn't trust, that call is removed and the plain pump.fun buy is used (it
+        passes the whole guard again). Otherwise the buy is built through Jupiter. Nothing
+        the guard refused is ever signed."""
         try:
             built = VersionedTransaction.from_bytes(unsigned)
         except Exception:
@@ -584,6 +600,11 @@ class LiveExecutor:
             return unsigned
         except UnsafeTransaction as e:
             refused = e
+        clean = self._without_untrusted(built, self._buy_cap(sol), "buy", sol, cand.mint)
+        if clean is not None:
+            log.info("removed an untrusted program from PumpPortal's buy for %s (%s)",
+                     cand.mint, refused)
+            return clean
         log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter", cand.mint,
                     refused)
         try:
@@ -685,8 +706,14 @@ class LiveExecutor:
             try:  # a refused PumpPortal tx must never strand an exit: use Jupiter instead
                 self._check_unsigned(unsigned, self._sell_cap(value_sol))
             except UnsafeTransaction as e:
-                log.error("refused PumpPortal's sell for %s (%s); using Jupiter", mint, e)
-                unsigned = None
+                clean = self._without_untrusted(VersionedTransaction.from_bytes(unsigned),
+                                                self._sell_cap(value_sol), "sell")
+                if clean is not None:
+                    log.info("removed an untrusted program from PumpPortal's sell for %s (%s)",
+                             mint, e)
+                else:
+                    log.error("refused PumpPortal's sell for %s (%s); using Jupiter", mint, e)
+                unsigned = clean
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())

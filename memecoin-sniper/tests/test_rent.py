@@ -395,3 +395,92 @@ async def test_a_refused_pumpportal_buy_is_bought_through_jupiter_instead():
     ex.jupiter = _Jup(tx=b"never")
     await ex.buy(c, 0.01, None)
     assert ex.jupiter.calls == 0 and signed == [clean]
+
+
+# ---- PumpPortal's trade with an extra untrusted call: the call is removed, the trade kept ----
+
+ARB = "FAdo9NCw1ssek6Z6yeWzWjhLVsr8uiCwcWNUnKgzTnHe"
+
+
+def _pp_trade(ex, mint, side="buy", with_arb=True, pump_ix=True):
+    import struct
+    from solders.hash import Hash
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.signature import Signature
+    from sniper.execution.txguard import (COMPUTE_BUDGET, PUMP_BUY, PUMP_SELL,
+                                          _owner_atas)
+    me = ex.kp.pubkey()
+    ata = sorted(_owner_atas(str(me), mint), key=str)[0]
+    ixs = [Instruction(Pubkey.from_string(COMPUTE_BUDGET), bytes([2]) + struct.pack("<I", 120_000), []),
+           Instruction(Pubkey.from_string(COMPUTE_BUDGET), bytes([3]) + struct.pack("<Q", 1000), [])]
+    data = (PUMP_BUY + struct.pack("<QQ", 10**12, 11_000_000) if side == "buy"
+            else PUMP_SELL + struct.pack("<QQ", 10**12, 0)) + b"\x00"
+    if pump_ix:
+        accts = [Keypair().pubkey() for _ in range(5)] + [ata, me]
+        ixs.append(Instruction(Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"), data,
+                               [AccountMeta(a, a == me, True) for a in accts]))
+    if with_arb:
+        ixs.append(Instruction(Pubkey.from_string(ARB), b"\x07",
+                               [AccountMeta(me, True, True), AccountMeta(Keypair().pubkey(), False, True)]))
+    msg = MessageV0.try_compile(me, ixs, [], Hash.new_unique())
+    return bytes(VersionedTransaction.populate(msg, [Signature.default()]))
+
+
+def _programs(raw):
+    t = VersionedTransaction.from_bytes(raw)
+    keys = t.message.account_keys
+    return [str(keys[i.program_id_index]) for i in t.message.instructions]
+
+
+async def test_the_untrusted_call_is_removed_and_the_plain_pump_buy_signed():
+    from sniper.models import Candidate
+    from sniper.execution.txguard import check_transaction
+    ex, rpc = live_executor(load_config(None))
+    mint = str(Keypair().pubkey())
+    signed = []
+    ex._sign = lambda unsigned: signed.append(unsigned) or unsigned
+
+    async def pp(*a, **k):
+        return _pp_trade(ex, mint)
+    ex._pumpportal_tx = pp
+    ex.jupiter = _Jup(fail=AssertionError("Jupiter isn't needed"))
+    rpc.balance_raw = 5_000_000
+    await ex.buy(Candidate(chain="solana", mint=mint, source="pumpfun", route="pump"), 0.01, None)
+    assert ex.jupiter.calls == 0 and len(signed) == 1
+    progs = _programs(signed[0])
+    assert ARB not in progs and "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" in progs
+    check_transaction(VersionedTransaction.from_bytes(signed[0]), ex.kp.pubkey(), 0.05, mint=mint,
+                      max_curve_sol=0.02)
+    # it really signs: the wallet's signature over the cleaned message verifies
+    real = VersionedTransaction(VersionedTransaction.from_bytes(signed[0]).message, [ex.kp])
+    assert real.verify_with_results() == [True]
+
+
+async def test_without_a_plain_pump_trade_left_nothing_is_stripped():
+    from sniper.execution.txguard import strip_untrusted
+    ex, _ = live_executor(load_config(None))
+    mint = str(Keypair().pubkey())
+    only_arb = VersionedTransaction.from_bytes(_pp_trade(ex, mint, pump_ix=False))
+    assert strip_untrusted(only_arb) is None           # the buy itself runs through it: refuse
+    clean = VersionedTransaction.from_bytes(_pp_trade(ex, mint, with_arb=False))
+    assert strip_untrusted(clean) is None              # nothing to remove
+    buy = VersionedTransaction.from_bytes(_pp_trade(ex, mint))
+    assert strip_untrusted(buy, side="sell") is None   # a "sell" that's really a buy: refuse
+    assert strip_untrusted(buy, frozenset({ARB})) is None  # allowed in .env: kept as built
+
+
+async def test_the_untrusted_call_is_removed_from_sells_too():
+    ex, rpc = live_executor(load_config(None))
+    mint = str(Keypair().pubkey())
+    signed = []
+    ex._sign = lambda unsigned: signed.append(unsigned) or unsigned
+
+    async def pp(*a, **k):
+        return _pp_trade(ex, mint, side="sell")
+    ex._pumpportal_tx = pp
+    ex.jupiter = _Jup(fail=AssertionError("Jupiter isn't needed"))
+    rpc.balance_raw = 5_000_000
+    await ex.sell(mint, 5.0, True, pump=True, curve=None, value_sol=0.01)
+    assert ex.jupiter.calls == 0 and ARB not in _programs(signed[0])

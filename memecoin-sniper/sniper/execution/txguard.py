@@ -29,7 +29,9 @@ import struct
 from functools import lru_cache
 from typing import Optional
 
+from solders.message import MessageV0
 from solders.pubkey import Pubkey
+from solders.signature import Signature
 from solders.transaction import VersionedTransaction
 
 SYSTEM = "11111111111111111111111111111111"
@@ -39,6 +41,7 @@ PUMP_PROGRAMS = {"6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",   # bonding curv
 # Anchor instruction ids (first 8 bytes of sha256("global:<name>"))
 PUMP_BUY = bytes.fromhex("66063d1201daebea")          # buy(amount, max_sol_cost)
 PUMP_BUY_EXACT_SOL = bytes.fromhex("38fc74089edfcd5f")  # buy_exact_sol_in(sol_in, min_out)
+PUMP_SELL = bytes.fromhex("33e685a4017f83ad")           # sell(amount, min_sol_output)
 TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 ATA_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
@@ -96,6 +99,34 @@ def _owner_atas(owner: str, mint: str) -> frozenset:
     o, m = Pubkey.from_string(owner), Pubkey.from_string(mint)
     return frozenset(Pubkey.find_program_address([bytes(o), bytes(Pubkey.from_string(p)), bytes(m)],
                                                  ATA_PROGRAM)[0] for p in (TOKEN, TOKEN_2022))
+
+
+def strip_untrusted(tx: VersionedTransaction, extra_programs: frozenset[str] = frozenset(),
+                    side: str = "buy") -> Optional[VersionedTransaction]:
+    """`tx` (unsigned) with its calls to programs this bot doesn't trust taken out, when what
+    is left is still a plain pump.fun / PumpSwap trade: a top-level buy (or sell) instruction
+    exactly as the builder made it. None when nothing was removed, or when the trade itself
+    would need the untrusted program. The result must still pass check_transaction."""
+    try:
+        msg = tx.message
+        if not isinstance(msg, MessageV0):
+            return None
+        keys = list(msg.account_keys)
+        allowed = ALLOWED_PROGRAMS | set(extra_programs)
+        kept = [ix for ix in msg.instructions if str(keys[ix.program_id_index]) in allowed]
+        if len(kept) == len(msg.instructions):
+            return None
+        wanted = (PUMP_BUY, PUMP_BUY_EXACT_SOL) if side == "buy" else (PUMP_SELL,)
+        if not any(str(keys[ix.program_id_index]) in PUMP_PROGRAMS and bytes(ix.data)[:8] in wanted
+                   for ix in kept):
+            return None
+        # the removed program's id stays among the accounts, unused: harmless, never invoked
+        new = MessageV0(msg.header, keys, msg.recent_blockhash, kept,
+                        list(msg.address_table_lookups))
+        return VersionedTransaction.populate(
+            new, [Signature.default()] * msg.header.num_required_signatures)
+    except Exception:
+        return None
 
 
 def check_transaction(tx: VersionedTransaction, owner: Pubkey, max_sol_out: float,
