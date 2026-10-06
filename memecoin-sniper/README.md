@@ -38,6 +38,8 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 🎚 **Presets** | `degen`, `balanced` or `safe`, each with one-line overrides. | "Strategy presets" |
 | 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source (including dev snipes, keyword snipes and limit orders), plus **speed**: the median time each step of a buy and a sell took (decide, build, send, confirm). A daily report arrives in Telegram every morning (UTC). | GMGN PnL cards |
 | 🩺 **Health check** | `/health` (or 🩺 on the main menu) checks every service live: your RPC (with its recent failure rate), PumpPortal's feed and trade feed, each Jito region, Jupiter, GeckoTerminal and DexScreener, plus your wallet. Automatic alerts when one starts failing quietly (RPC refusing requests, PumpPortal disconnected or refusing the trade feed, Jito refusing bundles, Jupiter rate-limiting), and again when it's fixed. | |
+| 🧹 **Rent back** | Every buy opens a token account in your wallet (~0.002 SOL rent). After a full exit the bot closes the now-empty account, so the rent comes back and shows in that trade's PnL. `/reclaim` (or 💼 Wallet → 🧹) sweeps any empty accounts left from before. Only empty accounts are closed: Solana refuses to close one that still holds tokens. | |
+| ⌛ **Why it didn't land** | When a buy expires without landing, the bot replays it in a free, read-only simulation and tells you the likely reason (e.g. the price moved past your slippage). | |
 
 ### Where it beats the paid bots
 
@@ -186,6 +188,7 @@ trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 | Copy a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] [sol]` |
 | Just watch a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] track`, or `/track <address> [label]` |
 | See if everything is working | 🩺 Health on the main menu, or `/health` |
+| Take back rent from empty token accounts | 💼 Wallet → 🧹 Reclaim rent, or `/reclaim` |
 | Stop everything | ⏸ Pause sniping (open positions are still managed and exited) |
 
 Every change is saved on the server and survives restarts: wallet, settings,

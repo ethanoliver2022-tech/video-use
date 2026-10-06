@@ -1,0 +1,261 @@
+"""Token account rent: a buy opens a token account (~0.002 SOL rent); a full exit closes it
+again so the rent comes back. Plus: why a transaction that expired didn't land."""
+import asyncio
+
+import pytest
+from solders.keypair import Keypair
+from solders.transaction import VersionedTransaction
+
+import tests.test_chaos as chaos
+from sniper.config import load_config
+from sniper.execution.executors import NotLanded, explain_failure
+from sniper.execution.txguard import TOKEN, TOKEN_2022
+from sniper.models import Fill
+from sniper.solana_rpc import SolanaRpc
+from sniper.stats import summarize
+from tests.test_hardening import live_executor
+
+
+def _acct(owner, mint, program=TOKEN, amount="0", **info):
+    return {"pubkey": str(Keypair().pubkey()), "account": {
+        "lamports": 2_039_280, "owner": program,
+        "data": {"program": "spl-token", "parsed": {"type": "account", "info": {
+            "owner": owner, "mint": mint, "state": "initialized",
+            "tokenAmount": {"amount": amount, "decimals": 6}, **info}}}}}
+
+
+async def test_only_empty_closable_accounts_of_this_wallet_are_listed():
+    owner, other = str(Keypair().pubkey()), str(Keypair().pubkey())
+    good, good22 = str(Keypair().pubkey()), str(Keypair().pubkey())
+    rows = {TOKEN: [
+        _acct(owner, good),
+        _acct(owner, "HELD", amount="5"),                      # still holds tokens
+        _acct(other, "NOTMINE"),                               # someone else's
+        _acct(owner, "FROZEN", state="frozen"),                # can't be closed
+        _acct(owner, "LOCKED", closeAuthority=other),          # only `other` may close it
+        {"pubkey": "junk"},                                    # malformed: skipped
+    ], TOKEN_2022: [
+        _acct(owner, good22, program=TOKEN_2022, extensions=[{"extension": "immutableOwner"}]),
+        _acct(owner, "FEES", program=TOKEN_2022, extensions=[
+            {"extension": "transferFeeAmount", "state": {"withheldAmount": 7}}]),
+        _acct(owner, "ODD", program=TOKEN_2022, extensions=[{"extension": "confidentialTransferAccount"}]),
+    ]}
+    rpc = SolanaRpc("http://x")
+
+    async def call(method, params):
+        assert method == "getTokenAccountsByOwner"
+        return {"value": rows[params[1]["programId"]]}
+    rpc.call = call
+    found = await rpc.empty_token_accounts(owner)
+    assert sorted(a["mint"] for a in found) == sorted([good, good22])
+    assert {a["program"] for a in found} == {TOKEN, TOKEN_2022}
+    assert all(a["lamports"] == 2_039_280 for a in found)
+    await rpc.http.aclose()
+
+
+def _closing_executor(accounts, confirm=True):
+    ex, rpc = live_executor(load_config(None))
+    sent = []
+
+    async def empty(owner):
+        assert owner == ex.pubkey
+        return accounts
+
+    async def blockhash():
+        from solders.hash import Hash
+        return Hash.new_unique()
+
+    async def send_raw(raw):
+        tx = VersionedTransaction.from_bytes(raw)
+        sent.append(tx)
+        return str(tx.signatures[0])
+
+    async def conf(sig, timeout=None):
+        if isinstance(confirm, Exception):
+            raise confirm
+        return confirm
+    rpc.empty_token_accounts, rpc.get_latest_blockhash = empty, blockhash
+    rpc.send_raw_transaction, rpc.confirm = send_raw, conf
+    return ex, sent
+
+
+def _empty(owner_mints):
+    return [{"address": str(Keypair().pubkey()), "mint": m, "program": TOKEN,
+             "lamports": 2_039_280} for m in owner_mints]
+
+
+async def test_close_empty_closes_into_this_wallet_and_reports_the_rent():
+    accounts = _empty([str(Keypair().pubkey()) for _ in range(15)])
+    ex, sent = _closing_executor(accounts)
+    keep = frozenset({accounts[0]["mint"]})
+    n, sol = await ex.close_empty(keep=keep)
+    assert n == 14 and sol == pytest.approx(14 * 0.00203928)
+    assert len(sent) == 2                                     # batches of 12
+    me = ex.kp.pubkey()
+    closed = set()
+    for tx in sent:
+        keys = list(tx.message.account_keys)
+        assert keys[0] == me and tx.message.header.num_required_signatures == 1
+        for ix in tx.message.instructions:
+            if str(keys[ix.program_id_index]) == TOKEN:
+                assert bytes(ix.data) == bytes([9])           # CloseAccount, nothing else
+                acct, dest, auth = (keys[i] for i in ix.accounts)
+                assert dest == me and auth == me
+                closed.add(str(acct))
+    assert closed == {a["address"] for a in accounts[1:]}  # the kept mint was left alone
+
+
+async def test_close_empty_only_the_given_mint():
+    accounts = _empty(["A", "B"])
+    ex, sent = _closing_executor(accounts)
+    assert await ex.close_empty(only={"B"}) == (1, pytest.approx(0.00203928))
+    assert len(sent) == 1 and len(sent[0].message.instructions) == 3  # 2 budget + 1 close
+
+
+async def test_a_failed_or_unconfirmed_close_reports_nothing_back():
+    from sniper.solana_rpc import TxFailed
+    for outcome in (False, TxFailed("failed on-chain")):
+        ex, _ = _closing_executor(_empty(["A"]), confirm=outcome)
+        assert await ex.close_empty() == (0, 0.0)
+
+
+async def test_close_transaction_passes_the_tx_guard_cheaply():
+    from sniper.execution.txguard import check_transaction
+    ex, sent = _closing_executor(_empty(["A"] * 12))
+    await ex.close_empty()
+    # moves no SOL out, priority fee well under 0.0001 SOL
+    check_transaction(sent[0], ex.kp.pubkey(), 0.0, max_fee_sol=0.0001, side="sell")
+
+
+# ---- engine: full exits give the rent back, /reclaim sweeps old accounts ----
+
+class _Ex:
+    def __init__(self, back=0.002):
+        self.back, self.calls = back, []
+
+    async def sell(self, mint, tokens, sell_all, pump, curve, slippage_pct=None):
+        f = Fill(tokens=tokens, sol=0.04, signature="S")
+        f.emptied = sell_all
+        return f
+
+    async def close_empty(self, only=None, keep=frozenset()):
+        self.calls.append((only, keep))
+        return (1, self.back) if self.back else (0, 0.0)
+
+
+async def _engine_with_position(tmp_path):
+    eng = chaos.build(tmp_path, chaos.random.Random(1))
+    eng.cfg.trading.max_open_positions = 50
+    m = str(Keypair().pubkey())
+    await eng.manual_buy(m, 0.05, force=True)
+    eng.live = True
+    sent = []
+
+    async def send(text, *a, **k):
+        sent.append(text)
+    eng.notifier.send = send
+
+    async def unwatch(mint):
+        pass
+    eng.stream.unwatch_token = unwatch
+    return eng, m, sent
+
+
+async def test_full_live_exit_closes_the_token_account_and_books_the_rent(tmp_path):
+    eng, m, sent = await _engine_with_position(tmp_path)
+    eng.executor = ex = _Ex(back=0.002)
+    other = str(Keypair().pubkey())
+    eng._buying[other] = 0.05                          # a buy in flight: its account stays
+    sol_in = eng.positions[m].sol_in
+    res = await eng.manual_sell(m, 100)
+    await asyncio.sleep(0.05)
+    assert res.startswith("🔴")
+    only, keep = ex.calls[0]
+    assert only == {m} and other in keep and m not in keep
+    pos = eng.positions[m]
+    assert pos.closed and pos.sol_out == pytest.approx(0.042)
+    close = eng.store.events("close")[-1]
+    assert close["pnl_sol"] == pytest.approx(0.042 - sol_in)
+    assert any("0.0020 SOL account rent back" in t for t in sent)
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_partial_exits_and_failed_closes_never_block_the_sell(tmp_path):
+    eng, m, sent = await _engine_with_position(tmp_path)
+    eng.executor = ex = _Ex()
+    await eng.manual_sell(m, 50)
+    assert not ex.calls                                 # tokens left: the account stays
+
+    class Boom(_Ex):
+        async def close_empty(self, only=None, keep=frozenset()):
+            raise RuntimeError("rpc down")
+    eng.executor = Boom()
+    res = await eng.manual_sell(m, 100)
+    assert res.startswith("🔴") and eng.positions[m].closed
+    assert eng.store.events("close")                    # booked all the same
+    eng.live = False
+    await eng.http.aclose()
+
+
+async def test_reclaim_sweeps_old_accounts_and_counts_in_pnl(tmp_path):
+    eng, m, _ = await _engine_with_position(tmp_path)
+    eng.executor = ex = _Ex(back=0.006)
+    before = eng.store.realized_today()
+    text = await eng.reclaim_rent()
+    assert "0.0060 SOL back" in text
+    assert m in ex.calls[0][1]                          # an open position's account is kept
+    assert eng.store.realized_today() == pytest.approx(before + 0.006)
+    assert summarize(eng.store)["rent_back"] == pytest.approx(0.006)
+    ex.back = 0
+    assert "No empty token accounts" in await eng.reclaim_rent()
+    eng.live = False
+    assert "Paper mode" in await eng.reclaim_rent()
+    await eng.http.aclose()
+
+
+# ---- why a transaction didn't land ----
+
+def test_failure_reasons_are_explained():
+    slip = ["Program log: AnchorError ... Error Code: TooMuchSolRequired. Error Number: 6002."]
+    assert "slippage" in explain_failure({"InstructionError": [3, {"Custom": 6002}]}, slip)
+    assert "graduated" in explain_failure("x", ["Error Code: BondingCurveComplete."])
+    assert "not enough SOL" in explain_failure("x", ["Transfer: insufficient lamports 5, need 9"])
+    assert "not enough SOL" in explain_failure("InsufficientFundsForRent", None)
+    assert "(Weird)" in explain_failure("x", ["Error Code: Weird."])
+    assert "network refused" in explain_failure({"odd": 1}, "not a list")
+
+
+async def test_an_expired_buy_says_why():
+    ex, rpc = live_executor(load_config(None))
+
+    async def pp(*a, **k):
+        return b"tx"
+    ex._pumpportal_tx = pp
+    rpc.confirm_result = False
+
+    async def simulate(raw):
+        return {"err": {"InstructionError": [2, {"Custom": 6002}]},
+                "logs": ["Error Code: TooMuchSolRequired."]}
+    rpc.simulate = simulate
+    from sniper.models import Candidate
+    with pytest.raises(NotLanded, match="Likely reason: the price moved more than your slippage"):
+        await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+
+    async def fine(raw):
+        return {"err": None, "logs": []}
+    rpc.simulate = fine
+    with pytest.raises(NotLanded) as e:
+        await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+    assert "Likely reason" not in str(e.value)          # nothing to blame: no guess
+
+    async def slow(raw):
+        await asyncio.sleep(10)
+    rpc.simulate = slow
+    import sniper.execution.executors as ex_mod
+    ex_mod.SIMULATE_TIMEOUT, old = 0.05, ex_mod.SIMULATE_TIMEOUT
+    try:
+        with pytest.raises(NotLanded):                   # a slow check never hangs the bot
+            await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+    finally:
+        ex_mod.SIMULATE_TIMEOUT = old

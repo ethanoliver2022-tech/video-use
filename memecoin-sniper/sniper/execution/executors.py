@@ -13,13 +13,18 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
 import httpx
+from solders.compute_budget import set_compute_unit_limit, set_compute_unit_price
+from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
+from solders.message import MessageV0
+from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
 
 from ..config import Config
@@ -35,9 +40,38 @@ log = logging.getLogger(__name__)
 SELL_ESCALATE_SECONDS = 2.5
 SELL_ESCALATE_CALM_SECONDS = 10.0
 PREBUILT_MAX_AGE = 5.0  # seconds a transaction built ahead of the buy may be used for
+SIMULATE_TIMEOUT = 5.0
+CLOSE_BATCH = 12             # empty token accounts closed per transaction
+CLOSE_UNITS = 10_000         # compute units per close (it uses ~3-5k)
+CLOSE_CU_PRICE = 100_000     # micro-lamports per unit: ~0.000001 SOL per account closed
+CLOSE_CONFIRM_TIMEOUT = 60.0
 PUMP_FEE = 0.0125  # protocol + creator fee on the bonding curve, approx.
 PUMPPORTAL_FEE = 0.005     # PumpPortal's fee on trades it builds (paper estimate; see pumpportal.fun)
 NETWORK_FEE_SOL = 0.000005  # base signature fee
+
+
+_ERROR_CODE = re.compile(r"Error Code: (\w+)")
+_SLIPPAGE = ("TooMuchSolRequired", "TooLittleSolReceived", "ExceededSlippage",
+             "SlippageToleranceExceeded", "SlippageExceeded", "MaxQuoteAmountInExceeded",
+             "MinQuoteAmountOutNotMet")
+
+
+def explain_failure(err, logs) -> str:
+    """A simulation's error and logs -> a short reason a person can act on."""
+    logs = [x for x in logs if isinstance(x, str)] if isinstance(logs, list) else []
+    text = " ".join(logs) + " " + str(err)
+    code = next((m.group(1) for x in logs if (m := _ERROR_CODE.search(x))), "")
+    low = text.lower()
+    if code in _SLIPPAGE or "slippage" in low:
+        return ("the price moved more than your slippage allows (it was pumping too fast). "
+                "Raise slippage in ⚙️ Settings, or skip tokens this hot")
+    if code == "BondingCurveComplete":
+        return "the token graduated off pump.fun at that moment"
+    if "insufficient lamports" in low or "insufficientfunds" in low.replace(" ", ""):
+        return "not enough SOL in the wallet for the trade plus fees"
+    if code:
+        return f"the trade program refused it ({code})"
+    return f"the network refused it ({str(err)[:120]})"
 
 
 @dataclass
@@ -370,7 +404,9 @@ class LiveExecutor:
             if escalate is not None:
                 escalate.cancel()
         if not landed:
-            raise NotLanded(f"transaction {sig} expired without landing")
+            why = await self.why_not_landed(signed)
+            raise NotLanded(f"transaction {sig} expired without landing"
+                            + (f". Likely reason: {why}" if why else ""))
         timings["confirm"] = time.monotonic() - t_confirm
         tx = await self.rpc.get_transaction(sig)
         readable = bool(tx)
@@ -393,6 +429,51 @@ class LiveExecutor:
         sol = sol + tip if side == "buy" else max(0.0, sol - tip)
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
                     sol_known=readable, timings=timings)
+
+    async def why_not_landed(self, signed: VersionedTransaction) -> str:
+        """The likely reason a transaction expired: it's simulated against the chain as it is
+        now (free, read-only). '' when the simulation passes or can't tell."""
+        try:
+            res = await asyncio.wait_for(self.rpc.simulate(bytes(signed)), SIMULATE_TIMEOUT)
+        except Exception as e:
+            log.debug("simulation failed: %s", e)
+            return ""
+        if not res or not res.get("err"):
+            return ""
+        return explain_failure(res.get("err"), res.get("logs"))
+
+    async def close_empty(self, only: Optional[set] = None,
+                          keep: frozenset = frozenset()) -> tuple[int, float]:
+        """Close this wallet's empty token accounts and take back their rent (~0.002 SOL
+        each). Solana refuses to close an account that still holds tokens, so this can never
+        lose a token. `only`: just these mints; `keep`: never these. (closed, SOL back)."""
+        found = [a for a in await self.rpc.empty_token_accounts(self.pubkey)
+                 if (only is None or a["mint"] in only) and a["mint"] not in keep]
+        closed, back = 0, 0.0
+        for i in range(0, len(found), CLOSE_BATCH):
+            batch = found[i:i + CLOSE_BATCH]
+            ixs = [set_compute_unit_limit(CLOSE_UNITS * len(batch)),
+                   set_compute_unit_price(CLOSE_CU_PRICE)]
+            ixs += [Instruction(Pubkey.from_string(a["program"]), bytes([9]),
+                                [AccountMeta(Pubkey.from_string(a["address"]), False, True),
+                                 AccountMeta(self.kp.pubkey(), False, True),
+                                 AccountMeta(self.kp.pubkey(), True, False)]) for a in batch]
+            msg = MessageV0.try_compile(self.kp.pubkey(), ixs, [],
+                                        await self.rpc.get_latest_blockhash())
+            tx = VersionedTransaction(msg, [self.kp])
+            self._guard(tx, 0.0, "sell")  # closes into this wallet only, moves no SOL out
+            sig = await self.rpc.send_raw_transaction(bytes(tx))
+            try:
+                landed = await self.rpc.confirm(sig, timeout=CLOSE_CONFIRM_TIMEOUT)
+            except Exception as e:  # failed or unknown: the rent simply stays where it was
+                log.warning("closing %d empty token account(s) failed: %s", len(batch), e)
+                continue
+            if landed:
+                closed += len(batch)
+                back += sum(a["lamports"] for a in batch) / 1e9
+                log.info("closed %d empty token account(s): %.4f SOL rent back (%s)",
+                         len(batch), sum(a["lamports"] for a in batch) / 1e9, sig)
+        return closed, back
 
     async def _escalate(self, signed: VersionedTransaction, sig: str, after: float) -> None:
         await asyncio.sleep(after)

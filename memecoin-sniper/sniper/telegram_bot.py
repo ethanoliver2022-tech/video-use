@@ -54,6 +54,7 @@ Shortcuts:
 /block &lt;creator&gt;
 /momentum on | off (tokens pumping right now)
 /health to check every service the bot depends on
+/reclaim to take back the ~0.002 SOL rent from empty token accounts
 /stats"""
 
 WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
@@ -337,6 +338,8 @@ class TelegramControl:
                 await self.settings_group("momentum")
         elif cmd == "/health":
             await self.health()
+        elif cmd == "/reclaim":
+            await self.reclaim()
         elif cmd == "/stats":
             await self.stats()
         else:
@@ -581,7 +584,8 @@ class TelegramControl:
                 [("⬅️ Back", "m")]], msg_id)
             return
         lock = "\n🔒 Set via .env, so it can't be changed from chat." if w.from_env else ""
-        rows = [[("📤 Withdraw SOL", "w:wd"), ("🔑 Export key", "w:exp")]]
+        rows = [[("📤 Withdraw SOL", "w:wd"), ("🔑 Export key", "w:exp")],
+                [("🧹 Reclaim rent from empty token accounts", "w:rc")]]
         if not w.from_env:
             rows.append([("✨ New wallet", "w:new"), ("📥 Import", "w:imp")])
         rows.append([("🔄 Refresh", "w"), ("⬅️ Back", "m")])
@@ -592,6 +596,9 @@ class TelegramControl:
 
     async def wallet_action(self, action: str, msg_id: Optional[int]) -> None:
         w = self.engine.wallet
+        if action == "rc":
+            await self.reclaim()
+            return
         if action == "new":
             if w.keypair():
                 await self.show("⚠️ Replace your current wallet with a new one?\n"
@@ -874,6 +881,14 @@ class TelegramControl:
             await self.send("Removed." if ok else "Not found.")
         else:
             await self.send("/copy list | add &lt;wallet&gt; [label] [sol] | rm &lt;wallet&gt;")
+
+    async def reclaim(self) -> None:
+        await self.send("🧹 Looking for empty token accounts…")
+        try:
+            text = await self.engine.reclaim_rent()
+        except Exception as e:
+            text = f"⚠️ Couldn't close the empty accounts: {html.escape(str(e)[:200])}"
+        await self.send(text, [[("💼 Wallet", "w"), ("🏠 Menu", "m")]])
 
     async def health(self) -> None:
         from .health import report

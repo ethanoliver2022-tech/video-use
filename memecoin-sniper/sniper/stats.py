@@ -17,10 +17,13 @@ def summarize(store: Store, since: float = 0, until: float = float("inf")) -> di
         by_reason[_bucket(c.get("reason", "?"))].append(p)
         by_source[c.get("source", "?")].append(p)
     holds = [float(c.get("held_s", 0)) for c in closes]
+    # rent swept later with /reclaim from accounts earlier trades left open
+    rent = sum(float(e.get("sol", 0)) for e in store.events("rent", since, until))
     return {
         "trades": len(pnls),
         "win_rate": len(wins) / len(pnls) * 100 if pnls else 0.0,
-        "total_pnl": sum(pnls),
+        "total_pnl": sum(pnls) + rent,
+        "rent_back": rent,
         "avg_win": sum(wins) / len(wins) if wins else 0.0,
         "avg_loss": sum(losses) / len(losses) if losses else 0.0,
         "best": max(pnls, default=0.0),
@@ -82,7 +85,8 @@ def format_summary(s: dict) -> str:
         return "No closed trades yet."
     lines = [
         f"Trades: {s['trades']}   Win rate: {s['win_rate']:.0f}%",
-        f"Total PnL: {s['total_pnl']:+.4f} SOL",
+        f"Total PnL: {s['total_pnl']:+.4f} SOL"
+        + (f" (incl. {s['rent_back']:.4f} rent back via /reclaim)" if s.get("rent_back") else ""),
         f"Avg win: {s['avg_win']:+.4f}   Avg loss: {s['avg_loss']:+.4f}",
         f"Best: {s['best']:+.4f}   Worst: {s['worst']:+.4f}",
         f"Avg hold: {s['avg_hold_s'] / 60:.1f} min",

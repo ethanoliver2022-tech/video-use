@@ -82,7 +82,9 @@ class Store:
 
     def realized_today(self) -> float:
         midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        return sum(float(e.get("pnl_sol", 0)) for e in self.events("close", midnight.timestamp()))
+        since = midnight.timestamp()
+        return (sum(float(e.get("pnl_sol", 0)) for e in self.events("close", since))
+                + sum(float(e.get("sol", 0)) for e in self.events("rent", since)))
 
     # ---- positions ----
     def save_position(self, pos: Position) -> None:

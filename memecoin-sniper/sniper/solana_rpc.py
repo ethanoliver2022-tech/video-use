@@ -29,6 +29,11 @@ def _malformed(method: str) -> RpcError:
 
 CONFIRM_POLL_SECONDS = 0.4  # ~one slot: fills (and the exits after them) are seen sooner
 CONFIRM_EVIDENCE_SECONDS = 15  # a 'not found' must be this recent to mean 'never landed'
+TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+# Token-2022 account extensions that never stop an empty account from being closed
+CLOSABLE_EXTENSIONS = {"immutableOwner", "transferFeeAmount", "transferHookAccount",
+                       "nonTransferableAccount", "memoTransfer", "cpiGuard"}
 
 
 class TxFailed(RpcError):
@@ -149,6 +154,50 @@ class SolanaRpc:
             return base64.b64decode(value["data"][0], validate=True)
         except (*PARSE_ERRORS, binascii.Error):
             raise _malformed("getAccountInfo") from None
+
+    async def empty_token_accounts(self, owner: str) -> list[dict]:
+        """The owner's token accounts that hold nothing and that the owner may close:
+        [{address, mint, program, lamports}]. Closing one returns its rent (~0.002 SOL)."""
+        out = []
+        for program in TOKEN_PROGRAMS:
+            res = await self.call("getTokenAccountsByOwner", [
+                owner, {"programId": program}, {"encoding": "jsonParsed", "commitment": "confirmed"}])
+            try:
+                accounts = res["value"]
+                if not isinstance(accounts, list):
+                    raise TypeError(accounts)
+            except PARSE_ERRORS:
+                raise _malformed("getTokenAccountsByOwner") from None
+            for a in accounts:
+                try:
+                    acct = a["account"]
+                    info = acct["data"]["parsed"]["info"]
+                    if (acct["owner"] != program or info["owner"] != owner
+                            or str(info["tokenAmount"]["amount"]) != "0"
+                            or info.get("state") != "initialized"
+                            or info.get("closeAuthority") not in (None, owner)):
+                        continue
+                    if any(e.get("extension") not in CLOSABLE_EXTENSIONS
+                           or str((e.get("state") or {}).get("withheldAmount", "0")) != "0"
+                           for e in info.get("extensions") or []):
+                        continue  # e.g. withheld transfer fees: Solana would refuse the close
+                    lamports = int(acct["lamports"])
+                    if lamports <= 0:
+                        continue
+                    out.append({"address": str(a["pubkey"]), "mint": str(info["mint"]),
+                                "program": program, "lamports": lamports})
+                except PARSE_ERRORS:
+                    continue  # one odd account never blocks closing the others
+        return out
+
+    async def simulate(self, raw: bytes) -> Optional[dict]:
+        """What this transaction would do right now (read-only: nothing is sent or paid).
+        {"err": ..., "logs": [...]} or None."""
+        res = await self.call("simulateTransaction", [base64.b64encode(raw).decode(), {
+            "encoding": "base64", "sigVerify": False, "replaceRecentBlockhash": True,
+            "commitment": "confirmed"}])
+        value = res.get("value") if isinstance(res, dict) else None
+        return value if isinstance(value, dict) else None
 
     async def send_raw_transaction(self, raw: bytes) -> str:
         encoded = base64.b64encode(raw).decode()

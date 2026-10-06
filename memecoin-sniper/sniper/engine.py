@@ -48,6 +48,7 @@ SCAN_ALERTS_PER_HOUR = 60    # scan-only mode: "passes filters" messages
 SEEN_TTL = 3 * 3600          # forget candidates after this long (memory stays flat 24/7)
 CURVE_TTL = 15 * 60          # forget bonding-curve snapshots of tokens we don't hold
 ATA_RENT_SOL = 0.0025        # rent for a new token account, roughly
+RENT_BACK_TIMEOUT = 30       # closing the empty account after a full exit
 ORDER_POLL_SECONDS = 3
 MAX_OPEN_ORDERS = 20
 CURVE_MISSES_BEFORE_MIGRATED = 5  # consecutive "no curve account" reads before giving up on it
@@ -166,6 +167,7 @@ class Engine:
         self._curve_ts: dict[str, float] = {}
         self.flows: dict[str, EarlyFlow] = {}
         self.sell_locks: dict[str, asyncio.Lock] = {}
+        self._rent_note: dict[str, float] = {}  # rent taken back on a close, for its message
         self.sell_failures: dict[str, int] = {}
         self._sell_next_try: dict[str, float] = {}
         self._buying: dict[str, float] = {}       # mint -> SOL, buys in flight
@@ -1139,6 +1141,8 @@ class Engine:
                     f"{esc(dec.reason)} (pnl {pos.pnl_pct:+.0f}%)")
             self._spawn(self.notifier.send(text))  # never hold the sell lock waiting on Telegram
             if pos.closed:
+                if self.live and fill.emptied:
+                    await self._rent_back(pos)
                 await self._closed(pos)
             return text
 
@@ -1214,6 +1218,36 @@ class Engine:
         n = pos.tokens_remaining if tokens is None else tokens
         return max(0.0, n * pos.last_price * ESTIMATE_HAIRCUT)
 
+    async def _rent_back(self, pos: Position) -> None:
+        """After a full exit, close the now-empty token account: its rent (~0.002 SOL, paid
+        by the buy) comes back to the wallet and into this trade's PnL."""
+        try:
+            n, sol = await asyncio.wait_for(
+                self.executor.close_empty(only={pos.mint}, keep=self._busy_mints() - {pos.mint}),
+                RENT_BACK_TIMEOUT)
+        except Exception as e:  # never blocks the close: /reclaim can sweep it later
+            log.info("couldn't close the empty %s token account: %s", pos.symbol, e)
+            return
+        if n:
+            pos.sol_out += sol
+            self._rent_note[pos.mint] = sol
+            self.store.save_position(pos)
+
+    def _busy_mints(self) -> set[str]:
+        """Mints whose token account must stay open: held, being bought, or maybe landing."""
+        return ({m for m, p in self.positions.items() if not p.closed}
+                | set(self._buying) | set(self.pending_buys()))
+
+    async def reclaim_rent(self) -> str:
+        """Close every empty token account in the wallet and take back the rent."""
+        if not self.live:
+            return "Paper mode has no real token accounts to close."
+        n, sol = await self.executor.close_empty(keep=frozenset(self._busy_mints()))
+        if not n:
+            return "🧹 No empty token accounts to close: nothing to take back."
+        self.store.event("rent", sol=sol, accounts=n)
+        return f"🧹 Closed {n} empty token account(s): {sol:.4f} SOL back in your wallet."
+
     async def _closed(self, pos: Position) -> None:
         pnl = pos.realized_pnl_sol
         if pnl < 0:
@@ -1229,9 +1263,11 @@ class Engine:
         self._curve_misses.pop(pos.mint, None)
         self._quoted_at.pop(pos.mint, None)
         self._dev_checked.pop(pos.mint, None)
+        rent = self._rent_note.pop(pos.mint, 0.0)
         self._spawn(self.notifier.send(  # callers may hold the sell lock: don't wait on Telegram
             f"🏁 closed {esc(pos.symbol)}: {pnl:+.4f} SOL ({esc(pos.close_reason)})"
-            f" — today {self.store.realized_today():+.4f} SOL"))
+            + (f", incl. {rent:.4f} SOL account rent back" if rent else "")
+            + f" — today {self.store.realized_today():+.4f} SOL"))
         await self.stream.unwatch_token(pos.mint)
 
     # ---------- manual control (CLI / Telegram) ----------
