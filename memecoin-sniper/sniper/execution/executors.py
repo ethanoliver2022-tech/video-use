@@ -438,8 +438,12 @@ class LiveExecutor:
         except Exception as e:
             log.debug("simulation failed: %s", e)
             return ""
-        if not res or not res.get("err"):
+        if not res:
             return ""
+        if not res.get("err"):  # it would work: it simply wasn't picked up in time
+            return ("the trade itself was fine, but no validator picked it up in time (the "
+                    "network was busy and the priority fee too low, or the RPC didn't pass it "
+                    "on). Jito on usually fixes this")
         return explain_failure(res.get("err"), res.get("logs"))
 
     async def close_empty(self, only: Optional[set] = None,

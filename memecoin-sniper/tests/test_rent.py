@@ -247,7 +247,14 @@ async def test_an_expired_buy_says_why():
     rpc.simulate = fine
     with pytest.raises(NotLanded) as e:
         await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
-    assert "Likely reason" not in str(e.value)          # nothing to blame: no guess
+    assert "no validator picked it up" in str(e.value)  # valid trade: it wasn't included
+
+    async def silent(raw):
+        return None
+    rpc.simulate = silent
+    with pytest.raises(NotLanded) as e:
+        await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+    assert "Likely reason" not in str(e.value)          # no answer: no guess
 
     async def slow(raw):
         await asyncio.sleep(10)
