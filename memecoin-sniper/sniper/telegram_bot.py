@@ -411,6 +411,12 @@ class TelegramControl:
             await self.health()
         elif data == "st":
             await self.stats()
+        elif data == "stz":
+            await self.show("Clear all PAPER results and start counting from zero? Live results "
+                            "and open positions aren't touched.",
+                            [[("✅ Yes, clear paper results", "stz!"), ("✖️ Cancel", "st")]], msg_id)
+        elif data == "stz!":
+            await self.send(self.engine.reset_paper_results(), [[("📈 Stats", "st"), ("🏠 Menu", "m")]])
         elif data == "w":
             await self.wallet_menu(msg_id)
         elif data.startswith("w:"):
@@ -900,6 +906,9 @@ class TelegramControl:
 
     async def stats(self) -> None:
         from .stats import format_summary, summarize
+        rows = [[("⬅️ Menu", "m")]]
+        if not self.engine.live:
+            rows.insert(0, [("🗑 Start paper results over", "stz")])
         await self.send(f"📈 <b>{self.engine.mode.upper()} results</b>\n"
                         f"<pre>{html.escape(format_summary(summarize(self.engine.store)))}</pre>",
-                        [[("⬅️ Menu", "m")]])
+                        rows)

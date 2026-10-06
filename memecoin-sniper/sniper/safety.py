@@ -19,6 +19,7 @@ from .config import FilterConfig
 from .execution.executors import JupiterBusy
 from .intel import METADATA_DEADLINE, extract_socials, fetch_metadata
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, SafetyReport
+from .pump_curve import is_standard
 from .solana_rpc import SolanaRpc
 
 if TYPE_CHECKING:
@@ -53,6 +54,9 @@ def static_checks(c: Candidate, f: FilterConfig) -> SafetyReport:
         r.fail("creator is blocklisted")
 
     if c.source == "pumpfun":
+        if c.v_sol and c.v_tokens and not is_standard(c.v_sol, c.v_tokens):
+            r.fail("not a standard SOL pump.fun coin (priced in another coin, or other "
+                   "starting reserves)")
         if c.creator_initial_buy_tokens is not None:
             pct = c.creator_initial_buy_tokens / PUMP_TOTAL_SUPPLY * 100
             r.notes.append(f"dev initial buy {pct:.2f}%")

@@ -80,6 +80,17 @@ class Store:
         return [{"ts": r[0], "event": r[1], "mint": r[2], "symbol": r[3], **json.loads(r[4])}
                 for r in rows]
 
+    RESULT_EVENTS = ("buy", "sell", "close", "rent")
+
+    def clear_results(self, mode: str) -> int:
+        """Delete one mode's trade results (buy / sell / close / rent records)."""
+        if mode != "paper":
+            raise ValueError("only paper results can be cleared")
+        marks = ",".join("?" * len(self.RESULT_EVENTS))
+        cur = self.db.execute(f"DELETE FROM events WHERE mode = ? AND event IN ({marks})",
+                              (mode, *self.RESULT_EVENTS))
+        return cur.rowcount
+
     def realized_today(self) -> float:
         midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         since = midnight.timestamp()

@@ -21,7 +21,7 @@ from .health import HealthWatch
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
 from .notify import Notifier
-from .pump_curve import fetch_curve
+from .pump_curve import fetch_curve, is_standard
 from .safety import SafetyChecker
 from .scanners.momentum import MomentumScanner, MomentumSignal, age_text
 from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
@@ -62,6 +62,11 @@ CANDIDATE_WORKERS = 32
 BALANCE_REFRESH_SECONDS = 2   # live wallet balance kept fresh in the background
 BALANCE_CACHE_SECONDS = 3     # a buy uses it if no newer than this (and no buy finished since)
 PAPER_CURVE_MAX_AGE = 10  # seconds a cached bonding curve may price a paper fill
+# A live trade fills about this long after the decision (build, send, confirm: see the
+# speed stats), and on a fresh launch other snipers move the price in that time. Paper waits
+# the same and prices the fill off the curve as it is then, not as it was at the decision.
+PAPER_BUY_DELAY = 1.0
+PAPER_SELL_DELAY = 0.8
 ESTIMATE_HAIRCUT = 0.97  # unrecorded fills: last price minus typical fees/impact
 MAX_QUEUE_WAIT = 60      # seconds a launch may wait for a free worker before it's too late
 DEV_CHECK_STREAM_SECONDS = 6  # dev balance check per position while the trade feed is live
@@ -261,6 +266,11 @@ class Engine:
                 self._copy[w["address"]] = CopyWallet(**w)
 
     def _set_curve(self, mint: str, curve: CurveState) -> None:
+        if not is_standard(curve.v_sol, curve.v_tokens):
+            # not a SOL bonding curve (a PumpSwap pool, a coin priced in USDC...): its
+            # numbers aren't SOL and tokens, so they must never price a fill or an exit
+            self.curves.pop(mint, None)
+            return
         self.curves[mint] = curve
         self._curve_ts[mint] = time.time()
 
@@ -436,6 +446,8 @@ class Engine:
             return ["bonding curve not found"]
         if curve.complete:
             return ["already graduated"]
+        if not getattr(curve, "sol_quoted", True) or not is_standard(curve.v_sol, curve.v_tokens):
+            return ["not a standard SOL pump.fun coin"]
         self._set_curve(c.mint, CurveState(curve.v_sol, curve.v_tokens))
         problems = []
         if start_sol is not None:
@@ -665,7 +677,13 @@ class Engine:
                 tip = self._tip_estimate()
                 self._add_pending(c, sol + tip)
         try:
-            curve = await self._paper_curve(c) if not self.live and c.on_bonding_curve else None
+            curve = None
+            if not self.live:
+                t_paper = time.time()
+                await asyncio.sleep(PAPER_BUY_DELAY)
+                if c.on_bonding_curve:
+                    since = t_paper if PAPER_BUY_DELAY else 0.0
+                    curve = await self._paper_curve(c, fresh_after=since)
             t_exec = time.monotonic()
             try:
                 fill = await self.executor.buy(c, sol, curve)
@@ -746,11 +764,13 @@ class Engine:
         if pending.pop(mint, None) is not None:
             self._save_pending(pending)
 
-    async def _paper_curve(self, c: Candidate) -> Optional[CurveState]:
+    async def _paper_curve(self, c: Candidate, fresh_after: float = 0.0) -> Optional[CurveState]:
         """Paper fills price off the bonding curve: it must be current. A snapshot from the
-        launch minutes ago (a manual buy of a token that has since run) would fake a fill."""
+        launch minutes ago (a manual buy of a token that has since run) would fake a fill.
+        `fresh_after`: a cached curve must have been seen since then (the fill's delay)."""
         curve = self.curves.get(c.mint)
-        if curve and time.time() - self._curve_ts.get(c.mint, 0) <= PAPER_CURVE_MAX_AGE:
+        seen = self._curve_ts.get(c.mint, 0)
+        if curve and time.time() - seen <= PAPER_CURVE_MAX_AGE and seen >= fresh_after:
             return curve
         try:
             info = await fetch_curve(self.rpc, c.mint)
@@ -758,6 +778,8 @@ class Engine:
             log.debug("curve refresh %s failed: %s", c.mint, e)
             info = None
         if info and not info.complete:
+            if not getattr(info, "sol_quoted", True) or not is_standard(info.v_sol, info.v_tokens):
+                raise ValueError("not a standard SOL pump.fun coin: paper can't price it")
             fresh = CurveState(info.v_sol, info.v_tokens)
             self._set_curve(c.mint, fresh)
             return fresh
@@ -1089,6 +1111,8 @@ class Engine:
                 exits.apply_fill(pos, dec, 0.0, 0.0, self.cfg.exits)
                 self.store.save_position(pos)
                 return "nothing to sell"
+            if not self.live:  # a live sell fills ~1s later too: price it then (see above)
+                await asyncio.sleep(PAPER_SELL_DELAY)
             curve = self.curves.get(pos.mint) if not pos.migrated else None
             if self.live:
                 pos.pending_exit = {"reason": dec.reason, "tp_index": dec.tp_index,
@@ -1249,6 +1273,12 @@ class Engine:
             return "🧹 No empty token accounts to close: nothing to take back."
         self.store.event("rent", sol=sol, accounts=n)
         return f"🧹 Closed {n} empty token account(s): {sol:.4f} SOL back in your wallet."
+
+    def reset_paper_results(self) -> str:
+        """Start paper results over (e.g. after a change in how paper trades are priced).
+        Never touches live results, open paper positions or anything else."""
+        n = self.store.clear_results("paper")
+        return f"🗑 Paper results cleared ({n} records). New paper trades start from zero."
 
     async def _closed(self, pos: Position) -> None:
         pnl = pos.realized_pnl_sol

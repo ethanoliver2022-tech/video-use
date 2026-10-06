@@ -18,6 +18,14 @@ from solders.pubkey import Pubkey
 PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 TOKEN_DECIMALS = 6
 INITIAL_REAL_TOKENS = 793_100_000  # tokens sold along the curve before it graduates
+# A standard pump.fun coin starts at 30 SOL x 1,073,000,000 tokens (virtual) and trades on
+# x * y = k, so v_sol * v_tokens stays at this value (rounding nudges it up a hair). Coins
+# priced in another coin (USDC...) or with other starting reserves don't: their numbers mean
+# something else, and pricing them as SOL would be wrong by orders of magnitude.
+STANDARD_K = 30 * 1_073_000_000
+K_TOLERANCE = 0.25  # wide: what it must catch is off by 100x+, not by rounding
+SOL_MINT_BYTES = bytes(Pubkey.from_string("So11111111111111111111111111111111111111112"))
+QUOTE_AT = 8 + 5 * 8 + 1 + 32 + 1 + 1     # ..., creator, is_mayhem_mode, is_cashback_coin
 _LAYOUT = struct.Struct("<QQQQQ?")  # starts after the 8-byte discriminator
 
 
@@ -28,6 +36,7 @@ class CurveInfo:
     complete: bool      # True once the token has graduated off the curve
     creator: Optional[str] = None
     real_tokens: float = 0.0  # tokens still for sale on the curve
+    sol_quoted: bool = True   # priced in SOL (newer coins can be priced in e.g. USDC)
 
     @property
     def progress_pct(self) -> float:
@@ -39,6 +48,14 @@ class CurveInfo:
     @property
     def price(self) -> float:
         return self.v_sol / self.v_tokens if self.v_tokens else 0.0
+
+
+def is_standard(v_sol: float, v_tokens: float) -> bool:
+    """A standard SOL pump.fun bonding curve (see STANDARD_K)."""
+    try:
+        return abs(v_sol * v_tokens / STANDARD_K - 1) <= K_TOLERANCE
+    except (TypeError, ZeroDivisionError):
+        return False
 
 
 def bonding_curve_address(mint: str) -> str:
@@ -55,9 +72,11 @@ def parse_curve(data: bytes) -> Optional[CurveInfo]:
     start = 8 + _LAYOUT.size
     if len(data) >= start + 32:
         creator = str(Pubkey.from_bytes(data[start:start + 32]))
+    quote = data[QUOTE_AT:QUOTE_AT + 32] if len(data) >= QUOTE_AT + 32 else b""
+    sol_quoted = not any(quote) or quote == SOL_MINT_BYTES  # unset on coins from before
     return CurveInfo(v_sol=v_sol / 1e9, v_tokens=v_tok / 10 ** TOKEN_DECIMALS,
                      complete=bool(complete), creator=creator,
-                     real_tokens=real_tok / 10 ** TOKEN_DECIMALS)
+                     real_tokens=real_tok / 10 ** TOKEN_DECIMALS, sol_quoted=sol_quoted)
 
 
 async def fetch_curve(rpc, mint: str) -> Optional[CurveInfo]:
