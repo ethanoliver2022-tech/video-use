@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import time
-from collections import deque
+from collections import Counter, deque
 from typing import Optional
 
 import httpx
@@ -166,6 +167,8 @@ class Engine:
         self.stream.on_feed_change = self._feed_changed
 
         self.queue: asyncio.Queue[Candidate] = asyncio.Queue(maxsize=500)
+        self.outcomes: deque[tuple[float, str]] = deque(maxlen=20_000)  # (time, reason): /why
+        self.outcomes_seen: deque[float] = deque(maxlen=10_000)
         self.seen: dict[tuple, float] = {}
         self.positions: dict[str, Position] = {}
         self.curves: dict[str, CurveState] = {}
@@ -325,11 +328,42 @@ class Engine:
                 if waited > MAX_QUEUE_WAIT and c.source not in USER_SOURCES:
                     log.debug("dropping %s: waited %.0fs in a backed-up queue", c.mint, waited)
                     continue  # a snipe minutes late is no snipe
-                await self.handle_candidate(c)
+                self._note_outcome(c, await self.handle_candidate(c))
             except Exception:
                 log.exception("error handling %s", c.mint)
             finally:
                 self.queue.task_done()
+
+    def _note_outcome(self, c: Candidate, result: Optional[str]) -> None:
+        """Remember why each launch was (not) bought, for /why."""
+        if c.source in USER_SOURCES or not result:
+            return
+        now = time.time()
+        if result.startswith("🟢"):
+            reasons = ["bought"]
+        elif result.startswith("❌"):
+            body = result.split(":", 1)[1] if ":" in result else result
+            reasons = [r.strip() for r in html.unescape(body).split(";") if r.strip()]
+        else:
+            reasons = [html.unescape(result).strip()]
+        for r in reasons[:3]:
+            # numbers vary per token: "dev bought 9.1%" and "dev bought 12.0%" count as one
+            self.outcomes.append((now, re.sub(r"\d+(?:[.,]\d+)*", "#", r)[:90]))
+        self.outcomes_seen.append(now)
+
+    def why_summary(self, minutes: int = 60) -> str:
+        """What happened to the launches of the last `minutes`: bought, or why not."""
+        since = time.time() - minutes * 60
+        seen = sum(1 for t in self.outcomes_seen if t >= since)
+        counts = Counter(r for t, r in self.outcomes if t >= since)
+        if not seen:
+            return (f"🔎 No launches handled in the last {minutes} min. "
+                    + ("The bot is paused: tap ▶️ Start sniping." if self.paused
+                       else "Check 🩺 Health: is the PumpPortal feed connected?"))
+        lines = [f"🔎 <b>Last {minutes} min</b>: {seen} launches looked at, "
+                 f"{counts.pop('bought', 0)} bought.", "", "Top reasons for not buying:"]
+        lines += [f"  {n:>4} × {html.escape(r)}" for r, n in counts.most_common(10)]
+        return "\n".join(lines)
 
     async def handle_candidate(self, c: Candidate) -> Optional[str]:
         """Filter, confirm and buy. Returns a human-readable outcome."""

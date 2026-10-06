@@ -54,6 +54,7 @@ Shortcuts:
 /block &lt;creator&gt;
 /momentum on | off (tokens pumping right now)
 /health to check every service the bot depends on
+/why to see why recent launches weren't bought
 /reclaim to take back the ~0.002 SOL rent from empty token accounts
 /stats"""
 
@@ -143,7 +144,8 @@ class TelegramControl:
                 {"command": c, "description": d} for c, d in [
                     ("menu", "Main menu"), ("positions", "Open positions"), ("wallet", "Wallet"),
                     ("settings", "Settings"), ("stats", "Performance"),
-                    ("health", "Check every service"), ("help", "Help")]])
+                    ("health", "Check every service"), ("why", "Why it isn't buying"),
+                    ("help", "Help")]])
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
         wait = 2.0
@@ -338,6 +340,8 @@ class TelegramControl:
                     "discovery.momentum_enabled", args[0].lower() == "on")))
             else:
                 await self.settings_group("momentum")
+        elif cmd == "/why":
+            await self.send(self.engine.why_summary(), [[("🔄 Again", "why"), ("🏠 Menu", "m")]])
         elif cmd == "/health":
             await self.health()
         elif cmd == "/reclaim":
@@ -411,6 +415,8 @@ class TelegramControl:
             await self.health()
         elif data == "st":
             await self.stats()
+        elif data == "why":
+            await self.send(self.engine.why_summary(), [[("🔄 Again", "why"), ("🏠 Menu", "m")]])
         elif data == "stz":
             await self.show("Clear all PAPER results and start counting from zero? Live results "
                             "and open positions aren't touched.",
@@ -906,7 +912,7 @@ class TelegramControl:
 
     async def stats(self) -> None:
         from .stats import format_summary, summarize
-        rows = [[("⬅️ Menu", "m")]]
+        rows = [[("🔎 Why no buys?", "why"), ("⬅️ Menu", "m")]]
         if not self.engine.live:
             rows.insert(0, [("🗑 Start paper results over", "stz")])
         await self.send(f"📈 <b>{self.engine.mode.upper()} results</b>\n"
