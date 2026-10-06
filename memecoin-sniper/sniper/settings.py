@@ -81,6 +81,9 @@ SETTINGS: list[Setting] = [
     # speed
     Setting("speed.jito_enabled", "Jito bundles", "bool"),
     Setting("speed.jito_tip_sol", "Jito tip", "float", 0.00001, 0.1, "SOL"),
+    Setting("speed.jito_also_send_rpc", "Also send via RPC", "bool",
+            help="send every trade through Jito AND your RPC at once: more trades land, but "
+                 "the RPC copy has no sandwich protection"),
     Setting("speed.auto_priority_fee", "Auto priority fee", "bool"),
     Setting("speed.max_priority_fee_sol", "Max priority fee", "float", 0, 0.1, "SOL"),
     Setting("speed.min_priority_fee_sol", "Min priority fee", "float", 0, 0.1, "SOL",
