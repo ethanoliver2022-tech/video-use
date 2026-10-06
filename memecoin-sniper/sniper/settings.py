@@ -83,6 +83,9 @@ SETTINGS: list[Setting] = [
     Setting("speed.jito_tip_sol", "Jito tip", "float", 0.00001, 0.1, "SOL"),
     Setting("speed.auto_priority_fee", "Auto priority fee", "bool"),
     Setting("speed.max_priority_fee_sol", "Max priority fee", "float", 0, 0.1, "SOL"),
+    Setting("speed.min_priority_fee_sol", "Min priority fee", "float", 0, 0.1, "SOL",
+            help="the auto priority fee never goes below this; raise it if buys expire "
+                 "without landing (it's paid on every trade)"),
     # momentum scanner
     Setting("discovery.momentum_enabled", "Momentum scanner", "bool",
             help="alert on Solana tokens pumping right now (free data, ~10-30s behind)"),
