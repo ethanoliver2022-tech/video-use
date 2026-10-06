@@ -335,3 +335,63 @@ async def test_an_expired_jito_buy_names_the_jito_reason():
     rpc.simulate = slippage                       # a real on-chain reason beats Jito's
     with pytest.raises(NotLanded, match="slippage"):
         await ex.buy(Candidate(chain="solana", mint="M", source="x", route="pump"), 0.01, None)
+
+
+# ---- PumpPortal's buy refused by the guard: buy through Jupiter instead ----
+
+def _tx_calling(ex, program: str) -> bytes:
+    from solders.hash import Hash
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    ix = Instruction(Pubkey.from_string(program), b"\x01",
+                     [AccountMeta(ex.kp.pubkey(), True, True)])
+    return bytes(VersionedTransaction(MessageV0.try_compile(ex.kp.pubkey(), [ix], [], Hash.new_unique()),
+                                      [ex.kp]))
+
+
+class _Jup:
+    def __init__(self, tx=None, fail=None):
+        self.tx, self.fail, self.calls = tx, fail, 0
+
+    async def quote(self, *a, **k):
+        self.calls += 1
+        if self.fail:
+            raise self.fail
+        return {"outAmount": "1"}
+
+    async def swap_tx(self, q, user, fee):
+        return self.tx
+
+
+async def test_a_refused_pumpportal_buy_is_bought_through_jupiter_instead():
+    from sniper.models import Candidate
+    from sniper.execution.executors import NotSent
+    from sniper.execution.txguard import COMPUTE_BUDGET
+    ex, rpc = live_executor(load_config(None))
+    arb = "FAdo9NCw1ssek6Z6yeWzWjhLVsr8uiCwcWNUnKgzTnHe"
+    signed = []
+    ex._sign = lambda unsigned: signed.append(unsigned) or unsigned
+
+    async def pp(*a, **k):
+        return _tx_calling(ex, arb)
+    ex._pumpportal_tx = pp
+    clean = _tx_calling(ex, COMPUTE_BUDGET)
+    ex.jupiter = _Jup(tx=clean)
+    rpc.balance_raw = 5_000_000
+    c = Candidate(chain="solana", mint=str(Keypair().pubkey()), source="pumpfun", route="pump")
+    await ex.buy(c, 0.01, None)
+    assert ex.jupiter.calls == 1 and signed == [clean]   # PumpPortal's tx was never signed
+
+    signed.clear()
+    ex.jupiter = _Jup(fail=RuntimeError("no route"))   # too new for Jupiter: a clear failure
+    with pytest.raises(NotSent, match="unknown program .* Jupiter couldn't build"):
+        await ex.buy(c, 0.01, None)
+    assert not signed
+
+    async def good(*a, **k):
+        return clean
+    ex._pumpportal_tx = good                            # a normal PumpPortal buy: no detour
+    ex.jupiter = _Jup(tx=b"never")
+    await ex.buy(c, 0.01, None)
+    assert ex.jupiter.calls == 0 and signed == [clean]

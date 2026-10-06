@@ -571,6 +571,28 @@ class LiveExecutor:
             return None  # the price has moved on: build a fresh one
         return unsigned, pre
 
+    async def _jupiter_if_refused(self, unsigned: bytes, cand: Candidate, sol: float) -> bytes:
+        """PumpPortal's buy, unless the guard refuses it (e.g. it calls a program this bot
+        doesn't trust): then the same buy is built through Jupiter instead, which the guard
+        checks again when it's sent. Nothing PumpPortal built is ever signed if refused."""
+        try:
+            built = VersionedTransaction.from_bytes(unsigned)
+        except Exception:
+            return unsigned  # not a transaction at all: _submit reports it
+        try:
+            self._guard(built, self._buy_cap(sol), "buy", sol, cand.mint)
+            return unsigned
+        except UnsafeTransaction as e:
+            refused = e
+        log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter", cand.mint,
+                    refused)
+        try:
+            q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
+            return await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
+        except Exception as e:
+            raise NotSent(f"🛡 refused PumpPortal's transaction ({refused}), and Jupiter "
+                          f"couldn't build the buy either ({str(e)[:120]})") from e
+
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
         t_build = time.monotonic()
         ready = await self._prebuilt(cand, sol)
@@ -592,6 +614,8 @@ class LiveExecutor:
                 pre_task.cancel()
                 raise
             pre = await pre_task
+        if cand.route == "pump":
+            unsigned = await self._jupiter_if_refused(unsigned, cand, sol)
         timings = {"build": time.monotonic() - t_build}  # ~0 when it was built ahead
         base = pre or 0.0
         try:
