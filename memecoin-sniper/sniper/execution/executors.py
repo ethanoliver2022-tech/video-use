@@ -121,6 +121,7 @@ class Jupiter:
         self.rpm = max(0, requests_per_minute)
         self._calls: deque[float] = deque()
         self._lite_strikes = 0  # lite-api failures in a row
+        self.limited: deque[float] = deque(maxlen=500)  # when Jupiter still said 429 (health)
 
     def budget(self) -> int:
         """Requests per minute Jupiter allows this setup (free key or lite-api: 60/min,
@@ -155,6 +156,8 @@ class Jupiter:
             await asyncio.sleep(delay)
             self._calls.append(time.monotonic())  # every request Jupiter sees counts
             resp = await self._send(method, path, **kw)
+        if resp.status_code == 429:
+            self.limited.append(time.monotonic())
         return resp
 
     async def _send(self, method: str, path: str, **kw) -> httpx.Response:
@@ -328,7 +331,7 @@ class LiveExecutor:
 
     async def _submit(self, unsigned: bytes, mint: str, side: str,
                       max_sol_out: float = 0.05, swap_sol: float = 0.0,
-                      urgent: bool = False) -> Fill:
+                      urgent: bool = False, timings: Optional[dict] = None) -> Fill:
         """Sign, send, confirm and read back the real fill.
 
         Raises NotLanded if the transaction expired without landing. Any other error
@@ -344,11 +347,15 @@ class LiveExecutor:
             except UnsafeTransaction as e:
                 log.error("refused to sign a %s for %s: %s", side, mint, e)
                 raise NotSent(f"🛡 refused to sign it: {e}") from e
+        timings = {} if timings is None else timings
+        t_send = time.monotonic()
         try:
             signed = self._sign(unsigned)
         except Exception as e:  # e.g. an error body instead of a transaction: nothing was sent
             raise NotSent(f"couldn't build the transaction: {str(e)[:120]}") from e
         sig = await self.sender.send(signed, self.kp)
+        timings["send"] = time.monotonic() - t_send  # guard + sign + first path accepting it
+        t_confirm = time.monotonic()
         log.info("sent %s %s", side, sig)
         # An exit must not wait a whole blockhash lifetime on a bundle no leader picked (tip
         # below the going rate): if it hasn't confirmed shortly, the *same* signed transaction
@@ -364,6 +371,7 @@ class LiveExecutor:
                 escalate.cancel()
         if not landed:
             raise NotLanded(f"transaction {sig} expired without landing")
+        timings["confirm"] = time.monotonic() - t_confirm
         tx = await self.rpc.get_transaction(sig)
         readable = bool(tx)
         try:
@@ -384,7 +392,7 @@ class LiveExecutor:
         tip = await self._tip_paid(sig)
         sol = sol + tip if side == "buy" else max(0.0, sol - tip)
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
-                    sol_known=readable)
+                    sol_known=readable, timings=timings)
 
     async def _escalate(self, signed: VersionedTransaction, sig: str, after: float) -> None:
         await asyncio.sleep(after)
@@ -448,6 +456,7 @@ class LiveExecutor:
         return unsigned, pre
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
+        t_build = time.monotonic()
         ready = await self._prebuilt(cand, sol)
         if ready is not None:
             unsigned, pre = ready
@@ -467,9 +476,11 @@ class LiveExecutor:
                 pre_task.cancel()
                 raise
             pre = await pre_task
+        timings = {"build": time.monotonic() - t_build}  # ~0 when it was built ahead
         base = pre or 0.0
         try:
-            fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol), sol)
+            fill = await self._submit(unsigned, cand.mint, "buy", self._buy_cap(sol), sol,
+                                      timings=timings)
             if fill.from_wallet:
                 fill.tokens = max(0.0, fill.tokens - base)
             fill.pre = pre
@@ -494,6 +505,7 @@ class LiveExecutor:
     async def sell(self, mint: str, tokens: float, sell_all: bool, pump: bool,
                    curve: Optional[CurveState], slippage_pct: Optional[float] = None,
                    value_sol: Optional[float] = None, urgent: bool = False) -> Fill:
+        t_build = time.monotonic()
         slippage = self.cfg.trading.slippage_pct if slippage_pct is None else slippage_pct
         # A full pump.fun exit ("100%") doesn't depend on the balance: build it while the
         # balance is read, so stop-loss and dev-dump exits don't wait on two round trips.
@@ -538,7 +550,8 @@ class LiveExecutor:
         if unsigned is None:
             q = await self.jupiter.quote(mint, SOL_MINT, tokens, slippage, raw_amount=sell_raw)
             unsigned = await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
-        fill = await self._submit(unsigned, mint, "sell", self._sell_cap(value_sol), urgent=urgent)
+        fill = await self._submit(unsigned, mint, "sell", self._sell_cap(value_sol), urgent=urgent,
+                                  timings={"build": time.monotonic() - t_build})
         if fill.tokens <= 0:
             fill.tokens = tokens
         fill.emptied = sell_all  # incl. a partial that asked for more than the wallet held

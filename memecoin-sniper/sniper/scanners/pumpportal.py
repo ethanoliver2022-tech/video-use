@@ -87,6 +87,8 @@ class PumpPortalStream:
         # the bot must not rely on it: it falls back to on-chain checks until trades flow.
         self.feed_ok = True
         self.feed_error = ""
+        self.down_since: Optional[float] = time.monotonic()  # None while connected (health)
+        self.last_message: Optional[float] = None            # monotonic time of the last one
         self.on_feed_change: Optional[Callable[[bool, str], None]] = None
 
     @property
@@ -184,6 +186,7 @@ class PumpPortalStream:
                 async with websockets.connect(self.connect_url, ping_interval=20, ping_timeout=20,
                                               open_timeout=15, max_size=2**22) as ws:
                     self._ws = ws
+                    self.down_since = None
                     backoff = 1.0
                     log.info("pumpportal connected")
                     await self._subscribe_all()
@@ -196,10 +199,13 @@ class PumpPortalStream:
                 log.warning("pumpportal disconnected: %s (retry in %.0fs)", err, backoff)
             finally:
                 self._ws = None
+                if self.down_since is None:
+                    self.down_since = time.monotonic()
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
     async def _dispatch(self, raw) -> None:
+        self.last_message = time.monotonic()
         try:
             msg = json.loads(raw)
         except ValueError:

@@ -17,6 +17,7 @@ from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, L
                                   NothingToSell, NotLanded, PaperExecutor)
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
+from .health import HealthWatch
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
 from .notify import Notifier
@@ -177,6 +178,8 @@ class Engine:
         self._copy: dict[str, CopyWallet] = {}
         self._load_copy_wallets()
         self.telegram_ui = False  # set by `sniper bot`: Telegram is the whole interface
+        self.health = HealthWatch(lambda text, ok: self._spawn(
+            self.notifier.send(text, logging.INFO if ok else logging.WARNING)))
 
     @property
     def kol_wallets(self) -> set[str]:
@@ -201,6 +204,10 @@ class Engine:
                    "your PumpPortal API key needs topping up (minimum 0.02 SOL). It retries every "
                    "5 minutes on its own.")
         self._spawn(self.notifier.send(msg, logging.INFO if ok else logging.WARNING))
+
+    async def _health_watch(self) -> None:
+        from . import health
+        await health.watch(self)
 
     async def feed_watch(self) -> None:
         """While PumpPortal refuses the trade feed, ask again every few minutes."""
@@ -304,6 +311,8 @@ class Engine:
                 c.prebuilt.cancel()  # rejected or skipped: the built transaction is never sent
 
     async def _handle_candidate(self, c: Candidate) -> Optional[str]:
+        if not c.queued_at:  # copy trades, manual and momentum buys: speed is timed from here
+            c.queued_at = time.monotonic()
         tag = f"[{c.chain}] {c.symbol or '?'} {c.mint}"
         if self.paused and c.source not in USER_SOURCES and not self.scan_only:
             return "paused"
@@ -357,6 +366,7 @@ class Engine:
         launch that passes is bought without waiting on PumpPortal. With the trade stream,
         only if the early flow still looks clean (most launches don't: no wasted builds)."""
         wait = self.cfg.entry.confirm_seconds
+        c.window_s = wait  # a deliberate wait: not counted as the bot being slow
         lead = min(PREBUILD_LEAD, wait)
         await asyncio.sleep(wait - lead)
         if flow is not None and not flow.evaluate(self.cfg.entry):
@@ -397,6 +407,7 @@ class Engine:
         """Without PumpPortal's paid trade stream: compare the bonding curve and the dev's
         balance before and after the window. Can't count unique buyers or spot bundles."""
         start_sol = c.v_sol
+        c.window_s = self.cfg.entry.confirm_seconds
         await asyncio.sleep(self.cfg.entry.confirm_seconds)
         try:
             curve = await fetch_curve(self.rpc, c.mint)
@@ -637,6 +648,7 @@ class Engine:
                 self._add_pending(c, sol + tip)
         try:
             curve = await self._paper_curve(c) if not self.live and c.on_bonding_curve else None
+            t_exec = time.monotonic()
             try:
                 fill = await self.executor.buy(c, sol, curve)
             except NotLanded as e:
@@ -681,7 +693,8 @@ class Engine:
             self.positions[c.mint] = pos
             self.store.save_position(pos)
             self.store.event("buy", c.mint, pos.symbol, source=c.source, sol=fill.sol,
-                             tokens=fill.tokens, sig=fill.signature)
+                             tokens=fill.tokens, sig=fill.signature,
+                             timing=self._timing(fill, t_exec, c.queued_at, c.window_s))
             self._drop_pending(c.mint)  # only after the position is safely on disk
         finally:
             self._buying.pop(c.mint, None)
@@ -1034,7 +1047,20 @@ class Engine:
         if dec:
             await self.execute_sell(pos, dec)
 
+    @staticmethod
+    def _timing(fill, t_exec: float, t0: float, window: float = 0.0) -> dict:
+        """Seconds per step of one trade, for the speed stats: decide (seen -> sending, minus a
+        confirmation window), build, send, confirm, total."""
+        now = time.monotonic()
+        out = {k: round(v, 3) for k, v in (getattr(fill, "timings", None) or {}).items()
+               if isinstance(v, (int, float))}
+        if t0:
+            out["decide"] = round(max(0.0, t_exec - t0 - window), 3)
+            out["total"] = round(max(0.0, now - t0 - window), 3)
+        return out
+
     async def execute_sell(self, pos: Position, dec: exits.ExitDecision) -> str:
+        t_decided = time.monotonic()  # the exit rule fired just now
         lock = self.sell_locks.setdefault(pos.mint, asyncio.Lock())
         if lock.locked():
             return "a sell is already in progress"
@@ -1092,7 +1118,8 @@ class Engine:
             pos.pending_exit = None
             self.store.save_position(pos)
             self.store.event("sell", pos.mint, pos.symbol, reason=dec.reason, tokens=fill.tokens,
-                             sol=fill.sol, sig=fill.signature)
+                             sol=fill.sol, sig=fill.signature,
+                             timing=self._timing(fill, t_decided, t_decided))
             text = (f"🔴 SELL {esc(pos.symbol)} {'ALL' if dec.sell_all else f'{dec.tokens:,.0f}'} "
                     f"→ {fill.sol:.4f} SOL{' (estimated)' if estimated else ''} — "
                     f"{esc(dec.reason)} (pnl {pos.pnl_pct:+.0f}%)")
@@ -1740,7 +1767,7 @@ class Engine:
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
-                 ("feed-watch", self.feed_watch)]
+                 ("feed-watch", self.feed_watch), ("health", self._health_watch)]
         # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,

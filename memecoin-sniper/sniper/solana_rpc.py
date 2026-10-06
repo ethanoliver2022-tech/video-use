@@ -6,6 +6,9 @@ import base64
 import binascii
 import itertools
 import logging
+import re
+import time
+from collections import deque
 from typing import Any, Optional
 
 import httpx
@@ -37,22 +40,41 @@ class SolanaRpc:
         self.url = url
         self.http = client or httpx.AsyncClient(timeout=15)
         self._ids = itertools.count(1)
+        # (monotonic time, failed, rate limited) of recent calls: the health check reads it
+        self.recent: deque[tuple[float, bool, bool]] = deque(maxlen=5000)
+
+    def outcomes(self, window: float) -> tuple[int, int, int]:
+        """(calls, failed, rate limited) in the last `window` seconds."""
+        since = time.monotonic() - window
+        rows = [r for r in self.recent if r[0] >= since]
+        return len(rows), sum(1 for r in rows if r[1]), sum(1 for r in rows if r[2])
+
+    def _note(self, failed: bool, limited: bool = False) -> None:
+        self.recent.append((time.monotonic(), failed, limited))
 
     async def call(self, method: str, params: list[Any] | None = None) -> Any:
         body = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params or []}
         try:
             resp = await self.http.post(self.url, json=body)
         except httpx.HTTPError as e:  # never echo the URL: paid RPC URLs embed the API key
+            self._note(True)
             raise RpcError(f"{method}: {type(e).__name__}") from None
         if resp.status_code != 200:
+            self._note(True, resp.status_code == 429)
             raise RpcError(f"{method}: HTTP {resp.status_code}"
                            + (" (rate limited)" if resp.status_code == 429 else ""))
         try:
             data = resp.json()
         except ValueError:
+            self._note(True)
             raise RpcError(f"{method}: invalid JSON response") from None
         if "error" in data:
+            # an answer about the request itself is not the service failing, unless it says
+            # the plan's limit was hit (some providers rate-limit inside a 200 response)
+            limited = bool(re.search(r"rate|limit|credits|too many", str(data["error"]), re.I))
+            self._note(limited, limited)
             raise RpcError(f"{method}: {data['error']}")
+        self._note(False)
         return data.get("result")
 
     async def get_balance_sol(self, pubkey: str) -> float:

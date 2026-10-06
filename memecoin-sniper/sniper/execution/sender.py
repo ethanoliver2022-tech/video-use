@@ -17,7 +17,7 @@ import base64
 import logging
 import random
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from typing import Optional
 
 import httpx
@@ -79,6 +79,7 @@ class TxSender:
         # swap signature -> its bundle's tip signature; oldest evicted (in-flight are newest)
         self.tip_sigs: OrderedDict[str, str] = OrderedDict()
         self._inflight: set[asyncio.Task] = set()  # slower submission paths still running
+        self.jito_failures: deque[float] = deque(maxlen=200)  # every region refused (health)
 
     @property
     def default_fee(self) -> float:
@@ -136,6 +137,8 @@ class TxSender:
         if accepted:
             return sig  # accepted: start confirming now, the slower regions finish on their own
         ok: list = []
+        if use_jito:
+            self.jito_failures.append(time.monotonic())
         if use_jito and not self.cfg.jito_also_send_rpc:
             # Jito unreachable / rate limited: getting the trade out matters more than
             # MEV protection (think: exiting a rug), so fall back to plain RPC.

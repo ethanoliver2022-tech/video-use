@@ -55,6 +55,7 @@ class Candidate:
     # a buy transaction built while the filters ran (live pump.fun only), and its size
     prebuilt: Optional[object] = field(default=None, repr=False, compare=False)
     prebuilt_sol: float = 0.0
+    window_s: float = 0.0             # seconds deliberately spent in a confirmation window
 
     @property
     def on_bonding_curve(self) -> bool:
@@ -87,6 +88,7 @@ class Fill:
     sol_known: bool = True     # False: the trade landed but its SOL amount couldn't be read
     emptied: bool = False      # the sell took everything left in the wallet
     pre: Optional[float] = None  # buys: tokens of this mint held before (None = unknown)
+    timings: dict = field(default_factory=dict)  # seconds per step (live): build, send, confirm
 
 
 @dataclass

@@ -36,7 +36,8 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 📱 **Telegram-first** | The whole bot runs from a chat: wallet, deposit, withdraw, paper/live, every setting, presets, copy trading, manual trades, stats. | Trojan/BonkBot UI |
 | 💾 **Restart-safe** | Positions, settings, copy wallets and reputation data are stored in SQLite. Open positions are reloaded after a restart and checked against the wallet. | Hosted bots |
 | 🎚 **Presets** | `degen`, `balanced` or `safe`, each with one-line overrides. | "Strategy presets" |
-| 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source (including dev snipes, keyword snipes and limit orders). A daily report arrives in Telegram every morning (UTC). | GMGN PnL cards |
+| 📊 **Analytics** | Win rate, PnL, average win/loss, and breakdowns by exit reason and by source (including dev snipes, keyword snipes and limit orders), plus **speed**: the median time each step of a buy and a sell took (decide, build, send, confirm). A daily report arrives in Telegram every morning (UTC). | GMGN PnL cards |
+| 🩺 **Health check** | `/health` (or 🩺 on the main menu) checks every service live: your RPC (with its recent failure rate), PumpPortal's feed and trade feed, each Jito region, Jupiter, GeckoTerminal and DexScreener, plus your wallet. Automatic alerts when one starts failing quietly (RPC refusing requests, PumpPortal disconnected or refusing the trade feed, Jito refusing bundles, Jupiter rate-limiting), and again when it's fixed. | |
 
 ### Where it beats the paid bots
 
@@ -184,6 +185,7 @@ trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 | Catch tokens pumping right now | Main menu → 🚀 Momentum (one tap on/off, or `/momentum on`). Tune it in ⚙️ Settings → 🚀 Momentum; set "On a signal" to `buy` to have it buy too |
 | Copy a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] [sol]` |
 | Just watch a wallet | 👥 Copy & track → ➕ Add wallet → `<address> [label] track`, or `/track <address> [label]` |
+| See if everything is working | 🩺 Health on the main menu, or `/health` |
 | Stop everything | ⏸ Pause sniping (open positions are still managed and exited) |
 
 Every change is saved on the server and survives restarts: wallet, settings,

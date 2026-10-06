@@ -53,6 +53,7 @@ Shortcuts:
 /withdraw &lt;address&gt; &lt;sol|all&gt;
 /block &lt;creator&gt;
 /momentum on | off (tokens pumping right now)
+/health to check every service the bot depends on
 /stats"""
 
 WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
@@ -138,7 +139,8 @@ class TelegramControl:
             await self.api("setMyCommands", commands=[
                 {"command": c, "description": d} for c, d in [
                     ("menu", "Main menu"), ("positions", "Open positions"), ("wallet", "Wallet"),
-                    ("settings", "Settings"), ("stats", "Performance"), ("help", "Help")]])
+                    ("settings", "Settings"), ("stats", "Performance"),
+                    ("health", "Check every service"), ("help", "Help")]])
         except Exception as e:
             log.debug("setMyCommands failed: %s", e)
         wait = 2.0
@@ -333,6 +335,8 @@ class TelegramControl:
                     "discovery.momentum_enabled", args[0].lower() == "on")))
             else:
                 await self.settings_group("momentum")
+        elif cmd == "/health":
+            await self.health()
         elif cmd == "/stats":
             await self.stats()
         else:
@@ -398,6 +402,8 @@ class TelegramControl:
         elif data == "mo":  # one-tap on/off from the main menu
             await e.set_setting("discovery.momentum_enabled", not e.cfg.discovery.momentum_enabled)
             await self.main_menu(msg_id)
+        elif data == "hl":
+            await self.health()
         elif data == "st":
             await self.stats()
         elif data == "w":
@@ -557,7 +563,7 @@ class TelegramControl:
             [("👥 Copy & track", "c"), ("⚙️ Settings", "set")],
             [("📈 Stats", "st"), switch],
             [("🚀 Momentum: " + ("✅ on" if d.momentum_enabled else "off"), "mo"),
-             ("🔄 Refresh", "m")],
+             ("🩺 Health", "hl"), ("🔄 Refresh", "m")],
         ], msg_id)
 
     async def _balance(self, address: str) -> str:
@@ -865,6 +871,11 @@ class TelegramControl:
             await self.send("Removed." if ok else "Not found.")
         else:
             await self.send("/copy list | add &lt;wallet&gt; [label] [sol] | rm &lt;wallet&gt;")
+
+    async def health(self) -> None:
+        from .health import report
+        await self.send("🩺 Checking every service…")
+        await self.send(await report(self.engine), [[("🔄 Check again", "hl"), ("🏠 Menu", "m")]])
 
     async def stats(self) -> None:
         from .stats import format_summary, summarize
