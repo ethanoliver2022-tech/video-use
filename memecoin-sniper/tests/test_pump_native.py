@@ -284,3 +284,37 @@ async def test_a_failed_sell_check_leaves_direct_buys_on():
     assert ex.native_state == {"buy": True, "sell": False}
     assert "sells failed their check" in notices[0]
     assert _ixs(signed[-1])[1][-1][0] != pn.PUMP                 # this sell: Jupiter
+
+
+async def test_a_trade_that_failed_on_chain_says_why():
+    from sniper.solana_rpc import TxFailed
+    rpc = ChainRpc()
+    ex, _, _ = _executor(rpc)
+    ex.native_state["buy"] = True
+
+    async def failed(sig, timeout=None):
+        raise TxFailed(f"transaction {sig} failed on-chain: {{'InstructionError': [3, {{'Custom': 6005}}]}}")
+    rpc.confirm = failed
+    rpc.tx = {"meta": {"err": {"InstructionError": [3, {"Custom": 6005}]},
+                       "logMessages": ["Program log: AnchorError ... Error Code: BondingCurveComplete."]}}
+    with pytest.raises(TxFailed, match="Reason: the token graduated off pump.fun"):
+        await ex.buy(_pump_cand(), 0.01, None)
+
+
+async def test_the_refusal_message_says_why_a_direct_buy_wasnt_possible():
+    from sniper.execution.executors import NotSent
+    rpc = ChainRpc(curve=curve_bytes(mayhem=True))
+    ex, _, _ = _executor(rpc)
+    ex.native_state["buy"] = True
+
+    async def wrapped(*a, **k):
+        from tests.test_rent import _pp_trade
+        return _pp_trade(ex, str(Keypair().pubkey()), pump_ix=False)
+    ex._pumpportal_tx = wrapped
+
+    class Jup:
+        async def quote(self, *a, **k):
+            raise RuntimeError("jupiter quote 400: not tradable")
+    ex.jupiter = Jup()
+    with pytest.raises(NotSent, match="direct pump.fun buy: mayhem-mode token"):
+        await ex.buy(_pump_cand(), 0.01, None)

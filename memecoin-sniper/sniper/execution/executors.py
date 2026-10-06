@@ -316,6 +316,7 @@ class LiveExecutor:
         # Buys and sells are checked separately: each has its own accounts.
         self.native_state: dict[str, Optional[bool]] = {"buy": None, "sell": None}
         self.notice = None  # set by the engine: a one-line Telegram message
+        self.native_why = ""  # why the last direct pump.fun trade wasn't possible
 
     @property
     def native_ok(self) -> Optional[bool]:
@@ -412,6 +413,9 @@ class LiveExecutor:
                 signed, sig, SELL_ESCALATE_SECONDS if urgent else SELL_ESCALATE_CALM_SECONDS))
         try:
             landed = await self.rpc.confirm(sig)
+        except TxFailed as e:  # landed but failed: its logs say why (slippage, graduated...)
+            why = await self._why_failed(sig)
+            raise TxFailed(str(e) + (f". Reason: {why}" if why else "")) from e
         finally:
             if escalate is not None:
                 escalate.cancel()
@@ -441,6 +445,18 @@ class LiveExecutor:
         sol = sol + tip if side == "buy" else max(0.0, sol - tip)
         return Fill(tokens=tok, sol=sol, signature=sig, from_wallet=from_wallet,
                     sol_known=readable, timings=timings)
+
+    async def _why_failed(self, sig: str) -> str:
+        """A failed transaction's own logs, as a reason a person can act on ('' if unread)."""
+        try:
+            tx = await asyncio.wait_for(self.rpc.get_transaction(sig), SIMULATE_TIMEOUT)
+            meta = (tx or {}).get("meta") or {}
+            if not meta.get("logMessages"):
+                return ""
+            return explain_failure(meta.get("err"), meta.get("logMessages"))
+        except Exception as e:
+            log.debug("couldn't read why %s failed: %s", sig, e)
+            return ""
 
     async def why_not_landed(self, signed: VersionedTransaction, sig: str = "") -> str:
         """The likely reason a transaction expired: it's simulated against the chain as it is
@@ -610,9 +626,11 @@ class LiveExecutor:
             unsigned = await build()
         except NotNative as e:
             log.info("direct pump.fun %s not possible: %s", side, e)
+            self.native_why = str(e)
             return None
         except Exception as e:
             log.warning("direct pump.fun %s couldn't be built: %s", side, e)
+            self.native_why = f"couldn't build it: {str(e)[:80]}"
             return None
         if self.native_state[side] is None and not await self._check_native(unsigned, side):
             return None
@@ -687,6 +705,7 @@ class LiveExecutor:
             log.info("removed an untrusted program from PumpPortal's buy for %s (%s). Its "
                      "calls: %s", cand.mint, refused, describe(built))
             return clean
+        self.native_why = "turned off after a failed check" if self.native_ok is False else ""
         native = await self._native("buy", lambda: self._native_buy(cand, sol))
         if native is not None:
             log.info("PumpPortal's buy for %s refused (%s); built it directly instead",
@@ -698,7 +717,8 @@ class LiveExecutor:
             q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
             return await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         except Exception as e:
-            raise NotSent(f"🛡 refused PumpPortal's transaction ({refused}), and Jupiter "
+            direct = f"; direct pump.fun buy: {self.native_why}" if self.native_why else ""
+            raise NotSent(f"🛡 refused PumpPortal's transaction ({refused}){direct}; and Jupiter "
                           f"couldn't build the buy either ({str(e)[:120]})") from e
 
     async def buy(self, cand: Candidate, sol: float, curve: Optional[CurveState]) -> Fill:
