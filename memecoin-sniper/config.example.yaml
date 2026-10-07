@@ -105,7 +105,14 @@ data_dir: data
 #   min_socials: 0
 #   reject_reused_socials: true
 #   max_creator_launches_24h: 3
-#   auto_blocklist_ruggers: true
+#   auto_blocklist_ruggers: true   # also blocks the wallet that funded that dev
+#   dev_min_wallet_age_min: 60     # skip devs whose wallet is younger; 0 = off
+#   dev_min_funder_age_min: 60     # skip devs funded by a wallet younger than this; 0 = off
+#   dev_funder_blocklist: []       # skip devs funded by these wallets (mixers, rug funders)
+#   dev_curve_sell_hours: 24       # look for the dev selling into pump.fun curves; 0 = off
+#   dev_max_curve_sells: 0         # more sells than this in that time = skip
+#   dev_history_max_txs: 15        # newest dev transactions scanned for those sells
+#   dev_check_on_error: allow      # lookup failed: allow (buy anyway) or skip
 #   name_blocklist: [test, rug, scam]
 #   creator_blocklist: []
 #

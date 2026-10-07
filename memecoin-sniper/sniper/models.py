@@ -56,6 +56,8 @@ class Candidate:
     prebuilt: Optional[object] = field(default=None, repr=False, compare=False)
     prebuilt_sol: float = 0.0
     window_s: float = 0.0             # seconds deliberately spent in a confirmation window
+    # dev wallet background check, started early (during the window) when there is one
+    dev_check: Optional[object] = field(default=None, repr=False, compare=False)
 
     @property
     def on_bonding_curve(self) -> bool:

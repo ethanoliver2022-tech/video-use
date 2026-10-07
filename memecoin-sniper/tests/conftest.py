@@ -21,3 +21,13 @@ def _instant_paper_fills(monkeypatch):
     import sniper.engine as engine
     monkeypatch.setattr(engine, "PAPER_BUY_DELAY", 0.0)
     monkeypatch.setattr(engine, "PAPER_SELL_DELAY", 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_dev_wallet_lookups(monkeypatch, request):
+    """Dev wallet checks are on by default and read the chain; tests of other things
+    shouldn't need an RPC fake for them (tests/test_devcheck.py covers them)."""
+    if "test_devcheck" in request.node.nodeid:
+        return
+    from sniper.devcheck import DevChecker
+    monkeypatch.setattr(DevChecker, "enabled", property(lambda self: False))

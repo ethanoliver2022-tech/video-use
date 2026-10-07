@@ -19,6 +19,7 @@ from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, L
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .health import HealthWatch
+from .devcheck import DevChecker
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
 from .notify import Notifier
@@ -76,6 +77,7 @@ DEV_CHECK_STREAM_SECONDS = 6  # dev balance check per position while the trade f
 FEED_RETRY_SECONDS = 300      # re-ask PumpPortal for a refused trade feed this often
 KEEPALIVE_SECONDS = 120  # idle connections kept open this long
 WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
+DEVCHECK_LEAD = 3.0      # with a window: start the dev wallet lookups this long before it ends
 PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
@@ -155,6 +157,7 @@ class Engine:
                                     store=self.store, jupiter=self.jupiter,
                                     ipfs_gateway=cfg.endpoints.ipfs_gateway,
                                     probe_sol=cfg.trading.buy_amount_sol)
+        self.devcheck = DevChecker(cfg.filters, self.rpc, self.store)
         self.notifier = Notifier(self.http, cfg.telegram_bot_token if cfg.notify.telegram else "",
                                  cfg.telegram_chat_id)
         self.own_wallet = ""
@@ -409,11 +412,18 @@ class Engine:
                 log.debug("skip %s after confirmation: %s", tag, "; ".join(problems))
                 return "❌ confirmation failed: " + esc("; ".join(problems))
             notes += "; early flow confirmed"
-            result = await self.try_buy(c, notes)
+            problems = await self.dev_problems(c)
+            if problems:
+                result = "❌ rejected: " + esc("; ".join(problems))
+            else:
+                result = await self.try_buy(c, notes)
             pos = self.positions.get(c.mint)
             if not pos or pos.closed:  # skipped/failed after watching: stop the (billed) feed
                 await self.stream.unwatch_token(c.mint)
             return result
+        problems = await self.dev_problems(c)
+        if problems:
+            return "❌ rejected: " + esc("; ".join(problems))
         if c.source == "pumpfun-migration" and not await self._route_ready(c):
             return "❌ rejected: no trading route yet after graduating"
         return await self.try_buy(c, notes)
@@ -453,11 +463,38 @@ class Engine:
         only if the early flow still looks clean (most launches don't: no wasted builds)."""
         wait = self.cfg.entry.confirm_seconds
         c.window_s = wait  # a deliberate wait: not counted as the bot being slow
-        lead = min(PREBUILD_LEAD, wait)
-        await asyncio.sleep(wait - lead)
+        dev_lead = min(DEVCHECK_LEAD, wait)
+        lead = min(PREBUILD_LEAD, dev_lead)
+        await asyncio.sleep(wait - dev_lead)
+        # the dev wallet lookups take a few RPC calls: only for launches still looking clean
+        if flow is None or not flow.evaluate(self.cfg.entry):
+            self._start_devcheck(c)
+        await asyncio.sleep(dev_lead - lead)
         if flow is not None and not flow.evaluate(self.cfg.entry):
             self._start_prebuild(c)
         await asyncio.sleep(lead)
+
+    def _devcheck_applies(self, c: Candidate) -> bool:
+        return (c.chain == "solana" and bool(c.creator) and not c.force and c.trigger != "dev"
+                and c.source in ("pumpfun", "pumpfun-migration") and self.devcheck.enabled)
+
+    def _start_devcheck(self, c: Candidate) -> None:
+        if c.dev_check is None and self._devcheck_applies(c):
+            task = asyncio.ensure_future(self.devcheck.check(c.creator))
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            c.dev_check = task
+
+    async def dev_problems(self, c: Candidate) -> list[str]:
+        """Dev wallet age / funding / recent curve sells (started early when possible)."""
+        self._start_devcheck(c)
+        if c.dev_check is None:
+            return []
+        try:
+            return await c.dev_check
+        except Exception as e:
+            log.debug("dev check failed: %s", e)
+            return (["dev wallet check failed"]
+                    if self.cfg.filters.dev_check_on_error == "skip" else [])
 
     def _start_prebuild(self, c: Candidate) -> None:
         """Live pump.fun buys: have PumpPortal build the transaction while the filters (or the
@@ -1364,6 +1401,9 @@ class Engine:
         if (pos.close_reason == "dev sold" and pnl < 0 and pos.creator
                 and self.cfg.filters.auto_blocklist_ruggers):
             self.store.block(pos.creator, f"dev dumped {pos.symbol}")
+            funder = self.devcheck.known_funder(pos.creator)
+            if funder:  # the wallet that bankrolled this dev will bankroll the next one
+                self.store.block(funder, f"funded the dev who dumped {pos.symbol}")
         self.store.event("close", pos.mint, pos.symbol, reason=pos.close_reason, source=pos.source,
                          sol_in=pos.sol_in, sol_out=pos.sol_out, pnl_sol=pnl,
                          held_s=round(time.time() - pos.opened_at))

@@ -123,6 +123,14 @@ class FilterConfig:
     max_creator_launches_24h: int = 3      # serial launchers are almost always farming; 0 = off
     auto_blocklist_ruggers: bool = True    # creators who dev-dump on us get blocklisted
     name_blocklist: list[str] = field(default_factory=lambda: ["test", "rug", "scam"])
+    # dev wallet background (pump.fun launches; on-chain lookups just before buying)
+    dev_min_wallet_age_min: float = 60.0    # deployer's first transaction at least this old
+    dev_min_funder_age_min: float = 60.0    # whoever funded it must not be brand new either
+    dev_funder_blocklist: list[str] = field(default_factory=list)  # mixers / rug funders
+    dev_curve_sell_hours: float = 24.0      # look back this far for pump.fun curve sells
+    dev_max_curve_sells: int = 0            # reject above this many sells in that time
+    dev_history_max_txs: int = 15           # newest transactions scanned for those sells
+    dev_check_on_error: str = "allow"       # lookup failed: "allow" the buy or "skip" it
     creator_blocklist: list[str] = field(default_factory=list)
 
 
