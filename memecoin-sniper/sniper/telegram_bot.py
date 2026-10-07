@@ -71,6 +71,9 @@ WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
 Use a dedicated wallet holding only what you can afford to lose."""
 
 
+WHY_BUTTONS = [[("🔄 Again", "why"), ("🔁 Reset counts", "whyz")], [("🏠 Menu", "m")]]
+
+
 class TelegramControl:
     def __init__(self, engine: "Engine", token: str, chat_id: str, http: httpx.AsyncClient):
         self.engine, self.token, self.http = engine, token, http
@@ -359,7 +362,7 @@ class TelegramControl:
             else:
                 await self.settings_group("momentum")
         elif cmd == "/why":
-            await self.send(self.engine.why_summary(), [[("🔄 Again", "why"), ("🏠 Menu", "m")]])
+            await self.send(self.engine.why_summary(), WHY_BUTTONS)
         elif cmd == "/health":
             await self.health()
         elif cmd == "/reclaim":
@@ -438,8 +441,12 @@ class TelegramControl:
             await self.health()
         elif data == "st":
             await self.stats()
+        elif data == "whyz":
+            e.reset_why()
+            await self.send("🔁 Why-no-buys counts reset. Tap 🔄 Again in a few minutes to see "
+                            "how your current settings are doing.", WHY_BUTTONS)
         elif data == "why":
-            await self.send(self.engine.why_summary(), [[("🔄 Again", "why"), ("🏠 Menu", "m")]])
+            await self.send(self.engine.why_summary(), WHY_BUTTONS)
         elif data == "sts":
             await self.show(f"Start a new {e.mode.upper()} PnL counter from now? All-time results "
                             "stay exactly as they are; the stats page just adds a 'since reset' "

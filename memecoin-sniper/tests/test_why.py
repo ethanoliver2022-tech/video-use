@@ -63,3 +63,22 @@ def test_why_groups_wallet_tags_and_shows_the_closest_calls(tmp_path):
     near = text.split("Closest calls")[1]
     assert "one wallet is" in near and "dev wallet is only # min old" in near
     assert "unique buyers" not in near and "dev bought" not in near
+
+
+async def test_why_counts_can_be_reset(tmp_path):
+    from sniper.models import Candidate
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    e = h.eng
+    c = Candidate(chain="solana", mint="M", source="pumpfun")
+    e._note_outcome(c, "❌ rejected: dev bought 9.1% of supply at launch")
+    await h.tap("why")
+    assert "1 launches" in h.last and "whyz" in h.buttons()
+    await h.tap("whyz")
+    assert "reset" in h.last
+    await h.tap("why")
+    assert "Since reset" in h.last and "no launches handled yet" in h.last
+    e._note_outcome(c, "❌ confirmation failed: only 2 unique buyers (&lt; 6)")
+    await h.tap("why")
+    assert "Since reset (0 min ago)</b>: 1 launches" in h.last and "dev bought" not in h.last
+    await h.close()

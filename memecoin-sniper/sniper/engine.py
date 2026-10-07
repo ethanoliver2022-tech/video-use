@@ -176,6 +176,7 @@ class Engine:
         self.outcomes_seen: deque[float] = deque(maxlen=10_000)
         # launches that cleared the confirmation window but one check (for /why)
         self.near_misses: deque[tuple[float, str]] = deque(maxlen=2_000)
+        self.why_reset_at = 0.0
         self.seen: dict[tuple, float] = {}
         self.positions: dict[str, Position] = {}
         self.curves: dict[str, CurveState] = {}
@@ -371,17 +372,30 @@ class Engine:
         r = re.sub(r"\s*\([1-9A-HJ-NP-Za-km-z]{3,}…\)", "", r)  # "(BwWK7f…)" wallet tags
         return re.sub(r"\d+(?:[.,]\d+)*", "#", r)[:90]
 
+    def reset_why(self) -> None:
+        """Start the /why counts over, e.g. right after changing a filter."""
+        self.outcomes.clear()
+        self.outcomes_seen.clear()
+        self.near_misses.clear()
+        self.why_reset_at = time.time()
+
     def why_summary(self, minutes: int = 60) -> str:
         """What happened to the launches of the last `minutes`: bought, or why not."""
-        since = time.time() - minutes * 60
+        now = time.time()
+        since = now - minutes * 60
+        span = f"Last {minutes} min"
+        if self.why_reset_at > since:   # counting started over more recently than that
+            since = self.why_reset_at
+            span = f"Since reset ({max(0, now - since) / 60:.0f} min ago)"
         seen = sum(1 for t in self.outcomes_seen if t >= since)
         counts = Counter(r for t, r in self.outcomes if t >= since)
         if not seen:
-            return (f"🔎 No launches handled in the last {minutes} min. "
+            return (f"🔎 {span}: no launches handled yet. "
                     + ("The bot is paused: tap ▶️ Start sniping." if self.paused
-                       else "Check 🩺 Health: is the PumpPortal feed connected?"))
+                       else "Give it a few minutes, or check 🩺 Health: is the PumpPortal "
+                            "feed connected?"))
         bought = counts.pop("bought", 0)
-        lines = [f"🔎 <b>Last {minutes} min</b>: {seen} launches looked at, "
+        lines = [f"🔎 <b>{span}</b>: {seen} launches looked at, "
                  f"{bought} bought.", "", "Top reasons for not buying:"]
         lines += [f"  {n:>4} × {html.escape(r)}" for r, n in counts.most_common(10)]
         near = Counter(r for t, r in self.near_misses if t >= since)
