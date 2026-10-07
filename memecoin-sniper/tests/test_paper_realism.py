@@ -144,3 +144,26 @@ async def test_a_paper_sell_without_a_curve_in_memory_reads_it_from_the_chain(tm
     await eng.execute_sell(pos, exits.ExitDecision(pos.tokens_remaining, True, "manual"))
     assert reads == [pos.mint] and used[0] is not None and used[0].v_sol == STD_SOL
     await h.close()
+
+
+async def test_live_pnl_counter_resets_without_losing_all_time(tmp_path):
+    h = Harness(tmp_path)
+    st = h.eng.store
+    h.eng.live, h.eng.mode, st.mode = True, "live", "live"   # stats page only
+    st.event("close", "A", "OLD", pnl_sol=-0.1104)
+    await h.tap("st")
+    assert "sts" in h.buttons() and "stz" not in h.buttons() and "Since reset" not in h.last
+    await h.tap("sts")
+    assert "sts!" in h.buttons()
+    await h.tap("sts!")
+    assert "kept" in h.last
+    st.event("close", "B", "NEW", pnl_sol=0.05)
+    await h.tap("st")
+    since, all_time = h.last.split("All time")
+    assert "Trades: 1" in since and "+0.0500" in since
+    assert "Trades: 2" in all_time and "-0.0604" in all_time
+    assert len(st.events("close")) == 2            # nothing deleted
+    assert h.tg.stats_since()
+    h.eng.mode = "paper"                           # each mode has its own counter
+    assert h.tg.stats_since() is None
+    await h.close()

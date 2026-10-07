@@ -440,6 +440,15 @@ class TelegramControl:
             await self.stats()
         elif data == "why":
             await self.send(self.engine.why_summary(), [[("🔄 Again", "why"), ("🏠 Menu", "m")]])
+        elif data == "sts":
+            await self.show(f"Start a new {e.mode.upper()} PnL counter from now? All-time results "
+                            "stay exactly as they are; the stats page just adds a 'since reset' "
+                            "section on top.",
+                            [[("✅ Yes, reset counter", "sts!"), ("✖️ Cancel", "st")]], msg_id)
+        elif data == "sts!":
+            e.store.set_setting(self._stats_since_key(), str(time.time()))
+            await self.send(f"🔁 {e.mode.upper()} PnL counter reset. All-time results are kept.",
+                            [[("📈 Stats", "st"), ("🏠 Menu", "m")]])
         elif data == "stz":
             await self.show("Clear all PAPER results and start counting from zero? Live results "
                             "and open positions aren't touched.",
@@ -1043,11 +1052,26 @@ class TelegramControl:
         await self.send("🩺 Checking every service…")
         await self.send(await report(self.engine), [[("🔄 Check again", "hl"), ("🏠 Menu", "m")]])
 
+    def _stats_since_key(self) -> str:
+        return f"stats_since_{self.engine.mode}"
+
+    def stats_since(self) -> Optional[float]:
+        try:
+            return float(self.engine.store.get_setting(self._stats_since_key()) or 0) or None
+        except ValueError:
+            return None
+
     async def stats(self) -> None:
-        from .stats import format_summary, summarize
-        rows = [[("🔎 Why no buys?", "why"), ("⬅️ Menu", "m")]]
+        from .stats import format_since, format_summary, summarize
+        rows = [[("🔁 Reset PnL counter", "sts")],
+                [("🔎 Why no buys?", "why"), ("⬅️ Menu", "m")]]
         if not self.engine.live:
-            rows.insert(0, [("🗑 Start paper results over", "stz")])
-        await self.send(f"📈 <b>{self.engine.mode.upper()} results</b>\n"
-                        f"<pre>{html.escape(format_summary(summarize(self.engine.store)))}</pre>",
+            rows.insert(1, [("🗑 Start paper results over", "stz")])
+        store = self.engine.store
+        since = self.stats_since()
+        top = ""
+        if since:
+            top = f"<pre>{html.escape(format_since(summarize(store, since), since))}</pre>\n<b>All time</b>\n"
+        await self.send(f"📈 <b>{self.engine.mode.upper()} results</b>\n{top}"
+                        f"<pre>{html.escape(format_summary(summarize(store)))}</pre>",
                         rows)

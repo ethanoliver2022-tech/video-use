@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Optional
 
 from .store import Store
 
@@ -78,6 +79,22 @@ def _bucket(reason: str) -> str:
     if reason.startswith("KOL buy"):
         return "KOL buy"
     return reason.split(" (")[0].split(" +")[0]
+
+
+def format_since(s: dict, since: float, now: Optional[float] = None) -> str:
+    """The short block for results since the last reset."""
+    import time
+    hours = ((now or time.time()) - since) / 3600
+    age = f"{hours * 60:.0f} min" if hours < 1 else (
+        f"{hours:.1f} h" if hours < 48 else f"{hours / 24:.0f} days")
+    if not s["trades"] and not s.get("rent_back"):
+        return f"Since reset ({age} ago): no closed trades yet."
+    return "\n".join([
+        f"Since reset ({age} ago):",
+        f"  Trades: {s['trades']}   Win rate: {s['win_rate']:.0f}%",
+        f"  PnL: {s['total_pnl']:+.4f} SOL",
+        f"  Best: {s['best']:+.4f}   Worst: {s['worst']:+.4f}",
+    ])
 
 
 def format_summary(s: dict) -> str:
