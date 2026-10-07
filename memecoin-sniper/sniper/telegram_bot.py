@@ -82,6 +82,7 @@ class TelegramControl:
         self.offset = 0
         self.pending: Optional[dict] = None
         self.unhandled: list[str] = []
+        self.charts: dict[str, asyncio.Task] = {}   # mint -> live chart updater
         engine.notifier.token = token
         engine.notifier.chat = self.owner
 
@@ -99,6 +100,23 @@ class TelegramControl:
         try:
             resp = await self.http.post(f"{TELEGRAM_API}/bot{self.token}/{method}",
                                         json=params, timeout=35)
+        except httpx.HTTPError as e:
+            raise TelegramError(f"{method}: {type(e).__name__}") from None
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code != 200 or not data.get("ok", False):
+            raise TelegramError(f"{method}: {data.get('description') or resp.status_code}")
+        return data.get("result")
+
+    async def api_files(self, method: str, files: dict, **params):
+        """Like api(), for uploads (photos): sent as multipart form data."""
+        import json
+        form = {k: (v if isinstance(v, str) else json.dumps(v)) for k, v in params.items()}
+        try:
+            resp = await self.http.post(f"{TELEGRAM_API}/bot{self.token}/{method}",
+                                        data=form, files=files, timeout=35)
         except httpx.HTTPError as e:
             raise TelegramError(f"{method}: {type(e).__name__}") from None
         try:
@@ -379,6 +397,11 @@ class TelegramControl:
             self._bg_reply(e.manual_buy(mint, float(sol) if sol else None, force=head == "bf"))
         elif head == "tc":
             self._card(rest)
+        elif head == "ch":
+            await self.start_chart(rest)
+        elif head == "chx":
+            if not self.stop_chart(rest):
+                await self.send("That chart has already stopped.")
         elif head == "lb":
             self._ask("limit_buy", rest)
             await self.send("📋 <b>Limit buy</b>: send <code>&lt;SOL&gt; &lt;change %&gt; [hours]</code>\n"
@@ -749,8 +772,118 @@ class TelegramControl:
                 f"via {html.escape(p.source)}",
                 buttons=[[("Sell 25%", f"s:{p.mint}:25"), ("Sell 50%", f"s:{p.mint}:50"),
                           ("Sell 100%", f"s:{p.mint}:100")],
-                         [("📋 Limit sell", f"ls:{p.mint}"), ("🔍 Card", f"tc:{p.mint}"),
-                          ("🔄 Refresh", "refresh")]])
+                         [("📈 Live chart", f"ch:{p.mint}"), ("📋 Limit sell", f"ls:{p.mint}")],
+                         [("🔍 Card", f"tc:{p.mint}"), ("🔄 Refresh", "refresh")]])
+
+    # ---------- live chart ----------
+
+    CHART_EVERY = 5.0         # seconds between updates (Telegram allows ~1 edit/s per chat)
+    CHART_MAX_SECONDS = 900   # stops by itself after 15 minutes; tap again to restart
+    CHART_LIMIT = 2           # charts updating at once; starting a third stops the oldest
+
+    async def _chart_png(self, p) -> bytes:
+        """Drawn off the event loop so it never delays a trade."""
+        from .chart import render
+        ex = self.engine.cfg.exits
+        tps = [lvl.at_pct for lvl in ex.take_profit]
+        return await asyncio.to_thread(render, list(p.price_history), p.entry_price,
+                                       ex.stop_loss_pct, tps)
+
+    def _chart_caption(self, p, note: str = "") -> str:
+        peak = (p.peak_price / p.entry_price - 1) * 100 if p.entry_price else 0
+        value = p.tokens_remaining * p.last_price
+        mins = (time.time() - p.opened_at) / 60
+        return (f"📈 <b>{html.escape(p.symbol)}</b> PnL <b>{p.pnl_pct:+.1f}%</b> · "
+                f"value {value:.4f} SOL\nPeak {peak:+.0f}% · held {mins:.0f} min"
+                + (f"\n{note}" if note else ""))
+
+    def _chart_buttons(self, mint: str, live: bool):
+        rows = [[("⏹ Stop chart", f"chx:{mint}")] if live else [("📈 Restart chart", f"ch:{mint}")]]
+        rows.append([("Sell 50%", f"s:{mint}:50"), ("Sell 100%", f"s:{mint}:100")])
+        rows.append([("📊 DexScreener", f"https://dexscreener.com/solana/{mint}")])
+        return rows
+
+    async def start_chart(self, mint: str) -> None:
+        from .notify import keyboard
+        p = self.engine.positions.get(mint)
+        if not p or p.closed:
+            await self.send("That position is closed, so there's no live chart for it.")
+            return
+        self.stop_chart(mint)
+        while len(self.charts) >= self.CHART_LIMIT:
+            self.stop_chart(next(iter(self.charts)))
+        try:
+            msg = await self.api_files(
+                "sendPhoto", {"photo": ("chart.png", await self._chart_png(p), "image/png")},
+                chat_id=self.owner, parse_mode="HTML",
+                caption=self._chart_caption(p, f"🔴 live · updates every {self.CHART_EVERY:.0f}s"),
+                reply_markup=keyboard(self._chart_buttons(mint, True)))
+        except Exception as e:
+            await self.send(f"Couldn't draw the chart: {html.escape(str(e))}")
+            return
+        msg_id = (msg or {}).get("message_id")
+        if msg_id:
+            self.charts[mint] = asyncio.create_task(self._chart_loop(mint, msg_id))
+
+    def stop_chart(self, mint: str) -> bool:
+        """The loop finishes the message itself (final picture, restart button)."""
+        t = self.charts.pop(mint, None)
+        if t and not t.done():
+            t.cancel()
+            return True
+        return False
+
+    async def _chart_edit(self, p, msg_id: int, note: str, live: bool) -> None:
+        from .notify import keyboard
+        media = {"type": "photo", "media": "attach://photo", "parse_mode": "HTML",
+                 "caption": self._chart_caption(p, note)}
+        await self.api_files("editMessageMedia",
+                             {"photo": ("chart.png", await self._chart_png(p), "image/png")},
+                             chat_id=self.owner, message_id=msg_id, media=media,
+                             reply_markup=keyboard(self._chart_buttons(p.mint, live)))
+
+    async def _chart_loop(self, mint: str, msg_id: int) -> None:
+        started = time.time()
+        pos = self.engine.positions.get(mint)
+        last = None
+        note = "⏹ chart stopped"
+        try:
+            while True:
+                await asyncio.sleep(self.CHART_EVERY)
+                p = self.engine.positions.get(mint) or pos
+                if p is None or p.closed:
+                    note = "✅ position closed" + (f" ({html.escape(p.close_reason)})"
+                                                  if p and p.close_reason else "")
+                    break
+                if time.time() - started > self.CHART_MAX_SECONDS:
+                    note = "⏹ stopped after 15 min, tap Restart to keep watching"
+                    break
+                state = (p.last_price, p.tokens_remaining, len(p.price_history))
+                if state == last:
+                    continue    # nothing new: an identical edit would only be refused
+                last = state
+                try:
+                    await self._chart_edit(p, msg_id,
+                                           f"🔴 live · updates every {self.CHART_EVERY:.0f}s", True)
+                except TelegramError as e:
+                    m = re.search(r"retry after (\d+)", str(e))
+                    if m:
+                        await asyncio.sleep(int(m.group(1)))
+                    elif "not modified" not in str(e):
+                        log.info("chart update failed: %s", e)
+                        if "not found" in str(e) or "deleted" in str(e):
+                            return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.charts.get(mint) is asyncio.current_task():
+                self.charts.pop(mint, None)
+        p = self.engine.positions.get(mint) or pos
+        if p:
+            try:
+                await self._chart_edit(p, msg_id, note, False)
+            except Exception:
+                pass
 
     async def token_card(self, mint: str) -> None:
         from .token_card import build_card

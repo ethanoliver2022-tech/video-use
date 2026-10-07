@@ -116,6 +116,8 @@ class Position:
     last_update: float = field(default_factory=time.time)
     tp_levels_hit: set[int] = field(default_factory=set)
     recent_trades: deque = field(default_factory=lambda: deque(maxlen=50))
+    # (time, price) for the live chart; runtime only, like recent_trades
+    price_history: deque = field(default_factory=lambda: deque(maxlen=1500))
     dev_sold: bool = False
     kol_bought: list[str] = field(default_factory=list)
     kol_exit_done: bool = False
@@ -138,6 +140,8 @@ class Position:
             self.last_price = self.entry_price
         if not self.peak_price:
             self.peak_price = self.entry_price
+        if not self.price_history and self.entry_price > 0:
+            self.price_history.append((self.opened_at, self.entry_price))
 
     @property
     def pnl_pct(self) -> float:
@@ -160,6 +164,7 @@ class Position:
         d = asdict(self)
         d["tp_levels_hit"] = sorted(self.tp_levels_hit)
         d["recent_trades"] = []  # transient flow data isn't worth persisting
+        d.pop("price_history", None)
         return d
 
     @classmethod
@@ -167,6 +172,7 @@ class Position:
         d = dict(d)
         d["tp_levels_hit"] = set(d.get("tp_levels_hit", []))
         d.pop("recent_trades", None)
+        d.pop("price_history", None)
         known = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in d.items() if k in known})
 
@@ -179,3 +185,9 @@ class Position:
             self.last_update = ts or time.time()
         self.last_price = price
         self.peak_price = max(self.peak_price, price)
+        now = ts or time.time()
+        h = self.price_history
+        if h and now - h[-1][0] < 1.0:
+            h[-1] = (h[-1][0], price)   # at most one point a second, keeping the latest
+        else:
+            h.append((now, price))
