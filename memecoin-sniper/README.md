@@ -182,7 +182,7 @@ trades it builds (pump.fun tokens). Check pumpportal.fun for its current rate.
 | Buy a token yourself | Token card → pick an amount (runs your filters; ⚠️ option skips them) |
 | Buy on a dip / breakout | Token card → 📋 Limit buy → `0.1 -30` (buy 0.1 SOL after a 30% dip) |
 | Take profit / custom stop | Position → 📋 Limit sell → `50 +100` (half at 2x) or `100 -20` |
-| Watch a position live | Position → 📈 Live chart (updates every 5s; ⏹ Stop chart to turn it off; stops by itself when the position closes or after 15 min) |
+| Watch a position live | Position → 📈 Live chart (updates every 2s; one at a time; ⏹ Stop chart to turn it off; stops by itself when the position closes or after 15 min) |
 | See or cancel orders | 📋 Orders → ✖️ Cancel |
 | Snipe only certain devs or narratives | 🎯 Snipers → Snipe mode: targeted → set Dev watchlist / Keywords |
 | Get your SOL back at 2x, keep a moonbag | ⚙️ Settings → 🚪 Exits → Sell initials at `100`, Moonbag `10` |

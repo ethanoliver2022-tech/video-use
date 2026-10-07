@@ -777,9 +777,9 @@ class TelegramControl:
 
     # ---------- live chart ----------
 
-    CHART_EVERY = 5.0         # seconds between updates (Telegram allows ~1 edit/s per chat)
+    CHART_EVERY = 2.0         # seconds between updates: as fast as Telegram safely allows
     CHART_MAX_SECONDS = 900   # stops by itself after 15 minutes; tap again to restart
-    CHART_LIMIT = 2           # charts updating at once; starting a third stops the oldest
+    CHART_LIMIT = 1           # one chart at a time keeps edits under Telegram's limit
 
     async def _chart_png(self, p) -> bytes:
         """Drawn off the event loop so it never delays a trade."""

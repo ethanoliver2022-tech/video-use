@@ -118,7 +118,7 @@ async def test_live_chart_ends_when_the_position_closes(tmp_path):
     await h.close()
 
 
-async def test_only_a_couple_of_charts_run_at_once(tmp_path):
+async def test_one_chart_runs_at_a_time(tmp_path):
     h = Harness(tmp_path)
 
     async def api_files(method, files, **params):
@@ -130,7 +130,7 @@ async def test_only_a_couple_of_charts_run_at_once(tmp_path):
     opened = [m for m in h.eng.positions]
     for m in opened:
         await h.tap(f"ch:{m}")
-    assert len(h.tg.charts) == h.tg.CHART_LIMIT and opened[0] not in h.tg.charts
+    assert list(h.tg.charts) == [opened[-1]]     # opening a new chart stops the older one
     for m in list(h.tg.charts):
         h.tg.stop_chart(m)
     await asyncio.sleep(0)
