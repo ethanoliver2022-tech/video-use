@@ -82,3 +82,11 @@ async def test_why_counts_can_be_reset(tmp_path):
     await h.tap("why")
     assert "Since reset (0 min ago)</b>: 1 launches" in h.last and "dev bought" not in h.last
     await h.close()
+
+
+def test_socials_reused_counts_as_one_reason():
+    from sniper.engine import Engine
+    k = Engine._reason_key
+    assert k("socials reused from an earlier launch: twitter.com/a/status/1, world.org") \
+        == k("socials reused from an earlier launch: twitter.com/b/status/2") \
+        == "socials reused from an earlier launch"

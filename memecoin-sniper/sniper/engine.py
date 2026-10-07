@@ -370,6 +370,8 @@ class Engine:
         """Group reasons that differ only by numbers or a wallet: "dev bought 9.1%" and
         "dev bought 12.0%" count as one."""
         r = re.sub(r"\s*\([1-9A-HJ-NP-Za-km-z]{3,}…\)", "", r)  # "(BwWK7f…)" wallet tags
+        if r.startswith("socials reused"):
+            r = r.split(":", 1)[0]          # the links differ per launch: one line for all
         return re.sub(r"\d+(?:[.,]\d+)*", "#", r)[:90]
 
     def reset_why(self) -> None:
