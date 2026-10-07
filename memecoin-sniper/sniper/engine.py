@@ -174,6 +174,8 @@ class Engine:
         self.queue: asyncio.Queue[Candidate] = asyncio.Queue(maxsize=500)
         self.outcomes: deque[tuple[float, str]] = deque(maxlen=20_000)  # (time, reason): /why
         self.outcomes_seen: deque[float] = deque(maxlen=10_000)
+        # launches that cleared the confirmation window but one check (for /why)
+        self.near_misses: deque[tuple[float, str]] = deque(maxlen=2_000)
         self.seen: dict[tuple, float] = {}
         self.positions: dict[str, Position] = {}
         self.curves: dict[str, CurveState] = {}
@@ -351,10 +353,23 @@ class Engine:
             reasons = [r.strip() for r in html.unescape(body).split(";") if r.strip()]
         else:
             reasons = [html.unescape(result).strip()]
-        for r in reasons[:3]:
-            # numbers vary per token: "dev bought 9.1%" and "dev bought 12.0%" count as one
-            self.outcomes.append((now, re.sub(r"\d+(?:[.,]\d+)*", "#", r)[:90]))
+        keys = [self._reason_key(r) for r in reasons]
+        for k in keys[:3]:
+            self.outcomes.append((now, k))
         self.outcomes_seen.append(now)
+        # one failed check after watching the early trades, or only the dev wallet: the
+        # launches your settings came closest to buying
+        if (result.startswith("❌ confirmation failed") and len(keys) == 1) \
+                or result.startswith("❌ dev check"):
+            for k in keys[:3]:
+                self.near_misses.append((now, k))
+
+    @staticmethod
+    def _reason_key(r: str) -> str:
+        """Group reasons that differ only by numbers or a wallet: "dev bought 9.1%" and
+        "dev bought 12.0%" count as one."""
+        r = re.sub(r"\s*\([1-9A-HJ-NP-Za-km-z]{3,}…\)", "", r)  # "(BwWK7f…)" wallet tags
+        return re.sub(r"\d+(?:[.,]\d+)*", "#", r)[:90]
 
     def why_summary(self, minutes: int = 60) -> str:
         """What happened to the launches of the last `minutes`: bought, or why not."""
@@ -365,9 +380,16 @@ class Engine:
             return (f"🔎 No launches handled in the last {minutes} min. "
                     + ("The bot is paused: tap ▶️ Start sniping." if self.paused
                        else "Check 🩺 Health: is the PumpPortal feed connected?"))
+        bought = counts.pop("bought", 0)
         lines = [f"🔎 <b>Last {minutes} min</b>: {seen} launches looked at, "
-                 f"{counts.pop('bought', 0)} bought.", "", "Top reasons for not buying:"]
+                 f"{bought} bought.", "", "Top reasons for not buying:"]
         lines += [f"  {n:>4} × {html.escape(r)}" for r, n in counts.most_common(10)]
+        near = Counter(r for t, r in self.near_misses if t >= since)
+        if near:
+            lines += ["", "Closest calls (passed everything else):"]
+            lines += [f"  {n:>4} × {html.escape(r)}" for r, n in near.most_common(5)]
+        elif not bought and self.cfg.entry.confirm_seconds > 0:
+            lines += ["", "No launch got within one check of a buy."]
         return "\n".join(lines)
 
     async def handle_candidate(self, c: Candidate) -> Optional[str]:
@@ -414,7 +436,7 @@ class Engine:
             notes += "; early flow confirmed"
             problems = await self.dev_problems(c)
             if problems:
-                result = "❌ rejected: " + esc("; ".join(problems))
+                result = "❌ dev check: " + esc("; ".join(problems))
             else:
                 result = await self.try_buy(c, notes)
             pos = self.positions.get(c.mint)
@@ -423,7 +445,7 @@ class Engine:
             return result
         problems = await self.dev_problems(c)
         if problems:
-            return "❌ rejected: " + esc("; ".join(problems))
+            return "❌ dev check: " + esc("; ".join(problems))
         if c.source == "pumpfun-migration" and not await self._route_ready(c):
             return "❌ rejected: no trading route yet after graduating"
         return await self.try_buy(c, notes)

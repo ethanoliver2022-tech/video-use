@@ -88,7 +88,7 @@ data_dir: data
 #   max_identical_buys: 3
 #   max_market_cap_sol: 0
 #   min_net_flow_sol: 0         # early buys minus sells must exceed this
-#   max_top_holders_pct: 35     # top 10 wallets (dev included) % of supply; 0 = off
+#   max_top_holders_pct: 0      # top 10 wallets (dev included) % of supply; 0 = off
 #   max_launch_bundle_pct: 25   # % held by wallets that bought at launch; 0 = off
 #
 # filters:

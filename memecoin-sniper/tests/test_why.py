@@ -45,3 +45,21 @@ async def test_why_from_telegram(tmp_path):
     await h.tap("why")
     assert "1 launches looked at" in h.last
     await h.close()
+
+
+def test_why_groups_wallet_tags_and_shows_the_closest_calls(tmp_path):
+    from sniper.models import Candidate
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    e = h.eng
+    c = Candidate(chain="solana", mint="M", source="pumpfun")
+    e._note_outcome(c, "❌ confirmation failed: one wallet is 51% of early buys (BwWK7f…)")
+    e._note_outcome(c, "❌ confirmation failed: one wallet is 40% of early buys (9xQeWv…)")
+    e._note_outcome(c, "❌ confirmation failed: only 3 unique buyers (&lt; 6); not enough net buying")
+    e._note_outcome(c, "❌ dev check: dev wallet is only 12 min old")
+    e._note_outcome(c, "❌ rejected: dev bought 9.1% of supply at launch")
+    text = e.why_summary()
+    assert "2 × one wallet is #% of early buys\n" in text + "\n"
+    near = text.split("Closest calls")[1]
+    assert "one wallet is" in near and "dev wallet is only # min old" in near
+    assert "unique buyers" not in near and "dev bought" not in near

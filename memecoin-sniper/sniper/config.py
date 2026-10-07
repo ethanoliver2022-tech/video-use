@@ -101,7 +101,10 @@ class EntryConfig:
     max_identical_buys: int = 3            # same SOL size from different wallets = bundle
     min_net_flow_sol: float = 0.0          # early buys minus sells
     max_market_cap_sol: float = 0.0        # 0 = no cap; skip if it already ran too far
-    max_top_holders_pct: float = 35.0      # top 10 wallets (dev included) % of supply; 0 = off
+    # top 10 wallets (dev included) % of supply; 0 = off. Off by default: seconds after a
+    # launch there are only a handful of holders, so this mostly measures how much has been
+    # bought, and would skip the launches with the strongest early buying
+    max_top_holders_pct: float = 0.0
     max_launch_bundle_pct: float = 25.0    # % held by wallets that bought in the first second
     #                                        (the dev's bundled wallets); 0 = off
 

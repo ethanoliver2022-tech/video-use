@@ -73,7 +73,8 @@ SETTINGS: list[Setting] = [
     Setting("entry.min_unique_buyers", "Min early buyers", "int", 0, 1000),
     Setting("entry.max_top_holders_pct", "Max top-10 (launches)", "float", 0, 100, "%",
             help="skip a new launch if its top 10 wallets (dev included) hold more than "
-                 "this % of supply at the end of the confirm window; 0 = off"),
+                 "this % of supply at the end of the confirm window; 0 = off. Seconds after "
+                 "launch the top 10 is nearly every holder, so keep it high (50+) or off"),
     Setting("entry.max_launch_bundle_pct", "Max launch bundle", "float", 0, 100, "%",
             help="skip if wallets that bought in the launch block hold more than this % "
                  "(how bundled rugs start); 0 = off"),
