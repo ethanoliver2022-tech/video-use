@@ -97,3 +97,31 @@ def test_our_own_sells_never_count_as_a_whale():
     p = _pos()
     exits.record_trade(p, _sell("ME", 80 * M, 0), set(), own_wallet="ME")
     assert p.whale_dump_pct == 0
+
+
+async def test_trades_are_watched_from_the_instant_checks_and_dropped_on_reject(tmp_path, monkeypatch):
+    """Launch-block buys happen in the first second: watching only after the slower filters
+    would miss them (and count legit early buys as the bundle)."""
+    from sniper.models import Candidate, SafetyReport
+    from tests.test_telegram import Harness
+    h = Harness(tmp_path)
+    eng = h.eng
+    eng.paused = False
+    eng.cfg.entry.confirm_seconds = 5
+    monkeypatch.setattr(type(eng.stream), "trades_live", property(lambda s: True), raising=False)
+    monkeypatch.setattr(type(eng.stream), "trades_enabled", property(lambda s: True), raising=False)
+    seen_flow = []
+
+    async def slow_filters(c):
+        seen_flow.append(c.mint in eng.flows)     # already watching while these run
+        return SafetyReport(passed=False, reasons=["socials reused"])
+    eng.safety.evaluate = slow_filters
+    mint = "Bund1e" + "x" * 34 + "pump"
+    c = Candidate(chain="solana", mint=mint, source="pumpfun", creator="DEV", route="pump",
+                  v_sol=30.0, v_tokens=1_073_000_000.0, creator_initial_buy_tokens=1.0)
+    res = await eng.handle_candidate(c)
+    assert "socials reused" in res and seen_flow == [True]
+    assert mint not in eng.flows
+    assert {"method": "subscribeTokenTrade", "keys": [mint]} in h.ws
+    assert {"method": "unsubscribeTokenTrade", "keys": [mint]} in h.ws
+    await h.close()

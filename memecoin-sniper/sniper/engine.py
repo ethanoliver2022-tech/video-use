@@ -413,6 +413,8 @@ class Engine:
         finally:
             if c.prebuilt is not None and not c.prebuilt.done():
                 c.prebuilt.cancel()  # rejected or skipped: the built transaction is never sent
+            if c.mint in self.flows:   # left before its window (confirm_flow clears its own)
+                await self._drop_flow(c)
 
     async def _handle_candidate(self, c: Candidate) -> Optional[str]:
         if not c.queued_at:  # copy trades, manual and momentum buys: speed is timed from here
@@ -427,6 +429,10 @@ class Engine:
             windowed = c.source == "pumpfun" and self.cfg.entry.confirm_seconds > 0
             if self.live and not windowed and c.route == "pump" and self.safety.quick_check(c):
                 self._start_prebuild(c)
+            if windowed and self.has_trade_stream and self.safety.quick_check(c):
+                # watch its trades from now, not after the slower filters: who bought at
+                # launch is the bundle check, and those buys happen in the first second
+                await self._open_flow(c)
             report = await self.safety.evaluate(c)
             if not report.passed:
                 log.debug("reject %s: %s", tag, "; ".join(report.reasons))
@@ -547,14 +553,26 @@ class Engine:
         task.add_done_callback(lambda t: t.cancelled() or t.exception())  # never "unretrieved"
         c.prebuilt, c.prebuilt_sol = task, sol
 
+    async def _open_flow(self, c: Candidate) -> EarlyFlow:
+        flow = self.flows.get(c.mint)
+        if flow is None:
+            flow = self.flows[c.mint] = EarlyFlow(
+                creator=c.creator, dev_tokens=c.creator_initial_buy_tokens or 0.0,
+                v_tokens=c.v_tokens or 0.0,
+                started=time.monotonic() - c.age_seconds)   # "at launch" counts from the launch
+            await self.stream.watch_token(c.mint)
+        return flow
+
+    async def _drop_flow(self, c: Candidate) -> None:
+        """Rejected before its confirmation window: stop the (billed) trade feed for it."""
+        if self.flows.pop(c.mint, None) is not None and c.mint not in self.positions:
+            await self.stream.unwatch_token(c.mint)
+
     async def confirm_flow(self, c: Candidate) -> list[str]:
         """Watch the first seconds of trading before committing (bundle / farm detection)."""
         if not self.has_trade_stream:
             return await self._confirm_onchain(c)
-        flow = self.flows[c.mint] = EarlyFlow(creator=c.creator,
-                                              dev_tokens=c.creator_initial_buy_tokens or 0.0,
-                                              v_tokens=c.v_tokens or 0.0)
-        await self.stream.watch_token(c.mint)
+        flow = await self._open_flow(c)
         try:
             await self._window(c, flow)
         finally:

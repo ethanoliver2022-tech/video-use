@@ -71,6 +71,12 @@ SETTINGS: list[Setting] = [
             help="newly listed tokens from DexScreener"),
     Setting("entry.confirm_seconds", "Confirm window", "float", 0, 120, "s"),
     Setting("entry.min_unique_buyers", "Min early buyers", "int", 0, 1000),
+    Setting("entry.max_single_buyer_pct", "Max single buyer", "float", 1, 100, "%",
+            help="skip if one wallet (not the dev) made more than this % of the early buying"),
+    Setting("entry.max_identical_buys", "Max identical buys", "int", 0, 100,
+            help="skip if this many wallets bought the exact same SOL amount (a bundle); 0 = off"),
+    Setting("entry.min_net_flow_sol", "Min net buying", "float", 0, 1000, "SOL",
+            help="early buys minus sells must be more than this"),
     Setting("entry.max_top_holders_pct", "Max top-10 (launches)", "float", 0, 100, "%",
             help="skip a new launch if its top 10 wallets (dev included) hold more than "
                  "this % of supply at the end of the confirm window; 0 = off. Seconds after "
