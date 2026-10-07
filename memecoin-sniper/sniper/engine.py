@@ -478,7 +478,9 @@ class Engine:
         """Watch the first seconds of trading before committing (bundle / farm detection)."""
         if not self.has_trade_stream:
             return await self._confirm_onchain(c)
-        flow = self.flows[c.mint] = EarlyFlow(creator=c.creator)
+        flow = self.flows[c.mint] = EarlyFlow(creator=c.creator,
+                                              dev_tokens=c.creator_initial_buy_tokens or 0.0,
+                                              v_tokens=c.v_tokens or 0.0)
         await self.stream.watch_token(c.mint)
         try:
             await self._window(c, flow)

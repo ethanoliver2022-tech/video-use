@@ -101,6 +101,9 @@ class EntryConfig:
     max_identical_buys: int = 3            # same SOL size from different wallets = bundle
     min_net_flow_sol: float = 0.0          # early buys minus sells
     max_market_cap_sol: float = 0.0        # 0 = no cap; skip if it already ran too far
+    max_top_holders_pct: float = 35.0      # top 10 wallets (dev included) % of supply; 0 = off
+    max_launch_bundle_pct: float = 25.0    # % held by wallets that bought in the first second
+    #                                        (the dev's bundled wallets); 0 = off
 
 
 @dataclass
@@ -139,6 +142,8 @@ class ExitConfig:
     max_hold_seconds: int = 900
     stale_seconds: int = 120                # no price update for this long -> exit
     exit_on_dev_sell: bool = True
+    exit_on_whale_sell_pct: float = 4.0     # sell all when a wallet holding at least this % of
+    #                                         supply dumps half its bag or more; 0 = off
     sell_on_migration: bool = False        # sell everything when the token leaves the curve
     kol_wallets: list[str] = field(default_factory=list)
     kol_buy_sell_pct: float = 50.0          # sell this % of remaining into the first KOL buy

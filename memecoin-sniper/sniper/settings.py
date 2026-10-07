@@ -40,6 +40,9 @@ SETTINGS: list[Setting] = [
     Setting("exits.breakeven_after_first_tp", "Breakeven after TP", "bool"),
     Setting("exits.max_hold_seconds", "Max hold", "int", 10, 86400 * 7, "s"),
     Setting("exits.exit_on_dev_sell", "Exit on dev sell", "bool"),
+    Setting("exits.exit_on_whale_sell_pct", "Exit on whale dump", "float", 0, 100, "%",
+            help="sell all when a wallet holding this % of supply or more dumps half its "
+                 "bag; 0 = off"),
     Setting("exits.sell_on_migration", "Sell on migration", "bool",
             help="sell everything the moment a token graduates off the pump.fun curve"),
     Setting("exits.kol_wallets", "KOL wallets", "wallets", help="comma-separated addresses, or 'none'"),
@@ -68,6 +71,12 @@ SETTINGS: list[Setting] = [
             help="newly listed tokens from DexScreener"),
     Setting("entry.confirm_seconds", "Confirm window", "float", 0, 120, "s"),
     Setting("entry.min_unique_buyers", "Min early buyers", "int", 0, 1000),
+    Setting("entry.max_top_holders_pct", "Max top-10 (launches)", "float", 0, 100, "%",
+            help="skip a new launch if its top 10 wallets (dev included) hold more than "
+                 "this % of supply at the end of the confirm window; 0 = off"),
+    Setting("entry.max_launch_bundle_pct", "Max launch bundle", "float", 0, 100, "%",
+            help="skip if wallets that bought in the launch block hold more than this % "
+                 "(how bundled rugs start); 0 = off"),
     Setting("filters.max_creator_initial_buy_pct", "Max dev buy", "float", 0, 100, "%"),
     Setting("filters.max_top10_holder_pct", "Max top-10 hold", "float", 1, 100, "%"),
     Setting("filters.min_socials", "Min socials", "int", 0, 3),

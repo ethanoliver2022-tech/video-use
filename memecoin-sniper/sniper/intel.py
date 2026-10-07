@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
@@ -14,6 +15,9 @@ import httpx
 from .config import EntryConfig
 
 log = logging.getLogger(__name__)
+
+LAUNCH_SECONDS = 1.0               # buys this soon after we start watching count as the launch
+CURVE_START_TOKENS = 1_073_000_000  # a pump.fun curve's virtual token reserve before any buy
 
 SOCIAL_KEYS = ("twitter", "telegram", "website")
 PLACEHOLDER_HOSTS = {"twitter.com", "t.me", "pump.fun", "dexscreener.com"}
@@ -142,16 +146,34 @@ class EarlyFlow:
     sells: list[tuple[str, float]] = field(default_factory=list)
     market_cap_sol: float = 0.0
     dev_sold: bool = False
+    dev_tokens: float = 0.0                         # the dev's buy in the create transaction
+    holdings: dict = field(default_factory=dict)    # wallet -> tokens, from the trades
+    launch_buyers: set = field(default_factory=set)  # bought in the first second (bundles)
+    started: float = field(default_factory=time.monotonic)
+    v_tokens: float = 0.0                           # curve's token reserve, latest seen
 
     def add(self, msg: dict) -> None:
         from .models import num
         trader = msg.get("traderPublicKey", "")
+        side = msg.get("txType")
         sol = num(msg.get("solAmount"), allow_zero=True) or 0.0
         mcap = num(msg.get("marketCapSol"))
         if mcap:
             self.market_cap_sol = mcap
-        if msg.get("txType") == "buy":
+        v_tok = num(msg.get("vTokensInBondingCurve"))
+        if v_tok:
+            self.v_tokens = v_tok
+        if trader and side in ("buy", "sell"):
+            balance = num(msg.get("newTokenBalance"), allow_zero=True)
+            tokens = num(msg.get("tokenAmount"), allow_zero=True) or 0.0
+            if balance is None:
+                held = self.holdings.get(trader, self.dev_tokens if trader == self.creator else 0.0)
+                balance = max(0.0, held + (tokens if side == "buy" else -tokens))
+            self.holdings[trader] = balance
+        if side == "buy":
             self.buys.append((trader, sol))
+            if trader != self.creator and time.monotonic() - self.started <= LAUNCH_SECONDS:
+                self.launch_buyers.add(trader)
         elif msg.get("txType") == "sell":
             self.sells.append((trader, sol))
             if self.creator and trader == self.creator:
@@ -186,4 +208,26 @@ class EarlyFlow:
                             else f"not enough net buying (net flow {net:+.2f} SOL)")
         if cfg.max_market_cap_sol and self.market_cap_sol > cfg.max_market_cap_sol:
             problems.append(f"market cap already {self.market_cap_sol:.0f} SOL")
+        problems += self._holder_problems(cfg)
+        return problems
+
+    def _holder_problems(self, cfg: EntryConfig) -> list[str]:
+        """Who holds the supply now: a few wallets (or the dev's bundle) holding a big
+        share can dump it on everyone who buys after them."""
+        from .models import PUMP_TOTAL_SUPPLY
+        held = dict(self.holdings)
+        if self.creator and self.creator not in held and self.dev_tokens:
+            held[self.creator] = self.dev_tokens
+        problems = []
+        top = sum(sorted(held.values(), reverse=True)[:10]) / PUMP_TOTAL_SUPPLY * 100
+        if cfg.max_top_holders_pct and top > cfg.max_top_holders_pct:
+            problems.append(f"top 10 wallets hold {top:.0f}% of supply")
+        # tokens out of the curve that no trade we saw accounts for were bought before we
+        # could watch: in the launch block, which is where a dev's bundled wallets buy
+        unseen = 0.0
+        if self.v_tokens:
+            unseen = max(0.0, CURVE_START_TOKENS - self.v_tokens - sum(held.values()))
+        bundle = (sum(held.get(w, 0.0) for w in self.launch_buyers) + unseen) / PUMP_TOTAL_SUPPLY * 100
+        if cfg.max_launch_bundle_pct and bundle > cfg.max_launch_bundle_pct:
+            problems.append(f"wallets that bought at launch hold {bundle:.0f}% (bundled launch)")
         return problems

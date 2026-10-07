@@ -1,7 +1,8 @@
 """Exit rules — pure functions so they can be tested without a network.
 
 Priority (first match wins):
-  1. dev sold / copied wallet sold -> dump everything (the classic rug precursor)
+  1. dev sold / big holder dumped / copied wallet sold
+                                   -> dump everything (the classic rug precursors)
   2. moonbag (if one is being kept) -> only its own wide trailing stop / max hold apply
   3. stop loss                     -> dump everything
   4. breakeven, trailing stop, sell pressure, max hold, stale
@@ -18,7 +19,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .config import ExitConfig
-from .models import Position, TradeTick, num
+from .models import PUMP_TOTAL_SUPPLY, Position, TradeTick, num
 
 DUST_FRACTION = 0.02    # if a partial sell would leave < 2% of the original bag, sell it all
 INITIALS_BUFFER = 1.03  # sell 3% extra when taking initials to cover fees and slippage
@@ -43,6 +44,12 @@ def record_trade(pos: Position, msg: dict, kol_wallets: set[str], own_wallet: st
                                        ts=time.time()))
     if side == "sell" and pos.creator and trader == pos.creator:
         pos.dev_sold = True
+    if side == "sell":
+        sold = num(msg.get("tokenAmount"))
+        left = num(msg.get("newTokenBalance"), allow_zero=True)
+        if sold and left is not None and sold >= left:      # dumped half its bag or more
+            pct = (sold + left) / PUMP_TOTAL_SUPPLY * 100      # its share before this sell
+            pos.whale_dump_pct = max(pos.whale_dump_pct, pct)
     if side == "sell" and pos.leader and trader == pos.leader:
         pos.leader_sold = True
     if side == "buy" and trader in kol_wallets and trader not in pos.kol_bought:
@@ -77,6 +84,8 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
 
     if cfg.exit_on_dev_sell and pos.dev_sold:
         return everything("dev sold")
+    if cfg.exit_on_whale_sell_pct and pos.whale_dump_pct >= cfg.exit_on_whale_sell_pct:
+        return everything(f"big holder dumped ({pos.whale_dump_pct:.0f}% of supply)")
     if pos.leader_sold:
         return everything("copied wallet sold")
     if cfg.sell_on_migration and pos.migrated and pos.seen_on_curve:

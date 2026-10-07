@@ -88,6 +88,8 @@ data_dir: data
 #   max_identical_buys: 3
 #   max_market_cap_sol: 0
 #   min_net_flow_sol: 0         # early buys minus sells must exceed this
+#   max_top_holders_pct: 35     # top 10 wallets (dev included) % of supply; 0 = off
+#   max_launch_bundle_pct: 25   # % held by wallets that bought at launch; 0 = off
 #
 # filters:
 #   require_mint_revoked: true
@@ -119,6 +121,7 @@ data_dir: data
 #   max_hold_seconds: 900
 #   stale_seconds: 120
 #   exit_on_dev_sell: true
+#   exit_on_whale_sell_pct: 4  # sell all when a holder of 4%+ of supply dumps half its bag
 #   sell_on_migration: false   # sell everything the moment the token graduates off the curve
 #   kol_wallets: []
 #   kol_buy_sell_pct: 50

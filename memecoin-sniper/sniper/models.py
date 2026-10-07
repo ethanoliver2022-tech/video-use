@@ -119,6 +119,7 @@ class Position:
     # (time, price) for the live chart; runtime only, like recent_trades
     price_history: deque = field(default_factory=lambda: deque(maxlen=1500))
     dev_sold: bool = False
+    whale_dump_pct: float = 0.0  # biggest holder (% of supply) seen dumping since the buy
     kol_bought: list[str] = field(default_factory=list)
     kol_exit_done: bool = False
     initials_taken: bool = False
