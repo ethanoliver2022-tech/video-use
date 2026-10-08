@@ -996,3 +996,34 @@ async def test_copy_buys_use_their_own_slippage_and_the_guard_allows_it():
     assert sent["slippage"] == 20
     # the guard's cap on what a buy may pull covers the copy slippage
     assert ex._buy_cap(1.0) == pytest.approx(1.0 * 1.40 * 1.05 + 0.01)
+
+
+async def test_a_buy_pumpportal_refuses_goes_through_another_route():
+    from sniper.execution.executors import _amount
+    from sniper.models import Candidate
+    assert _amount(0.061728394999999996) == "0.061728395" and _amount(5e-05) == "0.00005"
+    assert _amount("100%") == "100%"
+    cfg = load_config(None)
+
+    class Http:
+        async def post(self, url, data):
+            return httpx.Response(400, content=b"Bad Request")
+
+    class Jup:
+        async def quote(self, i, o, amount, slip, **k):
+            return {"q": amount, "slip": slip}
+
+        async def swap_tx(self, q, pubkey, fee):
+            return b"jupiter-tx"
+    ex = LiveExecutor(cfg, Keypair(), FakeRpc(), jupiter=Jup(), http=Http(), sender=FakeSender())
+    ex.native_state["buy"] = False              # direct pump.fun off: Jupiter is next
+    c = Candidate(chain="solana", mint="M", source="copy", route="pump", slippage_pct=40)
+    assert await ex._pump_buy_tx(c, 0.05) == b"jupiter-tx"
+
+    class NoJup(Jup):
+        async def quote(self, *a, **k):
+            raise RuntimeError("no route")
+    ex.jupiter = NoJup()
+    from sniper.execution.executors import NotSent
+    with pytest.raises(NotSent, match="PumpPortal couldn't build the buy"):
+        await ex._pump_buy_tx(c, 0.05)

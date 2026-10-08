@@ -304,6 +304,13 @@ class PaperExecutor:
         return await self.jupiter.out_ui(q)
 
 
+def _amount(v):
+    """Amounts for PumpPortal as plain decimals: never 1e-05 or 0.061728394999999996."""
+    if isinstance(v, float):
+        return f"{v:.9f}".rstrip("0").rstrip(".") or "0"
+    return v
+
+
 class LiveExecutor:
     def __init__(self, cfg: Config, keypair: Keypair, rpc: SolanaRpc, jupiter: Jupiter,
                  http: httpx.AsyncClient, sender: Optional[TxSender] = None):
@@ -334,7 +341,7 @@ class LiveExecutor:
             "publicKey": self.pubkey,
             "action": action,
             "mint": mint,
-            "amount": amount,
+            "amount": _amount(amount),
             "denominatedInSol": "true" if in_sol else "false",
             "slippage": max(1, round(slippage)),  # PumpPortal takes whole percents
             "priorityFee": await self.sender.priority_fee(),
@@ -592,12 +599,31 @@ class LiveExecutor:
     async def _pump_buy_tx(self, cand: Candidate, sol: float) -> bytes:
         """Once direct pump.fun trading passed its check: built here (one RPC round trip,
         no PumpPortal). Otherwise, or if that fails: PumpPortal."""
+        tried_native = False
         if self.native_ok:
+            tried_native = True
             native = await self._native("buy", lambda: self._native_buy(cand, sol))
             if native is not None:
                 return native
-        return await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True,
-                                         slippage_pct=self._slip(cand))
+        try:
+            return await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True,
+                                             slippage_pct=self._slip(cand))
+        except (RuntimeError, httpx.HTTPError) as e:
+            # PumpPortal wouldn't build it (e.g. 400 Bad Request): don't give up on the buy
+            refused = str(e)[:120]
+        log.warning("PumpPortal couldn't build the buy for %s (%s): trying other routes",
+                    cand.mint, refused)
+        if not tried_native:
+            native = await self._native("buy", lambda: self._native_buy(cand, sol))
+            if native is not None:
+                return native
+        try:
+            q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self._slip(cand))
+            return await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
+        except Exception as e:
+            raise NotSent(f"PumpPortal couldn't build the buy ({refused}), and neither could "
+                          f"direct pump.fun ({self.native_why or 'not available'}) nor Jupiter "
+                          f"({str(e)[:100]})") from e
 
     async def prepare_buy(self, cand: Candidate, sol: float) -> tuple[bytes, Optional[float], float]:
         """Build a pump.fun buy (and read the pre-buy balance) ahead of time, while the filters
