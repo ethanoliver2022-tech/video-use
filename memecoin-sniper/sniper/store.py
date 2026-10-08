@@ -203,5 +203,10 @@ class Store:
         o[key] = value
         self.set_setting("overrides", json.dumps(o))
 
+    def drop_override(self, key: str) -> None:
+        o = self.overrides()
+        if o.pop(key, None) is not None:
+            self.set_setting("overrides", json.dumps(o))
+
     def clear_overrides(self) -> None:
         self.set_setting("overrides", "{}")

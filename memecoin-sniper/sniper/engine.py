@@ -80,6 +80,8 @@ FEED_RETRY_SECONDS = 300      # re-ask PumpPortal for a refused trade feed this 
 KEEPALIVE_SECONDS = 120  # idle connections kept open this long
 WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
 DEVCHECK_LEAD = 3.0      # with a window: start the dev wallet lookups this long before it ends
+SOL_PRICE_TTL = 60.0     # seconds a SOL/USD price is reused for $ market cap limits
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
 USER_SOURCES = ("manual", "limit")  # user-initiated buys: allowed while auto-sniping is paused
 
@@ -152,6 +154,8 @@ class Engine:
         self.jupiter = Jupiter(cfg.endpoints.jupiter_api, self.rpc, self.http, cfg.jupiter_api_key)
         self.store = Store(cfg.data_dir, self.mode)
         self.wallet = WalletManager(cfg.data_dir, cfg.private_key)
+        for old in ("copytrade.max_market_cap_sol", "calls.max_market_cap_sol"):
+            self.store.drop_override(old)   # now set in $ (copytrade/calls.max_market_cap_usd)
         bad = apply_overrides(cfg, self.store.overrides())  # settings changed from Telegram
         if bad:
             log.warning("ignoring invalid saved settings: %s", ", ".join(bad))
@@ -201,6 +205,7 @@ class Engine:
         self._alerts: deque[float] = deque()
         self._tracker_alerts: deque[float] = deque()
         self._copy_misses: deque[float] = deque()
+        self._sol_usd: tuple[float, float] = (0.0, 0.0)   # (price, when) for $ market caps
         self._scan_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
         self._orders_running: set[int] = set()
@@ -704,14 +709,13 @@ class Engine:
         pump = pool in (None, "", "pump", "pump-amm")  # pump.fun curve or PumpSwap
         on_curve = pool == "pump"
         v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
-        if ct.max_market_cap_sol:
+        if ct.max_market_cap_usd:
             mcap = num(msg.get("marketCapSol"))
             if mcap is None:
                 mcap = await self._market_cap_sol(mint, None)
-            if mcap is not None and mcap > ct.max_market_cap_sol:
-                return await self._not_copied(
-                    name, mint, f"market cap {mcap:,.0f} SOL is over your copy limit "
-                                f"({ct.max_market_cap_sol:g} SOL)")
+            over = await self._over_cap(mcap, ct.max_market_cap_usd)
+            if over:
+                return await self._not_copied(name, mint, f"{over} (your copy limit)")
         c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6],
                       route="pump" if pump else "jupiter",  # other venues (LetsBonk...): Jupiter
                       leader=leader.address if leader.copy_sells else None,
@@ -1578,12 +1582,11 @@ class Engine:
             log.debug("curve lookup for call %s failed: %s", mint, e)
             curve = None
         on_curve = bool(curve and not curve.complete and curve.sol_quoted)
-        if cfg.max_market_cap_sol:
+        if cfg.max_market_cap_usd:
             mcap = await self._market_cap_sol(mint, curve if on_curve else None)
-            if mcap is not None and mcap > cfg.max_market_cap_sol:
-                await self.notifier.send(f"{head}\n❌ not bought: market cap already "
-                                         f"{mcap:,.0f} SOL (max {cfg.max_market_cap_sol:g})",
-                                         buttons=buttons)
+            over = await self._over_cap(mcap, cfg.max_market_cap_usd)
+            if over:
+                await self.notifier.send(f"{head}\n❌ not bought: {esc(over)}", buttons=buttons)
                 return
         c = Candidate(chain="solana", mint=mint, source="call", symbol=mint[:6],
                       creator=curve.creator if curve else None, buy_sol=group.sol or None,
@@ -1596,6 +1599,43 @@ class Engine:
         result = await self.handle_candidate(c) or "done"
         if not result.startswith("🟢"):   # a buy announces itself
             await self.notifier.send(f"{head}\n{result}", buttons=buttons)
+
+    async def sol_usd(self) -> Optional[float]:
+        """SOL's price in dollars, refreshed at most once a minute (stale beats none)."""
+        price, at = self._sol_usd
+        if price and time.monotonic() - at < SOL_PRICE_TTL:
+            return price
+        try:
+            q = await self.jupiter.quote(SOL_MINT, USDC_MINT, 1.0, 1, urgent=False)
+            fresh = await self.jupiter.out_ui(q)
+            if fresh > 0:
+                self._sol_usd = (fresh, time.monotonic())
+                return fresh
+        except Exception as e:
+            log.debug("SOL price unavailable: %s", e)
+        return price or None
+
+    async def _over_cap(self, mcap_sol: Optional[float], cap_usd: float) -> Optional[str]:
+        """Why a coin is too big for a $ market cap limit, or None if it's under (or the
+        numbers aren't available: a missing price never blocks a buy)."""
+        if mcap_sol is None:
+            return None
+        usd = await self.sol_usd()
+        if not usd:
+            log.warning("market cap limit skipped: no SOL price right now")
+            return None
+        mcap = mcap_sol * usd
+        if mcap <= cap_usd:
+            return None
+        return f"market cap ${mcap:,.0f} is over ${cap_usd:,.0f}"
+
+    async def _sol_price_loop(self) -> None:
+        """Keep the SOL price warm while a $ market cap limit is set, so the check
+        never waits on a price lookup when a buy comes in."""
+        while True:
+            if self.cfg.copytrade.max_market_cap_usd or self.cfg.calls.max_market_cap_usd:
+                await self.sol_usd()
+            await asyncio.sleep(SOL_PRICE_TTL - 5)
 
     async def _market_cap_sol(self, mint: str, curve) -> Optional[float]:
         try:
@@ -2127,7 +2167,8 @@ class Engine:
                  ("prices", self.price_poller), ("housekeeping", self.housekeeping),
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
-                 ("feed-watch", self.feed_watch), ("health", self._health_watch)]
+                 ("feed-watch", self.feed_watch), ("health", self._health_watch),
+                 ("sol-price", self._sol_price_loop)]
         # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,

@@ -1229,8 +1229,8 @@ class TelegramControl:
             lines.append("⏸ Sniping is paused: nothing is copied until you tap ▶️ Start.")
         ct = e.cfg.copytrade
         lines.append(f"Copies buys of {ct.min_leader_buy_sol:g}+ SOL"
-                     + (f" in coins under {ct.max_market_cap_sol:g} SOL market cap"
-                        if ct.max_market_cap_sol else ""))
+                     + (f" in coins under ${ct.max_market_cap_usd:,.0f} market cap"
+                        if ct.max_market_cap_usd else ""))
         rows = []
         stored = {x["address"]: x for x in e.store.copy_wallets()}
         shown = {w.address: w for w in wallets}

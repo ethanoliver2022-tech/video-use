@@ -196,7 +196,7 @@ class CallsConfig:
     action: str = "buy"             # "buy" or "alert" (just tell me)
     min_groups: int = 1             # buy only once the CA was posted in this many groups
     group_window_minutes: float = 30.0   # ...within this long of the first post
-    max_market_cap_sol: float = 0.0      # skip coins already bigger than this; 0 = no cap
+    max_market_cap_usd: float = 0.0      # skip coins already worth more ($); 0 = no cap
 
 
 @dataclass
@@ -205,7 +205,7 @@ class CopyTradeConfig:
     wallets: list[CopyWallet] = field(default_factory=list)
     min_leader_buy_sol: float = 0.05        # ignore dust buys / tests
     run_safety_checks: bool = True
-    max_market_cap_sol: float = 0.0         # don't copy into coins bigger than this; 0 = no cap
+    max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
 
 

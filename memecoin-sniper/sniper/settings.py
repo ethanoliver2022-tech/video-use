@@ -145,15 +145,16 @@ SETTINGS: list[Setting] = [
             help="only act once this many of your groups posted the same CA"),
     Setting("calls.group_window_minutes", "Groups window", "float", 1, 1440, "min",
             help="...within this long of the first post"),
-    Setting("calls.max_market_cap_sol", "Max call market cap", "float", 0, 1e9, "SOL",
-            help="skip called coins already worth more than this; 0 = no limit"),
+    Setting("calls.max_market_cap_usd", "Max call market cap", "float", 0, 1e12, "$",
+            help="skip called coins already worth more than this, e.g. 20k or 1.5m; "
+                 "0 = no limit"),
     # copy trade
     Setting("copytrade.enabled", "Copy trading", "bool"),
     Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL",
             help="only copy buys of at least this much SOL (skips their dust/test buys)"),
-    Setting("copytrade.max_market_cap_sol", "Max copy market cap", "float", 0, 1e9, "SOL",
-            help="don't copy into coins already worth more than this; 0 = no limit. "
-                 "A fresh pump.fun coin starts near 28 SOL and graduates around 400"),
+    Setting("copytrade.max_market_cap_usd", "Max copy market cap", "float", 0, 1e12, "$",
+            help="don't copy into coins already worth more than this, e.g. 20k or 1.5m; "
+                 "0 = no limit. A fresh pump.fun coin starts near $4-5k"),
     Setting("copytrade.own_exits", "Own exits for copies", "bool",
             help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
                  "instead of your main exits"),
@@ -223,7 +224,7 @@ def format_value(s: Setting, v: Any) -> str:
     if s.kind == "choice":
         return str(v)
     if s.unit == "$":
-        if s.key == "filters.max_fdv_usd" and not v:
+        if s.key.endswith(("max_fdv_usd", "max_market_cap_usd")) and not v:
             return "no limit"
         return f"${v:,.0f}"
     return f"{v:g}{s.unit}" if s.unit in ("%", "s") else f"{v:g} {s.unit}".strip()

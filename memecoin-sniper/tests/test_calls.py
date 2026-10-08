@@ -143,9 +143,10 @@ async def test_alert_mode_paused_and_market_cap_cap(h):
     await eng.on_call(CA, g, 1)
     assert "paused" in h.last
     eng.paused = False
-    eng.cfg.calls.max_market_cap_sol = 20       # this curve is ~32 SOL in: mcap ~ 34 SOL
+    eng._sol_usd = (150.0, 1e18)                 # SOL at $150 (fresh forever in this test)
+    eng.cfg.calls.max_market_cap_usd = 3000      # this curve's coin is ~32 SOL = ~$4.8k
     await eng.on_call(CA, g, 2)
-    assert "market cap already" in h.last and "posted in 2 groups" in h.last
+    assert "market cap $4,772" in h.last and "over $3,000" in h.last and "posted in 2 groups" in h.last
     assert CA not in eng.positions
     await h.close()
 
@@ -268,9 +269,10 @@ async def test_every_skipped_copy_says_why_in_telegram(h):
     leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
     await eng.handle_copy(_buy_msg(leader.address, CA, sol=0.01), leader)
     assert "not copied" in h.last and "only bought 0.010 SOL" in h.last
-    eng.cfg.copytrade.max_market_cap_sol = 100
+    eng._sol_usd = (150.0, 1e18)
+    eng.cfg.copytrade.max_market_cap_usd = 15000
     await eng.handle_copy(_buy_msg(leader.address, CA, mcap=250.0), leader)
-    assert "market cap 250 SOL is over your copy limit (100 SOL)" in h.last
+    assert "market cap $37,500 is over $15,000 (your copy limit)" in h.last
     assert CA not in eng.positions
     await eng.handle_copy(_buy_msg(leader.address, CA2, mcap=60.0), leader)
     assert CA2 in eng.positions                       # under the cap: copied
@@ -310,3 +312,45 @@ async def test_copied_positions_can_have_their_own_tp_sl_and_moonbag(h):
     await h.tap("set:copyexits")
     assert "Using them" in h.last
     await h.close()
+
+
+
+async def test_market_cap_limits_are_in_dollars_and_never_block_without_a_price(h):
+    from sniper.settings import BY_KEY, format_value, parse_value
+    s = BY_KEY["copytrade.max_market_cap_usd"]
+    assert parse_value(s, "20k") == 20000 and format_value(s, 0) == "no limit"
+    eng = h.eng
+    asked = []
+
+    async def quote(inp, out, amount, slippage, urgent=True):
+        asked.append((inp, out, amount))
+        return {"q": 1}
+
+    async def out_ui(q):
+        return 160.0
+    eng.jupiter.quote, eng.jupiter.out_ui = quote, out_ui
+    assert await eng.sol_usd() == 160.0 and await eng.sol_usd() == 160.0
+    assert len(asked) == 1                                    # cached for a minute
+    assert await eng._over_cap(100, 20000) is None            # $16k < $20k
+    assert "$32,000" in await eng._over_cap(200, 20000)
+
+    async def broken(*a, **k):
+        raise RuntimeError("down")
+    eng.jupiter.quote = broken
+    eng._sol_usd = (0.0, 0.0)
+    assert await eng._over_cap(10_000, 1) is None             # no price: don't block buys
+    await h.close()
+
+
+def test_old_sol_market_cap_overrides_are_dropped(tmp_path):
+    from sniper.engine import Engine
+    from sniper.config import load_config
+    from sniper.store import Store
+    st = Store(str(tmp_path))
+    st.set_override("copytrade.max_market_cap_sol", 100)
+    st.set_override("trading.buy_amount_sol", 0.02)
+    cfg = load_config("config.example.yaml")
+    cfg.data_dir = str(tmp_path)
+    eng = Engine(cfg, live=False, config_path="config.example.yaml", start_paused=True)
+    assert "copytrade.max_market_cap_sol" not in eng.store.overrides()
+    assert eng.cfg.trading.buy_amount_sol == 0.02
