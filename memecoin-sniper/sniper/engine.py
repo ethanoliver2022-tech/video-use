@@ -3,6 +3,7 @@ persistence and the Telegram interface."""
 from __future__ import annotations
 
 import asyncio
+import copy
 import html
 import logging
 import re
@@ -13,7 +14,7 @@ from typing import Optional
 import httpx
 
 from . import exits
-from .config import Config, CopyWallet
+from .config import Config, CopyWallet, ExitConfig
 from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, LiveExecutor,
                                   NothingToSell, NotLanded, PaperExecutor)
 from .execution.sender import TxSender
@@ -790,10 +791,19 @@ class Engine:
 
     # ---------- entries ----------
 
+    def exit_cfg(self, pos: Position) -> ExitConfig:
+        """The exit rules for a position: copied ones can have their own TP / SL / moonbag."""
+        if pos.source == "copy" and self.cfg.copytrade.own_exits:
+            import dataclasses
+            ce = self.cfg.copyexits
+            return dataclasses.replace(self.cfg.exits, **{f.name: getattr(ce, f.name)
+                                                          for f in dataclasses.fields(ce)})
+        return self.cfg.exits
+
     def _slots_used(self) -> int:
         """Open positions (moonbags don't take up a slot) plus buys in flight or unconfirmed."""
         return sum(1 for p in self.positions.values()
-                   if not p.closed and not exits.in_moonbag(p, self.cfg.exits)) \
+                   if not p.closed and not exits.in_moonbag(p, self.exit_cfg(p))) \
             + len(set(self._buying) | set(self.pending_buys()))
 
     async def risk_block(self, sol: float, bal: Optional[float] = None) -> Optional[str]:
@@ -1279,7 +1289,7 @@ class Engine:
             return
         if time.monotonic() < self._sell_next_try.get(pos.mint, float("-inf")):
             return  # backing off after a failed sell
-        dec = exits.evaluate(pos, self.cfg.exits)
+        dec = exits.evaluate(pos, self.exit_cfg(pos))
         if dec:
             await self.execute_sell(pos, dec)
 
@@ -1304,7 +1314,7 @@ class Engine:
             if pos.closed:
                 return "already closed"
             if dec.tokens <= 0 and not dec.sell_all:  # bookkeeping only (e.g. TP above a moonbag)
-                exits.apply_fill(pos, dec, 0.0, 0.0, self.cfg.exits)
+                exits.apply_fill(pos, dec, 0.0, 0.0, self.exit_cfg(pos))
                 self.store.save_position(pos)
                 return "nothing to sell"
             if not self.live:  # a live sell fills ~1s later too: price it then (see above)
@@ -1354,7 +1364,7 @@ class Engine:
             estimated = not fill.sol_known
             if estimated:  # landed, but the tx couldn't be read: never book it as 0 SOL
                 fill.sol = self._estimate_value(pos, fill.tokens)
-            exits.apply_fill(pos, dec, fill.tokens, fill.sol, self.cfg.exits)
+            exits.apply_fill(pos, dec, fill.tokens, fill.sol, self.exit_cfg(pos))
             pos.pending_exit = None
             self.store.save_position(pos)
             self.store.event("sell", pos.mint, pos.symbol, reason=dec.reason, tokens=fill.tokens,
@@ -1407,7 +1417,7 @@ class Engine:
                                               dec.tp_index if dec else None, dec.kind if dec else "")
                     # marks the TP level / initials / KOL exit as done, so it isn't sold again
                     est = self._estimate_value(pos, sold)
-                    exits.apply_fill(pos, done, sold, est, self.cfg.exits)
+                    exits.apply_fill(pos, done, sold, est, self.exit_cfg(pos))
                     self.store.save_position(pos)
                     self.store.event("sell", pos.mint, pos.symbol, reason=f"{done.reason} (late)",
                                      tokens=sold, sol=est, sig="landed-late")
@@ -1813,6 +1823,8 @@ class Engine:
         if key.startswith("discovery.pumpfun"):
             await self.stream.set_feeds(self.cfg.discovery.pumpfun_new_tokens,
                                         self.cfg.discovery.pumpfun_migrations)
+        elif key == "copytrade.own_exits" and self.cfg.copytrade.own_exits:
+            self._seed_copy_exits()
         elif key.startswith("copytrade."):
             before = set(self._copy)
             self._load_copy_wallets()
@@ -1824,6 +1836,19 @@ class Engine:
             self.safety.probe_sol = self.cfg.trading.buy_amount_sol
         elif key == "trading.slippage_pct" and isinstance(self.executor, PaperExecutor):
             self.executor.slippage_pct = self.cfg.trading.slippage_pct
+
+    def _seed_copy_exits(self) -> None:
+        """Copy exits switched on for the first time: start from the main exit settings,
+        so nothing changes until you edit them."""
+        import dataclasses
+        if any(k.startswith("copyexits.") for k in self.store.overrides()):
+            return
+        for f in dataclasses.fields(self.cfg.copyexits):
+            key = f"copyexits.{f.name}"
+            if key in BY_KEY:
+                value = getattr(self.cfg.exits, f.name)
+                setattr(self.cfg.copyexits, f.name, copy.deepcopy(value))
+                self.store.set_override(key, to_storable(BY_KEY[key], value))
 
     async def apply_preset(self, name: str) -> str:
         from .config import PRESETS, load_config
@@ -2038,7 +2063,7 @@ class Engine:
                         exits.apply_fill(pos, exits.ExitDecision(
                             sold, False, pe.get("reason", "sell"), pe.get("tp_index"),
                             pe.get("kind", "")), sold, self._estimate_value(pos, sold),
-                            self.cfg.exits)
+                            self.exit_cfg(pos))
                     else:
                         pos.sol_out += self._estimate_value(pos, sold)
                 pos.pending_exit = None

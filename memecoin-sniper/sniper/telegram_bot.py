@@ -809,7 +809,7 @@ class TelegramControl:
         for p in open_pos:
             value = p.tokens_remaining * p.last_price
             tags = []
-            if exits.in_moonbag(p, self.engine.cfg.exits):
+            if exits.in_moonbag(p, self.engine.exit_cfg(p)):
                 tags.append("🌙 moonbag")
             if p.initials_taken:
                 tags.append("💰 initials out")
@@ -1013,7 +1013,7 @@ class TelegramControl:
     async def _chart_png(self, p) -> bytes:
         """Drawn off the event loop so it never delays a trade."""
         from .chart import render
-        ex = self.engine.cfg.exits
+        ex = self.engine.exit_cfg(p)
         tps = [lvl.at_pct for lvl in ex.take_profit]
         return await asyncio.to_thread(render, list(p.price_history), p.entry_price,
                                        ex.stop_loss_pct, tps)
@@ -1171,8 +1171,15 @@ class TelegramControl:
         for i, s in enumerate(SETTINGS):
             if group_of(s) == group:
                 rows.append([(f"{s.label}: {format_value(s, get_value(self.engine.cfg, s.key))}", f"e:{i}")])
+        note = "Tap a setting to change it."
+        if group == "copyexits":
+            note = ("These apply to copied positions only. ✅ Using them." if
+                    self.engine.cfg.copytrade.own_exits else
+                    "Off: copied positions use your main exits. Turn on <b>Own exits for "
+                    "copies</b> to use these (they start as a copy of your main exits).")
+            rows.append([("👥 Copy & track", "c")])
         rows.append([("⬅️ Settings", "set"), ("🏠 Menu", "m")])
-        await self.show(f"{GROUPS.get(group, group)}\nTap a setting to change it.", rows, msg_id)
+        await self.show(f"{GROUPS.get(group, group)}\n{note}", rows, msg_id)
 
     async def edit_setting(self, idx: int, msg_id: Optional[int]) -> None:
         s = SETTINGS[idx]
@@ -1247,7 +1254,9 @@ class TelegramControl:
             lines.append("⚠️ Filters are OFF for copies: anything they buy is copied.")
         rows.append([("➕ Add wallet", "c:add"), (f"Copy: {status}", f"e:{toggle_idx}")])
         rows.append([("🛡 Filters on copies: " + ("✅ on" if checks else "⚠️ OFF"), f"e:{filters_idx}")])
-        rows.append([("⚙️ Copy options", "set:copytrade")])
+        own = ct.own_exits
+        rows.append([("⚙️ Copy options", "set:copytrade"),
+                     ("🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping", "set:copyexits")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 

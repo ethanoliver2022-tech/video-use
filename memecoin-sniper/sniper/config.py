@@ -168,6 +168,28 @@ class ExitConfig:
 
 
 @dataclass
+class CopyExitConfig:
+    """Exits for copied positions, used instead of the main ones while
+    copytrade.own_exits is on (everything else comes from the main exit settings)."""
+    take_profit: list[TakeProfitLevel] = field(
+        default_factory=lambda: [
+            TakeProfitLevel(at_pct=40, sell_pct=40),
+            TakeProfitLevel(at_pct=100, sell_pct=30),
+            TakeProfitLevel(at_pct=250, sell_pct=20),
+        ]
+    )
+    stop_loss_pct: float = 25.0
+    breakeven_after_first_tp: bool = True
+    trailing_activate_pct: float = 30.0
+    trailing_stop_pct: float = 20.0
+    max_hold_seconds: int = 900
+    sell_initials_at_pct: float = 0.0
+    moonbag_pct: float = 0.0
+    moonbag_trailing_pct: float = 50.0
+    moonbag_max_hold_hours: float = 24.0
+
+
+@dataclass
 class CallsConfig:
     """Buying contract addresses posted in Telegram groups you're in (your own account)."""
     enabled: bool = False
@@ -184,6 +206,7 @@ class CopyTradeConfig:
     min_leader_buy_sol: float = 0.05        # ignore dust buys / tests
     run_safety_checks: bool = True
     max_market_cap_sol: float = 0.0         # don't copy into coins bigger than this; 0 = no cap
+    own_exits: bool = False                 # copied positions use the copyexits section
 
 
 @dataclass
@@ -216,6 +239,7 @@ class Config:
     exits: ExitConfig = field(default_factory=ExitConfig)
     copytrade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
     calls: CallsConfig = field(default_factory=CallsConfig)
+    copyexits: CopyExitConfig = field(default_factory=CopyExitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     endpoints: Endpoints = field(default_factory=Endpoints)
     data_dir: str = "data"

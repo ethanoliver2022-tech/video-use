@@ -278,3 +278,35 @@ async def test_every_skipped_copy_says_why_in_telegram(h):
     await eng.handle_copy(_buy_msg(leader.address, str(Keypair().pubkey())), leader)
     assert "paused" in h.last
     await h.close()
+
+
+async def test_copied_positions_can_have_their_own_tp_sl_and_moonbag(h):
+    from sniper import exits
+    from sniper.config import CopyWallet, TakeProfitLevel
+    eng = h.eng
+    eng.cfg.exits.stop_loss_pct = 15
+    leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
+    await eng.handle_copy(_buy_msg(leader.address, CA), leader)
+    pos = eng.positions[CA]
+    assert eng.exit_cfg(pos) is eng.cfg.exits                 # off: main exits
+
+    await eng.set_setting("copytrade.own_exits", True)
+    assert eng.cfg.copyexits.stop_loss_pct == 15              # seeded from the main exits
+    await eng.set_setting("copyexits.stop_loss_pct", 40)
+    await eng.set_setting("copyexits.take_profit", "50:50,150:30")
+    await eng.set_setting("copyexits.moonbag_pct", 20)
+    ex = eng.exit_cfg(pos)
+    assert ex.stop_loss_pct == 40 and ex.moonbag_pct == 20
+    assert ex.take_profit == [TakeProfitLevel(50, 50), TakeProfitLevel(150, 30)]
+    assert ex.exit_on_dev_sell == eng.cfg.exits.exit_on_dev_sell   # the rest: main exits
+    assert eng.cfg.exits.stop_loss_pct == 15                  # main exits untouched
+
+    pos.update_price(pos.entry_price * 0.75)                  # -25%: main SL would sell
+    assert exits.evaluate(pos, eng.exit_cfg(pos)) is None
+    assert exits.evaluate(pos, eng.cfg.exits).reason.startswith("stop loss")
+    sniped = type(pos)(**{**pos.__dict__, "source": "pumpfun", "mint": "X"})
+    assert eng.exit_cfg(sniped) is eng.cfg.exits
+
+    await h.tap("set:copyexits")
+    assert "Using them" in h.last
+    await h.close()

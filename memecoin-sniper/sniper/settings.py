@@ -154,6 +154,23 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.max_market_cap_sol", "Max copy market cap", "float", 0, 1e9, "SOL",
             help="don't copy into coins already worth more than this; 0 = no limit. "
                  "A fresh pump.fun coin starts near 28 SOL and graduates around 400"),
+    Setting("copytrade.own_exits", "Own exits for copies", "bool",
+            help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
+                 "instead of your main exits"),
+    # exits for copied positions (with copytrade.own_exits on)
+    Setting("copyexits.take_profit", "Take profits", "tp",
+            help="format: up%:sell%, e.g. 50:50,150:30"),
+    Setting("copyexits.stop_loss_pct", "Stop loss", "float", 1, 99, "%"),
+    Setting("copyexits.trailing_activate_pct", "Trailing arms at", "float", 0, 10000, "%"),
+    Setting("copyexits.trailing_stop_pct", "Trailing stop", "float", 1, 99, "%"),
+    Setting("copyexits.breakeven_after_first_tp", "Breakeven after TP", "bool"),
+    Setting("copyexits.max_hold_seconds", "Max hold", "int", 10, 86400 * 7, "s"),
+    Setting("copyexits.sell_initials_at_pct", "Sell initials at", "float", 0, 100000, "%",
+            help="profit % at which to take your SOL back, e.g. 100 = at 2x; 0 = off"),
+    Setting("copyexits.moonbag_pct", "Moonbag", "float", 0, 50, "%",
+            help="% of the original bag to keep after taking profit; 0 = off"),
+    Setting("copyexits.moonbag_trailing_pct", "Moonbag trailing", "float", 5, 99, "%"),
+    Setting("copyexits.moonbag_max_hold_hours", "Moonbag max hold", "float", 1, 24 * 30, "h"),
     Setting("copytrade.run_safety_checks", "Filters on copies", "bool",
             help="off = copy every buy straight away, skipping your filters (rug checks, "
                  "dev wallet, holders). Your max positions and daily loss limit still apply"),
@@ -168,6 +185,7 @@ GROUPS = {
     "momentum": "🚀 Momentum",
     "copytrade": "👥 Copy trade",
     "calls": "📣 Call sniper",
+    "copyexits": "👥 Copy exits",
 }
 
 
@@ -180,6 +198,8 @@ SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev
 def group_of(s: Setting) -> str:
     if s.key in SNIPE_KEYS:
         return "snipe"
+    if s.key == "copytrade.own_exits":
+        return "copyexits"
     if s.key.startswith("discovery.momentum_"):
         return "momentum"
     section = s.key.split(".")[0]
