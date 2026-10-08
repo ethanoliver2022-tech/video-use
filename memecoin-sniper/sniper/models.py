@@ -49,6 +49,7 @@ class Candidate:
     route: str = "jupiter"          # "pump" (PumpPortal, curve or pump-amm) | "jupiter"
     leader: Optional[str] = None    # copy-trade wallet that triggered this, if any
     copied_from: Optional[str] = None   # copied wallet (always set for copies: results)
+    slippage_pct: Optional[float] = None  # this buy's slippage (None = your normal one)
     leader_mode: str = "all"            # their sells: "mirror" (same %) or "all"
     buy_sol: Optional[float] = None # per-candidate size override (copy trades, manual buys)
     force: bool = False             # manual buy: skip filters

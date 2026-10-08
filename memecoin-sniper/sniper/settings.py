@@ -155,6 +155,9 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.max_market_cap_usd", "Max copy market cap", "float", 0, 1e12, "$",
             help="don't copy into coins already worth more than this, e.g. 20k or 1.5m; "
                  "0 = no limit. A fresh pump.fun coin starts near $4-5k"),
+    Setting("copytrade.slippage_pct", "Copy slippage", "float", 0, 100, "%",
+            help="slippage for copy buys (copied wallets' buys pull in followers fast, so "
+                 "normal slippage often fails); 0 = your normal slippage"),
     Setting("copytrade.first_buy_only", "First buy only", "bool",
             help="copy each coin once: not their add-on buys, nor a coin re-bought later"),
     Setting("copytrade.max_chase_pct", "Don't chase above", "float", 0, 10000, "%",

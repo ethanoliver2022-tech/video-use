@@ -973,3 +973,26 @@ def test_sender_remembers_each_bundles_tip():
     tx = VersionedTransaction(msg, [kp])
     sig = asyncio.run(s.send(tx, kp))
     assert sig in s.tip_sigs and s.tip_sigs[sig] != sig
+
+
+async def test_copy_buys_use_their_own_slippage_and_the_guard_allows_it():
+    from sniper.models import Candidate
+    cfg = load_config(None)
+    cfg.trading.slippage_pct = 20
+    cfg.copytrade.slippage_pct = 40
+    sent = {}
+
+    class Http:
+        async def post(self, url, data):
+            sent.update(data)
+            return httpx.Response(200, content=b"tx")
+    ex = LiveExecutor(cfg, Keypair(), FakeRpc(), jupiter=None, http=Http(), sender=FakeSender())
+    ex.native_state["buy"] = False                       # PumpPortal path
+    copy = Candidate(chain="solana", mint="M", source="copy", route="pump", slippage_pct=40)
+    await ex._pump_buy_tx(copy, 0.1)
+    assert sent["slippage"] == 40
+    snipe = Candidate(chain="solana", mint="M", source="pumpfun", route="pump")
+    await ex._pump_buy_tx(snipe, 0.1)
+    assert sent["slippage"] == 20
+    # the guard's cap on what a buy may pull covers the copy slippage
+    assert ex._buy_cap(1.0) == pytest.approx(1.0 * 1.40 * 1.05 + 0.01)

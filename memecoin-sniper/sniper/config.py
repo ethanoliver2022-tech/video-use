@@ -216,6 +216,7 @@ class CopyTradeConfig:
     run_safety_checks: bool = True
     max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
+    slippage_pct: float = 35.0              # copy buys: followers pile in, prices move fast
     only_their_sells: bool = True           # copies sell only when the wallet sells (plus the
     #                                         two below), never on the bot's own exit rules
     copy_rug_exits: bool = True             # ...except dev sold / big holder dumped (rugs)

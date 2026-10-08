@@ -352,7 +352,7 @@ class LiveExecutor:
         s = self.cfg.speed  # the priority fee may not exceed what you allow (plus margin)
         max_fee = 2 * max(s.max_priority_fee_sol, self.cfg.trading.priority_fee_sol) + 0.001
         # a pump.fun buy may pull at most the swap amount plus your slippage (plus margin)
-        curve_cap = swap_sol * (1 + self.cfg.trading.slippage_pct / 100) * 1.05 + 0.01
+        curve_cap = swap_sol * (1 + self._max_buy_slippage() / 100) * 1.05 + 0.01
         check_transaction(tx, self.kp.pubkey(), max_sol_out,
                           frozenset(self.cfg.extra_allowed_programs), max_fee, side,
                           curve_cap if side == "buy" else 0.0, mint)
@@ -369,7 +369,15 @@ class LiveExecutor:
         # top-level SOL out on a buy: the SOL wrapped for the swap (a PumpSwap buy wraps up to
         # the swap amount plus your slippage; Jupiter wraps the amount) plus PumpPortal's 0.5%
         # fee and room for rent; a bonding-curve payment itself runs inside the program
-        return sol * (1 + max(0.0, self.cfg.trading.slippage_pct) / 100) * 1.05 + 0.01
+        return sol * (1 + max(0.0, self._max_buy_slippage()) / 100) * 1.05 + 0.01
+
+    def _max_buy_slippage(self) -> float:
+        """The highest slippage any buy may use (your normal one, or the copy-trade one):
+        the transaction guard allows a buy to pull at most that much."""
+        return max(self.cfg.trading.slippage_pct, getattr(self.cfg.copytrade, "slippage_pct", 0) or 0)
+
+    def _slip(self, cand: Candidate) -> float:
+        return cand.slippage_pct or self.cfg.trading.slippage_pct
 
     @staticmethod
     def _sell_cap(value_sol: Optional[float]) -> float:
@@ -578,7 +586,7 @@ class LiveExecutor:
 
     async def _native_buy(self, cand: Candidate, sol: float) -> bytes:
         return await self.native.buy_tx(self.kp.pubkey(), cand.mint, sol,
-                                        self.cfg.trading.slippage_pct,
+                                        self._slip(cand),
                                         await self.sender.priority_fee())
 
     async def _pump_buy_tx(self, cand: Candidate, sol: float) -> bytes:
@@ -588,7 +596,8 @@ class LiveExecutor:
             native = await self._native("buy", lambda: self._native_buy(cand, sol))
             if native is not None:
                 return native
-        return await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True)
+        return await self._pumpportal_tx("buy", cand.mint, sol, in_sol=True,
+                                         slippage_pct=self._slip(cand))
 
     async def prepare_buy(self, cand: Candidate, sol: float) -> tuple[bytes, Optional[float], float]:
         """Build a pump.fun buy (and read the pre-buy balance) ahead of time, while the filters
@@ -714,7 +723,7 @@ class LiveExecutor:
         log.warning("refused PumpPortal's buy for %s (%s); buying through Jupiter. Its "
                     "calls: %s", cand.mint, refused, describe(built))
         try:
-            q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self.cfg.trading.slippage_pct)
+            q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self._slip(cand))
             return await self.jupiter.swap_tx(q, self.pubkey, await self.sender.priority_fee())
         except Exception as e:
             direct = f"; direct pump.fun buy: {self.native_why}" if self.native_why else ""
@@ -734,8 +743,7 @@ class LiveExecutor:
                 if cand.route == "pump":
                     unsigned = await self._pump_buy_tx(cand, sol)
                 else:
-                    q = await self.jupiter.quote(SOL_MINT, cand.mint, sol,
-                                                 self.cfg.trading.slippage_pct)
+                    q = await self.jupiter.quote(SOL_MINT, cand.mint, sol, self._slip(cand))
                     unsigned = await self.jupiter.swap_tx(q, self.pubkey,
                                                           await self.sender.priority_fee())
             except BaseException:

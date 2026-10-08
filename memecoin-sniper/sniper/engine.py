@@ -762,7 +762,7 @@ class Engine:
                       route="pump" if pump else "jupiter",  # other venues (LetsBonk...): Jupiter
                       leader=leader.address if sells != "off" else None,
                       leader_mode="mirror" if sells == "mirror" else "all",
-                      copied_from=leader.address,
+                      copied_from=leader.address, slippage_pct=ct.slippage_pct or None,
                       buy_sol=size, force=not filters,
                       v_sol=v_sol if on_curve else None, v_tokens=v_tok if on_curve else None,
                       trigger=f"copy:{name}",
