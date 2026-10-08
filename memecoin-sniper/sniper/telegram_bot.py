@@ -76,6 +76,21 @@ Use a dedicated wallet holding only what you can afford to lose."""
 WHY_BUTTONS = [[("🔄 Again", "why"), ("🔁 Reset counts", "whyz")], [("🏠 Menu", "m")]]
 
 
+def wallet_addresses(text: str, limit: int = 20) -> list[str]:
+    """Wallet addresses in pasted text or links (solscan.io/account/…, gmgn.ai/sol/address/…)."""
+    from solders.pubkey import Pubkey
+    out: list[str] = []
+    for m in re.findall(r"(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![1-9A-HJ-NP-Za-km-z])",
+                        text or ""):
+        try:
+            Pubkey.from_string(m)
+        except ValueError:
+            continue
+        if m not in out:
+            out.append(m)
+    return out[:limit]
+
+
 class TelegramControl:
     def __init__(self, engine: "Engine", token: str, chat_id: str, http: httpx.AsyncClient):
         self.engine, self.token, self.http = engine, token, http
@@ -88,6 +103,7 @@ class TelegramControl:
         self.pending: Optional[dict] = None
         self.unhandled: list[str] = []
         self.charts: dict[str, asyncio.Task] = {}   # mint -> live chart updater
+        self.wallet_wiz: Optional[dict] = None       # a copy / track wallet being added
         engine.notifier.token = token
         engine.notifier.chat = self.owner
 
@@ -388,6 +404,7 @@ class TelegramControl:
         elif data == "x":
             self.pending = None
             await e.calls.cancel_login()
+            self.wallet_wiz = None
             await self.main_menu(msg_id)
         elif data == "go":
             e.set_paused(False)
@@ -496,9 +513,11 @@ class TelegramControl:
             await self.copy_menu(msg_id)
         elif data == "c:add":
             self._ask("copy_add")
-            await self.send("Send the wallet:\n<code>&lt;address&gt; [label] [sol per trade] [track]</code>\n"
-                            "Add <code>track</code> at the end to only get alerts instead of copying.",
+            await self.send("➕ <b>Add a wallet</b>\n\nPaste its address, or a link to it "
+                            "(Solscan, GMGN, Birdeye…). Several at once is fine, one per line.",
                             [[("✖️ Cancel", "x")]])
+        elif head == "cw":
+            await self.wallet_wizard(rest)
         elif data.startswith("c:rm:"):
             await e.remove_copy_wallet(data[5:])
             await self.copy_menu(msg_id)
@@ -560,8 +579,11 @@ class TelegramControl:
                 await self.send("✅ " + html.escape(await e.set_setting(p["data"], text)))
                 await self.settings_group(group_of(BY_KEY[p["data"]]))
             elif kind == "copy_add":
-                await self.copy_command(["add", *text.split()])
-                await self.copy_menu()
+                await self.copy_add_text(text)
+            elif kind == "copy_name":
+                await self.wallet_wizard("n", text)
+            elif kind == "copy_size":
+                await self.wallet_wizard("s:", text.replace("SOL", "").strip())
             elif kind == "limit_buy":
                 parts = text.replace("%", "").replace("SOL", "").split()
                 if len(parts) not in (2, 3):
@@ -1105,6 +1127,9 @@ class TelegramControl:
 
         async def run():
             try:
+                if await self._is_wallet(mint):
+                    await self.offer_wallet([mint])
+                    return
                 await self.token_card(mint)
             except Exception as e:
                 log.exception("token card failed")
@@ -1241,6 +1266,103 @@ class TelegramControl:
             await self.send("Removed." if ok else "Not found.")
         else:
             await self.send("/copy list | add &lt;wallet&gt; [label] [sol] | rm &lt;wallet&gt;")
+
+    # ---------- adding copy / track wallets ----------
+
+    WALLET_SIZES = (0.01, 0.03, 0.05, 0.1)
+
+    async def _is_wallet(self, address: str) -> bool:
+        """A person's wallet (a plain SOL account), not a token: offer to copy it instead."""
+        try:
+            acct = (await self.engine.rpc.get_accounts_raw([address]))[0]
+        except Exception:
+            return False
+        return bool(acct) and acct[0] == "11111111111111111111111111111111"
+
+    async def copy_add_text(self, text: str) -> None:
+        parts = text.split()
+        # the old one-line form still works: <address> [label] [sol] [track]
+        if len(parts) > 1 and ADDRESS_RE.match(parts[0]) and "\n" not in text.strip() \
+                and not any(ADDRESS_RE.match(p) for p in parts[1:]):
+            await self.copy_command(["add", *parts])
+            await self.copy_menu()
+            return
+        addrs = wallet_addresses(text)
+        if not addrs:
+            raise ValueError("no wallet address found in that")
+        await self.offer_wallet(addrs)
+
+    async def offer_wallet(self, addrs: list[str]) -> None:
+        if not self.engine.has_pumpportal_key:
+            await self.send("Copying and tracking wallets needs a PumpPortal API key: add "
+                            "PUMPPORTAL_API_KEY to .env on the server, then restart.")
+            return
+        known = {x["address"] for x in self.engine.store.copy_wallets()}
+        self.wallet_wiz = {"addrs": addrs, "expires": time.monotonic() + PENDING_TTL}
+        if len(addrs) == 1:
+            a = addrs[0]
+            note = "\n(already in your list: this updates it)" if a in known else ""
+            await self.send(f"👛 Wallet <code>{a}</code>{note}\n\nWhat should I do with it?",
+                            [[("👥 Copy its buys", "cw:m:copy")],
+                             [("🔔 Just alert me", "cw:m:alert")],
+                             [("✖️ Cancel", "x")]])
+        else:
+            await self.send(f"👛 {len(addrs)} wallets found. Add them all with your normal buy "
+                            "size (change each later from the list)?",
+                            [[("👥 Copy all", "cw:m:copy"), ("🔔 Alert all", "cw:m:alert")],
+                             [("✖️ Cancel", "x")]])
+
+    async def wallet_wizard(self, rest: str, text: str = "") -> None:
+        wiz = getattr(self, "wallet_wiz", None)
+        if not wiz or time.monotonic() > wiz["expires"]:
+            self.wallet_wiz = None
+            await self.send("That expired: tap ➕ Add wallet again.", [[("👥 Copy & track", "c")]])
+            return
+        wiz["expires"] = time.monotonic() + PENDING_TTL
+        e = self.engine
+        step, _, val = rest.partition(":")
+        if step == "m":
+            wiz["mode"] = "alert" if val == "alert" else "copy"
+            if len(wiz["addrs"]) > 1 or wiz["mode"] == "alert":
+                wiz["sol"] = 0.0
+                return await self._wallet_name_step(wiz)
+            default = e.cfg.trading.buy_amount_sol
+            await self.send("How much SOL per copied buy?",
+                            [[(f"{v:g}", f"cw:s:{v:g}") for v in self.WALLET_SIZES],
+                             [(f"Normal size ({default:g})", "cw:s:0"), ("✏️ Other", "cw:s:?")],
+                             [("✖️ Cancel", "x")]])
+        elif step == "s":
+            if val == "?":
+                self._ask("copy_size")
+                await self.send("Send the SOL per buy, e.g. <code>0.02</code>",
+                                [[("✖️ Cancel", "x")]])
+                return
+            sol = float(val or text)
+            if not 0 <= sol <= 100:
+                raise ValueError("between 0 and 100 SOL")
+            wiz["sol"] = sol
+            await self._wallet_name_step(wiz)
+        elif step == "n":
+            await self._wallet_save(wiz, "" if val == "skip" else text.strip()[:30])
+
+    async def _wallet_name_step(self, wiz: dict) -> None:
+        if len(wiz["addrs"]) > 1:
+            return await self._wallet_save(wiz, "")
+        self._ask("copy_name")
+        await self.send("Give it a name so you know who it is (e.g. <code>whale 1</code>), or "
+                        "skip:", [[("⏭ Skip", "cw:n:skip")], [("✖️ Cancel", "x")]])
+
+    async def _wallet_save(self, wiz: dict, label: str) -> None:
+        self.wallet_wiz, self.pending = None, None
+        mode, sol = wiz.get("mode", "copy"), wiz.get("sol", 0.0)
+        for a in wiz["addrs"]:
+            await self.engine.add_copy_wallet(a, label, sol, mode=mode)
+        what = "🔔 Tracking" if mode == "alert" else "👥 Copying"
+        who = html.escape(label) if label else (
+            f"{len(wiz['addrs'])} wallets" if len(wiz["addrs"]) > 1 else wiz["addrs"][0][:8] + "…")
+        size = "" if mode == "alert" else (f" · {sol:g} SOL per buy" if sol else " · normal size")
+        await self.send(f"✅ {what} {who}{size}")
+        await self.copy_menu()
 
     async def reclaim(self) -> None:
         await self.send("🧹 Looking for empty token accounts…")
