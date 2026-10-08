@@ -384,3 +384,42 @@ async def test_add_ons_are_caught_from_history_and_from_the_chain(h):
     await eng.handle_copy(msg3, w)
     assert m3 in eng.positions
     await h.close()
+
+
+async def test_copy_profit_taking_on_top_of_following_their_sells(h):
+    eng = h.eng
+    w = await _wallet(eng)
+    m = _addr()
+    await eng.handle_copy(_buy(w.address, m), w)
+    pos = eng.positions[m]
+    now = time.time()
+    pos.update_price(pos.entry_price * 2.2)                          # +120%: under the trail
+    assert exits.evaluate(pos, eng.exit_cfg(pos), now) is None      # off by default
+
+    await h.tap("set:copyprofit")
+    assert "cpp:balanced" in h.buttons()
+    await h.tap("cpp:balanced")                                      # 30% at 2x, 30% at 4x
+    d = exits.evaluate(pos, eng.exit_cfg(pos), now)
+    assert d.kind == "tp" and d.tokens == pytest.approx(pos.tokens_initial * 0.30)
+    exits.apply_fill(pos, d, d.tokens, 0.05, eng.exit_cfg(pos))
+    # trailing not armed (peak +120% < 150%): and still no stop loss / max hold / stale exit
+    pos.update_price(pos.entry_price * 0.3)
+    pos.opened_at = pos.last_update = now - 7200
+    assert exits.evaluate(pos, eng.exit_cfg(pos), now) is None
+
+    await h.tap("cpp:ride")                                          # initials at 2x, moonbag
+    q = Position(mint="Q", symbol="Q", source="copy", creator=None, entry_price=1.0,
+                 tokens_initial=100, tokens_remaining=100, sol_in=0.1, copied_from=w.address)
+    q.update_price(2.1)
+    d = exits.evaluate(q, eng.exit_cfg(q), now)
+    assert d.kind == "initials"
+    exits.apply_fill(q, d, d.tokens, 0.1, eng.exit_cfg(q))
+    q.update_price(4.0)
+    q.update_price(2.0)                                              # -50% from a +300% peak
+    d = exits.evaluate(q, eng.exit_cfg(q), now)
+    assert d.reason.startswith("trailing stop") and not d.sell_all   # keeps the 10% moonbag
+    assert d.tokens == pytest.approx(q.tokens_remaining - 10, rel=0.01)
+
+    await h.tap("cpp:off")
+    assert eng.cfg.copyprofit.take_profit == [] and eng.cfg.copyprofit.sell_initials_at_pct == 0
+    await h.close()

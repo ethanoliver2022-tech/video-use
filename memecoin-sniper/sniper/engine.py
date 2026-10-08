@@ -975,15 +975,21 @@ class Engine:
         if (pos.copied_from or pos.source == "copy") and ct.only_their_sells:
             import dataclasses
             never = 10.0 ** 12
-            e = self.cfg.exits
+            e, cp = self.cfg.exits, self.cfg.copyprofit
+            # their sells (mirrored), rug exits and the emergency stop; plus your profit
+            # taking for copies (Copy profit taking), which is all off unless you set it
             return dataclasses.replace(
-                e, take_profit=[], stop_loss_pct=ct.copy_stop_loss_pct or 100.0,
-                breakeven_after_first_tp=False, trailing_activate_pct=never,
+                e, take_profit=list(cp.take_profit), stop_loss_pct=ct.copy_stop_loss_pct or 100.0,
+                breakeven_after_first_tp=False,
+                trailing_activate_pct=cp.trailing_activate_pct or never,
+                trailing_stop_pct=cp.trailing_stop_pct,
                 max_hold_seconds=int(never), stale_seconds=int(never), sell_pressure_ratio=2.0,
                 exit_on_dev_sell=ct.copy_rug_exits and e.exit_on_dev_sell,
                 exit_on_whale_sell_pct=e.exit_on_whale_sell_pct if ct.copy_rug_exits else 0.0,
-                sell_on_migration=False, kol_buy_sell_pct=0.0, sell_initials_at_pct=0.0,
-                moonbag_pct=0.0)
+                sell_on_migration=False, kol_buy_sell_pct=0.0,
+                sell_initials_at_pct=cp.sell_initials_at_pct, moonbag_pct=cp.moonbag_pct,
+                moonbag_trailing_pct=cp.moonbag_trailing_pct,
+                moonbag_max_hold_hours=cp.moonbag_max_hold_hours)
         if pos.source == "copy" and self.cfg.copytrade.own_exits:
             import dataclasses
             ce = self.cfg.copyexits

@@ -198,6 +198,21 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.own_exits", "Own exits for copies", "bool",
             help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
                  "instead of your main exits"),
+    # profit taking on copies that otherwise only sell with their wallet
+    Setting("copyprofit.take_profit", "Take profits", "tp",
+            help="sell part of a copy at these gains, e.g. 100:30,300:30 = sell 30% of the bag "
+                 "at 2x and 30% at 4x; none = off"),
+    Setting("copyprofit.sell_initials_at_pct", "Take initials at", "float", 0, 100000, "%",
+            help="sell enough to get your SOL back at this gain, e.g. 100 = at 2x; 0 = off"),
+    Setting("copyprofit.trailing_activate_pct", "Trailing stop arms at", "float", 0, 100000, "%",
+            help="once a copy is up this much, sell if it falls back (below); 0 = off"),
+    Setting("copyprofit.trailing_stop_pct", "Trailing stop drop", "float", 5, 95, "%",
+            help="the fall from its peak that sells it, once armed"),
+    Setting("copyprofit.moonbag_pct", "Moonbag", "float", 0, 50, "%",
+            help="% of the original bag your profit taking never sells (their sells still "
+                 "can); 0 = off"),
+    Setting("copyprofit.moonbag_trailing_pct", "Moonbag trailing", "float", 5, 99, "%"),
+    Setting("copyprofit.moonbag_max_hold_hours", "Moonbag max hold", "float", 1, 24 * 30, "h"),
     # exits for copied positions (with copytrade.own_exits on)
     Setting("copyexits.take_profit", "Take profits", "tp",
             help="format: up%:sell%, e.g. 50:50,150:30"),
@@ -227,6 +242,7 @@ GROUPS = {
     "copytrade": "👥 Copy trade",
     "calls": "📣 Call sniper",
     "copyexits": "👥 Copy exits",
+    "copyprofit": "💰 Copy profit taking",
 }
 
 

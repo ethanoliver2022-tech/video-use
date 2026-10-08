@@ -73,6 +73,22 @@ WELCOME = """👋 <b>Paired!</b> This chat now controls your sniper.
 Use a dedicated wallet holding only what you can afford to lose."""
 
 
+# one-tap profit taking for copies: (button, settings)
+COPY_PROFIT_PRESETS = {
+    "safe": ("🛡 Safe: take your SOL back at 2x", {
+        "take_profit": "none", "sell_initials_at_pct": 100, "trailing_activate_pct": 0,
+        "moonbag_pct": 0}),
+    "balanced": ("⚖️ Balanced: 30% at 2x, 30% at 4x, trail the rest", {
+        "take_profit": "100:30,300:30", "sell_initials_at_pct": 0, "trailing_activate_pct": 150,
+        "trailing_stop_pct": 35, "moonbag_pct": 0}),
+    "ride": ("🚀 Let it ride: SOL back at 2x, 10% moonbag", {
+        "take_profit": "none", "sell_initials_at_pct": 100, "trailing_activate_pct": 200,
+        "trailing_stop_pct": 40, "moonbag_pct": 10}),
+    "off": ("✖️ Off: only sell when they sell", {
+        "take_profit": "none", "sell_initials_at_pct": 0, "trailing_activate_pct": 0,
+        "moonbag_pct": 0}),
+}
+
 WHY_BUTTONS = [[("🔄 Again", "why"), ("🔁 Reset counts", "whyz")], [("🏠 Menu", "m")]]
 
 
@@ -524,6 +540,10 @@ class TelegramControl:
             await self.wallet_wizard(rest)
         elif head == "wp":
             await self.wallet_page(rest, msg_id)
+        elif head == "cpp" and rest in COPY_PROFIT_PRESETS:
+            for key, value in COPY_PROFIT_PRESETS[rest][1].items():
+                await e.set_setting(f"copyprofit.{key}", value)
+            await self.settings_group("copyprofit", msg_id)
         elif data == "wf":
             self._ask("find_wallets")
             await self.send("🔎 <b>Find wallets from a coin</b>\nSend the address (or pump.fun "
@@ -1199,15 +1219,23 @@ class TelegramControl:
             if group_of(s) == group:
                 rows.append([(f"{s.label}: {format_value(s, get_value(self.engine.cfg, s.key))}", f"e:{i}")])
         note = "Tap a setting to change it."
+        if group == "copyprofit":
+            ct = self.engine.cfg.copytrade
+            note = ("Profit taking for copies, on top of selling when the wallet sells. "
+                    "Pick a preset or set each one:" if ct.only_their_sells else
+                    "⚠️ <b>Copies sell only with them</b> is off, so copies use the full exit "
+                    "rules under 👥 Copy exits; these apply only when it's on.")
+            rows = [[(label, f"cpp:{key}")] for key, (label, _) in COPY_PROFIT_PRESETS.items()] \
+                + rows + [[("👥 Copy & track", "c")]]
         if group == "copyexits":
             ct = self.engine.cfg.copytrade
             note = ("<b>Copies sell only with them</b> is on: copied positions sell when the "
-                    "wallet sells (plus rug exits / emergency stop if set). The TP/SL "
-                    "settings below are not used." if ct.only_their_sells else
+                    "wallet sells (plus rug exits / emergency stop if set, and your 💰 Copy "
+                    "profit taking). The TP/SL settings below are not used." if ct.only_their_sells else
                     "These apply to copied positions only. ✅ Using them." if ct.own_exits else
                     "Off: copied positions use your main exits. Turn on <b>Own exits for "
                     "copies</b> to use these (they start as a copy of your main exits).")
-            rows.append([("👥 Copy & track", "c")])
+            rows.append([("💰 Copy profit taking", "set:copyprofit"), ("👥 Copy & track", "c")])
         rows.append([("⬅️ Settings", "set"), ("🏠 Menu", "m")])
         await self.show(f"{GROUPS.get(group, group)}\n{note}", rows, msg_id)
 
@@ -1307,6 +1335,10 @@ class TelegramControl:
         else:
             exits_btn = "🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping"
         rows.append([("⚙️ Copy options", "set:copytrade"), (exits_btn, "set:copyexits")])
+        if ct.only_their_sells:
+            cp = e.cfg.copyprofit
+            on = bool(cp.take_profit or cp.sell_initials_at_pct or cp.trailing_activate_pct)
+            rows.append([("💰 Profit taking: " + ("✅ on" if on else "off"), "set:copyprofit")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 

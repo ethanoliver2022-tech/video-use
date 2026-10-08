@@ -178,6 +178,19 @@ class ExitConfig:
 
 
 @dataclass
+class CopyProfitConfig:
+    """Profit taking on copies while they otherwise only sell with their wallet
+    (copytrade.only_their_sells). All off by default."""
+    take_profit: list[TakeProfitLevel] = field(default_factory=list)
+    sell_initials_at_pct: float = 0.0       # take your SOL back at this gain; 0 = off
+    trailing_activate_pct: float = 0.0      # trailing stop arms once up this much; 0 = off
+    trailing_stop_pct: float = 30.0         # ...then sells on this drop from the peak
+    moonbag_pct: float = 0.0                # keep this % of the bag through the above
+    moonbag_trailing_pct: float = 50.0
+    moonbag_max_hold_hours: float = 24.0
+
+
+@dataclass
 class CopyExitConfig:
     """Exits for copied positions, used instead of the main ones while
     copytrade.own_exits is on (everything else comes from the main exit settings)."""
@@ -267,6 +280,7 @@ class Config:
     copytrade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
     calls: CallsConfig = field(default_factory=CallsConfig)
     copyexits: CopyExitConfig = field(default_factory=CopyExitConfig)
+    copyprofit: CopyProfitConfig = field(default_factory=CopyProfitConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     endpoints: Endpoints = field(default_factory=Endpoints)
     data_dir: str = "data"
