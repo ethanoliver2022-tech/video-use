@@ -140,6 +140,7 @@ class Position:
     leader_mode: str = "all"             # copied wallet sells: "mirror" its % or sell "all"
     leader_sell_frac: float = 0.0        # share of our bag still to sell, mirroring them
     force_sell: str = ""                 # sell everything, retried until done (panic sell)
+    strategy: str = ""                   # where the buy came from, for stats (report.py)
     # write-ahead of the exit being executed, so a sell that lands while the bot is down is
     # booked as that exit (its TP level / initials / KOL flag) when it restarts
     pending_exit: Optional[dict] = None

@@ -158,10 +158,11 @@ async def test_live_pnl_counter_resets_without_losing_all_time(tmp_path):
     await h.tap("sts!")
     assert "kept" in h.last
     st.event("close", "B", "NEW", pnl_sol=0.05)
-    await h.tap("st")
-    since, all_time = h.last.split("All time")
-    assert "Trades: 1" in since and "+0.0500" in since
-    assert "Trades: 2" in all_time and "-0.0604" in all_time
+    await h.tap("st")                              # opens on "since reset"
+    assert "Since reset" in h.last and "1 trade ·" in h.last and "+0.0500" in h.last
+    assert "sv:all" in h.buttons() and "sv:rst" in h.buttons()
+    await h.tap("sv:all")
+    assert "All time" in h.last and "2 trades" in h.last and "-0.0604" in h.last
     assert len(st.events("close")) == 2            # nothing deleted
     assert h.tg.stats_since()
     h.eng.mode = "paper"                           # each mode has its own counter

@@ -1117,6 +1117,7 @@ class Engine:
                            creator=c.creator, entry_price=min(sol, fill.sol) / fill.tokens,
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,
                            route=c.route, leader=c.leader, copied_from=c.copied_from,
+                           strategy=self._strategy_of(c),
                            leader_mode=c.leader_mode,
                            migrated=c.source == "pumpfun-migration",  # already off the curve
                            seen_on_curve=c.source == "pumpfun" or curve is not None,
@@ -1732,9 +1733,13 @@ class Engine:
             funder = self.devcheck.known_funder(pos.creator)
             if funder:  # the wallet that bankrolled this dev will bankroll the next one
                 self.store.block(funder, f"funded the dev who dumped {pos.symbol}")
+        now = time.time()
         self.store.event("close", pos.mint, pos.symbol, reason=pos.close_reason, source=pos.source,
                          sol_in=pos.sol_in, sol_out=pos.sol_out, pnl_sol=pnl,
-                         held_s=round(time.time() - pos.opened_at), copied_from=pos.copied_from)
+                         held_s=round(now - pos.opened_at), copied_from=pos.copied_from,
+                         strategy=pos.strategy, exit_price=pos.last_price or None)
+        if pos.last_price > 0:
+            self.store.add_after_sell(pos.mint, pos.symbol, now, pos.last_price)
         if pos.copied_from:   # in the background: never hold up the sell path
             self._spawn(self._check_wallet_pause(pos.copied_from))
         self.sell_failures.pop(pos.mint, None)
@@ -1757,6 +1762,39 @@ class Engine:
         matches = [p for p in self.positions.values()
                    if not p.closed and p.symbol.lower() == key.lower()]
         return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _strategy_of(c: Candidate) -> str:
+        """Which strategy a buy belongs to, for the stats (see report.strategy_key)."""
+        if c.copied_from:
+            return f"copy:{c.copied_from}"
+        if c.trigger.startswith("call:"):
+            return f"call:{c.trigger.split(':', 1)[1]}"
+        if c.source == "pumpfun":
+            return {"dev": "snipe:dev"}.get(c.trigger, "snipe:keyword" if
+                                            c.trigger.startswith("keyword") else "snipe")
+        if c.source == "pumpfun-migration":
+            return "migration"
+        return c.source
+
+    async def after_sell_loop(self) -> None:
+        """Price each sold coin again 15 min and 1 h later (the stats' 'After you sold')."""
+        while True:
+            await asyncio.sleep(60)
+            await self.after_sell_tick()
+
+    async def after_sell_tick(self, now: Optional[float] = None) -> None:
+        now = now or time.time()
+        for mint, ts, column in self.store.after_sell_due(now)[:10]:
+            try:
+                price = await self.price_of(mint)
+            except Exception as e:
+                log.debug("after-sell price of %s unavailable: %s", mint, e)
+                # give up on it once it's well overdue: shown as "?"
+                if now > ts + (900 if column == "p15" else 3600) + 1800:
+                    self.store.set_after_sell(mint, ts, column, -1.0)
+                continue
+            self.store.set_after_sell(mint, ts, column, price)
 
     async def panic_sell_all(self) -> str:
         """Pause everything and sell every open position at once."""
@@ -2274,11 +2312,21 @@ class Engine:
             except Exception:
                 log.exception("daily report failed")
 
+    def wallet_name(self, address: str) -> str:
+        w = self._copy.get(address)
+        if w is None:
+            x = next((x for x in self.store.copy_wallets() if x["address"] == address), None)
+            label = x["label"] if x else ""
+        else:
+            label = w.label
+        return label or (address[:4] + "…" + address[-4:] if address else "?")
+
     async def daily_report(self, now: Optional[float] = None) -> bool:
         """Once per UTC day, report yesterday's results. Returns True if one was sent."""
         from datetime import datetime, timedelta, timezone
-        from .stats import format_summary, summarize
-        now_dt = datetime.fromtimestamp(now or time.time(), timezone.utc)
+        # the day in your time zone (notify.utc_offset_hours): the recap comes at your midnight
+        offset = timedelta(hours=self.cfg.notify.utc_offset_hours)
+        now_dt = datetime.fromtimestamp(now or time.time(), timezone.utc) + offset
         today = now_dt.date().isoformat()
         last = self.store.get_setting("last_report")
         if last is None:  # first run: start counting from today
@@ -2287,11 +2335,15 @@ class Engine:
         if last >= today:  # ISO dates sort; also covers the clock stepping back a day
             return False
         self.store.set_setting("last_report", today)
-        midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        from . import report
+        midnight = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) - offset
         start = (midnight - timedelta(days=1)).timestamp()
-        s = summarize(self.store, start, midnight.timestamp())
-        lines = [f"🗓 <b>Daily report</b> ({(midnight - timedelta(days=1)).date()}, {self.mode})"]
-        lines.append(f"<pre>{esc(format_summary(s))}</pre>")
+        end = midnight.timestamp()
+        trades = report.closed_trades(self.store, start, end)
+        rent = sum(float(e.get("sol", 0)) for e in self.store.events("rent", start, end))
+        lines = [report.recap(trades, report.costs(self.store, start, self.cfg, end), rent,
+                              str((midnight + offset - timedelta(days=1)).date()), self.mode,
+                              self.wallet_name)]
         if self.live:
             try:
                 lines.append(f"Wallet: {await self.rpc.get_balance_sol(self.own_wallet):.4f} SOL")
@@ -2425,6 +2477,7 @@ class Engine:
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
                  ("feed-watch", self.feed_watch), ("health", self._health_watch),
                  ("sol-price", self._sol_price_loop), ("copy-watch", self.copy_poller.run),
+                 ("after-sell", self.after_sell_loop),
                  ("wallet-check", lambda: self.wallet_checker.loop(
                      lambda: list(self._copy), lambda: self.cfg.copytrade.check_days,
                      lambda: self.cfg.copytrade.check_every_hours))]

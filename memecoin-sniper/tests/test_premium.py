@@ -356,7 +356,7 @@ async def test_restore_after_restart_and_telegram_controls(tmp_path):
     await eng2.settle()
     assert p.closed and p.close_reason == "manual"
     await tg.handle_update({"message": {"chat": {"id": 42}, "text": "/stats"}})
-    assert "Trades: 1" in replies[-1][0]
+    assert "1 trade ·" in replies[-1][0]
     await eng2.http.aclose()
 
 

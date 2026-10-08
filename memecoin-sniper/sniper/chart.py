@@ -31,6 +31,7 @@ FONT = {
     "+": ("000", "010", "111", "010", "000"), "-": ("000", "000", "111", "000", "000"),
     "%": ("101", "001", "010", "100", "101"), ".": ("000", "000", "000", "000", "010"),
     "m": ("000", "000", "111", "111", "101"), "s": ("000", "011", "010", "001", "110"),
+    "d": ("001", "001", "111", "101", "111"), "h": ("100", "100", "111", "101", "101"),
     " ": ("000", "000", "000", "000", "000"),
 }
 
@@ -158,4 +159,56 @@ def render(points: Sequence[tuple[float, float]], entry_price: float,
     for dx in range(-3, 4):
         for dy in range(-3, 4):
             c.dot(prev[0] + dx, prev[1] + dy, colour)
+    return c.png()
+
+
+def _span(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds >= 2 * 86400:
+        return f"{seconds // 86400}d"
+    if seconds >= 2 * 3600:
+        return f"{seconds // 3600}h"
+    return _duration(seconds)
+
+
+def render_pnl(points: Sequence[tuple[float, float]]) -> bytes:
+    """Running profit (SOL) over time: a step line, green above zero and red below, with
+    the zero line and the low / high / final values labelled."""
+    c = Canvas(W, H)
+    if len(points) < 2:
+        return c.png()
+    t0, t1 = points[0][0], points[-1][0]
+    if t1 <= t0:
+        t1 = t0 + 1
+    vals = [v for _, v in points]
+    lo, hi = min(min(vals), 0.0), max(max(vals), 0.0)
+    pad = max((hi - lo) * 0.1, 0.002)
+    lo, hi = lo - pad, hi + pad
+
+    def X(t: float) -> int:
+        return LEFT + round((t - t0) / (t1 - t0) * (W - LEFT - RIGHT))
+
+    def Y(v: float) -> int:
+        return TOP + round((hi - v) / (hi - lo) * (H - TOP - BOTTOM))
+
+    c.vline(LEFT - 1, TOP, H - BOTTOM, AXIS)
+    c.hline(H - BOTTOM, LEFT - 1, W - RIGHT, AXIS)
+    c.hline(Y(0.0), LEFT, W - RIGHT, ENTRY, dash=6)
+    used: list[int] = []
+    for v, colour in ((0.0, AXIS), (max(vals), UP), (min(vals), DOWN), (vals[-1], AXIS)):
+        y = Y(v)
+        if all(abs(y - u) > 12 for u in used):
+            text = f"{v:+.3f}" if abs(v) < 10 else f"{v:+.1f}"
+            c.text(LEFT - 6 - len(text) * 8, y - 5, text, colour)
+            used.append(y)
+    c.text(LEFT, H - BOTTOM + 8, "-" + _span(t1 - t0), AXIS)   # how long ago the chart starts
+    c.text(W - RIGHT - 8, H - BOTTOM + 8, "0", AXIS)
+    prev = None
+    for t, v in points:   # steps: the total only changes when a trade closes
+        x, y = X(t), Y(v)
+        if prev:
+            colour = UP if prev[2] >= 0 else DOWN
+            c.line(prev[0], prev[1], x, prev[1], colour)
+            c.line(x, prev[1], x, y, UP if v >= 0 else DOWN)
+        prev = (x, y, v)
     return c.png()

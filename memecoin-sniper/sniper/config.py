@@ -240,6 +240,7 @@ class NotifyConfig:
     telegram: bool = False                  # needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in .env
     telegram_control: bool = True           # accept commands + buttons from your chat
     alert_other_chains: bool = True
+    utc_offset_hours: float = 0.0           # your time zone: the daily recap comes at your midnight
 
 
 @dataclass

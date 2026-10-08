@@ -27,6 +27,9 @@ class Setting:
 SETTINGS: list[Setting] = [
     # trading
     Setting("trading.buy_amount_sol", "Buy size", "float", 0.001, 100, "SOL"),
+    Setting("notify.utc_offset_hours", "Your time zone", "float", -12, 14, "h",
+            help="hours from UTC, e.g. -5 for US Eastern (winter) or -4 (summer): the daily "
+                 "recap arrives at your midnight and covers your day"),
     Setting("trading.slippage_pct", "Buy slippage", "float", 0.5, 100, "%",
             help="how far the price may move up on you while a buy lands"),
     Setting("trading.sell_slippage_pct", "Sell slippage", "float", 0, 100, "%",
@@ -236,6 +239,8 @@ SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev
 def group_of(s: Setting) -> str:
     if s.key in SNIPE_KEYS:
         return "snipe"
+    if s.key == "notify.utc_offset_hours":
+        return "trading"
     if s.key in ("copytrade.own_exits", "copytrade.only_their_sells", "copytrade.copy_rug_exits",
                  "copytrade.copy_stop_loss_pct"):
         return "copyexits"

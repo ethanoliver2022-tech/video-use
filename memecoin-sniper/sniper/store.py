@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS blocklist (creator TEXT PRIMARY KEY, reason TEXT, ts 
 CREATE TABLE IF NOT EXISTS copy_wallets (
     address TEXT PRIMARY KEY, label TEXT, buy_sol REAL, copy_sells INTEGER);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS after_sell (
+    mode TEXT, mint TEXT, symbol TEXT, close_ts REAL, exit_price REAL, p15 REAL, p60 REAL,
+    PRIMARY KEY (mode, mint, close_ts));
 CREATE TABLE IF NOT EXISTS wallet_trades (
     wallet TEXT, sig TEXT, mint TEXT, ts REAL, side TEXT, sol REAL, tokens REAL,
     PRIMARY KEY (wallet, sig, mint));
@@ -179,6 +182,35 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO copy_wallets(address, label, buy_sol, copy_sells, "
                         "mode, opts) VALUES (?,?,?,?,?,?)",
                         (address, label, buy_sol, int(copy_sells), mode, json.dumps(opts)))
+
+    # ---- what coins did after we sold them (stats) ----
+    def add_after_sell(self, mint: str, symbol: str, close_ts: float, exit_price: float) -> None:
+        self.db.execute("INSERT OR IGNORE INTO after_sell VALUES (?,?,?,?,?,NULL,NULL)",
+                        (self.mode, mint, symbol, close_ts, exit_price))
+
+    def after_sell_due(self, now: float) -> list[tuple]:
+        """(mint, close_ts, column) checks that are due: 15 min and 1 h after the sell."""
+        rows = self.db.execute(
+            "SELECT mint, close_ts, p15, p60 FROM after_sell WHERE mode = ? AND "
+            "(p15 IS NULL OR p60 IS NULL) AND close_ts > ?", (self.mode, now - 3 * 3600)).fetchall()
+        due = []
+        for mint, ts, p15, p60 in rows:
+            if p15 is None and now >= ts + 900:
+                due.append((mint, ts, "p15"))
+            if p60 is None and now >= ts + 3600:
+                due.append((mint, ts, "p60"))
+        return due
+
+    def set_after_sell(self, mint: str, close_ts: float, column: str, price: float) -> None:
+        if column not in ("p15", "p60"):
+            raise ValueError(column)
+        self.db.execute(f"UPDATE after_sell SET {column} = ? WHERE mode = ? AND mint = ? AND "
+                        "close_ts = ?", (price, self.mode, mint, close_ts))
+
+    def after_sell_rows(self, since: float) -> list[tuple]:
+        return self.db.execute(
+            "SELECT close_ts, symbol, exit_price, p15, p60 FROM after_sell WHERE mode = ? AND "
+            "close_ts >= ? ORDER BY close_ts", (self.mode, since)).fetchall()
 
     # ---- copied wallets' own trades (wallet check) ----
     def add_wallet_trade(self, wallet: str, sig: str, mint: str, ts: float, side: str,

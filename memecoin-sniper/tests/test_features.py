@@ -416,7 +416,7 @@ async def test_daily_report_once_per_day(tmp_path):
     eng.store.db.execute("UPDATE events SET ts = ?", (day1,))
     day2 = datetime(2026, 10, 6, 0, 5, tzinfo=timezone.utc).timestamp()
     assert await eng.daily_report(day2)
-    assert "Daily report" in eng.messages[-1][0] and "Trades: 1" in eng.messages[-1][0]
+    assert "Daily recap" in eng.messages[-1][0] and "1 trade ·" in eng.messages[-1][0]
     assert not await eng.daily_report(day2 + 600)  # not twice
     await eng.http.aclose()
 

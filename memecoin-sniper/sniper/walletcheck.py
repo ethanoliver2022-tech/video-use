@@ -206,5 +206,6 @@ class WalletChecker:
                     except Exception as e:
                         log.debug("wallet check %s failed: %s", w[:8], e)
                     await asyncio.sleep(5)
-            self.store.prune_wallet_trades(time.time() - (days() + 1) * 86400)
+            # kept two weeks: 'you vs your wallets' compares results on older copies too
+            self.store.prune_wallet_trades(time.time() - max(days() + 1, 14) * 86400)
             await asyncio.sleep(300)

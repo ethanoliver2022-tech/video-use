@@ -463,6 +463,10 @@ class TelegramControl:
             await self.health()
         elif data == "st":
             await self.stats()
+        elif head == "sv":
+            await self.stats(rest, msg_id)
+        elif head in ("sc", "sw", "sa", "sd"):
+            await self.stats_view(head, rest)
         elif data == "cl" or head in ("cl", "ca", "cg", "cgs", "cgf", "cgo", "cgr"):
             await self.calls_action(head if data != "cl" else "cl", rest, msg_id)
         elif data == "whyz":
@@ -1631,17 +1635,73 @@ class TelegramControl:
         except ValueError:
             return None
 
-    async def stats(self) -> None:
-        from .stats import format_since, format_summary, summarize
-        rows = [[("🔁 Reset PnL counter", "sts")],
-                [("🔎 Why no buys?", "why"), ("⬅️ Menu", "m")]]
+    def _period(self, p: str = "") -> tuple[str, float, str]:
+        from .report import PERIODS, period_start
+        reset = self.stats_since()
+        if p not in PERIODS or (p == "rst" and not reset):
+            p = "rst" if reset else "7d"
+        since = period_start(p, reset, time.time())
+        return p, since, f"{self.engine.mode.upper()} · {PERIODS[p]}"
+
+    def _stats_rows(self, p: str, trades) -> list:
+        from .report import PERIODS
+        names = {"24h": "24h", "7d": "7 days", "rst": "Since reset", "all": "All time"}
+        rows = [[(("✅ " if k == p else "") + names[k], f"sv:{k}")
+                 for k in PERIODS if k != "rst" or self.stats_since()]]
+        rows.append([("📈 Chart", f"sc:{p}"), ("👥 You vs wallets", f"sw:{p}"),
+                     ("⏱ After you sold", f"sa:{p}")])
+        recent = [t for t in sorted(trades, key=lambda t: -t.ts)[:5] if t.mint]
+        if recent:   # tap a number to open that coin's card
+            rows.append([(f"🔍{i}", f"tc:{t.mint}") for i, t in enumerate(recent, 1)])
+        rows.append([("📋 Details", f"sd:{p}"), ("🔁 Reset PnL counter", "sts")])
         if not self.engine.live:
-            rows.insert(1, [("🗑 Start paper results over", "stz")])
-        store = self.engine.store
-        since = self.stats_since()
-        top = ""
-        if since:
-            top = f"<pre>{html.escape(format_since(summarize(store, since), since))}</pre>\n<b>All time</b>\n"
-        await self.send(f"📈 <b>{self.engine.mode.upper()} results</b>\n{top}"
-                        f"<pre>{html.escape(format_summary(summarize(store)))}</pre>",
-                        rows)
+            rows.append([("🗑 Start paper results over", "stz")])
+        rows.append([("🔎 Why no buys?", "why"), ("⬅️ Menu", "m")])
+        return rows
+
+    def _period_data(self, p: str):
+        from . import report
+        e = self.engine
+        p, since, title = self._period(p)
+        trades = report.closed_trades(e.store, since)
+        rent = sum(float(x.get("sol", 0)) for x in e.store.events("rent", since))
+        return p, since, title, trades, rent
+
+    async def stats(self, period: str = "", msg_id: Optional[int] = None) -> None:
+        from . import report
+        e = self.engine
+        p, since, title, trades, rent = self._period_data(period)
+        text = report.overview(trades, report.costs(e.store, since, e.cfg), rent, title,
+                               e.wallet_name)
+        await self.show(text, self._stats_rows(p, trades), msg_id)
+
+    async def stats_view(self, kind: str, period: str) -> None:
+        from . import report
+        from .notify import keyboard
+        e = self.engine
+        p, since, title, trades, rent = self._period_data(period)
+        back = [[("📈 Stats", f"sv:{p}"), ("⬅️ Menu", "m")]]
+        if kind == "sc":
+            from .chart import render_pnl
+            pts = report.cumulative(trades, since)
+            total = sum(t.pnl for t in trades) + rent
+            png = await asyncio.to_thread(render_pnl, pts)
+            caption = (f"📈 <b>{html.escape(title)}</b>: {total:+.4f} SOL over {len(trades)} "
+                       "trades" if trades else f"📈 {html.escape(title)}: no closed trades yet")
+            try:
+                await self.api_files("sendPhoto", {"photo": ("pnl.png", png, "image/png")},
+                                     chat_id=self.owner, caption=caption, parse_mode="HTML",
+                                     reply_markup=keyboard(back))
+            except Exception as ex:
+                await self.send(f"Couldn't draw the chart: {html.escape(str(ex)[:120])}", back)
+        elif kind == "sw":
+            def gap(w):
+                return e.wallet_results(w).get("gap")
+            await self.send(report.you_vs_wallets(trades, e.store, title, e.wallet_name, gap),
+                            back)
+        elif kind == "sa":
+            await self.send(report.after_sold(e.store.after_sell_rows(since), title), back)
+        elif kind == "sd":
+            from .stats import format_summary, summarize
+            await self.send(f"📋 <b>{html.escape(title)}: details</b>\n<pre>"
+                            f"{html.escape(format_summary(summarize(e.store, since)))}</pre>", back)
