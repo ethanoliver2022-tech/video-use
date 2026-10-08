@@ -333,3 +333,23 @@ def test_sells_have_their_own_slippage(tmp_path):
     cfg.copytrade.sell_slippage_pct = 45
     p.copied_from = "W"
     assert eng._sell_slippage(p, d) == 45
+
+
+async def test_add_ons_to_a_coin_they_already_held_are_not_copied(h):
+    eng = h.eng
+    w = await _wallet(eng)
+    m = _addr()
+    add_on = _buy(w.address, m)
+    add_on["newTokenBalance"] = add_on["tokenAmount"] * 3      # they held 2x this before
+    await eng.handle_copy(add_on, w)
+    assert m not in eng.positions
+    first = _buy(w.address, m)
+    first["newTokenBalance"] = first["tokenAmount"]           # nothing before: a first buy
+    await eng.handle_copy(first, w)
+    assert m in eng.positions
+    eng.cfg.copytrade.first_buy_only = False                  # off: add-ons count too
+    m2 = _addr()
+    add_on2 = dict(add_on, mint=m2)
+    await eng.handle_copy(add_on2, w)
+    assert m2 in eng.positions
+    await h.close()

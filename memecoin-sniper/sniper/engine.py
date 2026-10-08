@@ -719,6 +719,13 @@ class Engine:
         if ct.first_buy_only and self._copied_before(mint):
             log.info("👥 %s bought %s again: already copied once (first buy only)", name, mint)
             return
+        if ct.first_buy_only and got:
+            after = num(msg.get("newTokenBalance"), allow_zero=True)
+            if after is not None and after - got > max(after * 0.01, 1.0):
+                # they held it before this buy: adding to a position, not entering one
+                log.info("👥 %s added to %s (already held %.0f tokens): not a first buy",
+                         name, mint, after - got)
+                return
         if leader.paused:   # you were told when it paused: no message per buy
             log.info("👥 %s bought %s: wallet paused, not copied", name, mint)
             return
