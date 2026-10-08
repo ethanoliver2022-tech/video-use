@@ -19,6 +19,7 @@ from .execution.executors import (BuyUncertain, CurveState, Executor, Jupiter, L
 from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .health import HealthWatch
+from .calls import CallGroup, CallWatcher
 from .devcheck import DevChecker
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
@@ -158,6 +159,7 @@ class Engine:
                                     ipfs_gateway=cfg.endpoints.ipfs_gateway,
                                     probe_sol=cfg.trading.buy_amount_sol)
         self.devcheck = DevChecker(cfg.filters, self.rpc, self.store)
+        self.calls = CallWatcher(cfg.data_dir, self.store, self.on_call)
         self.notifier = Notifier(self.http, cfg.telegram_bot_token if cfg.notify.telegram else "",
                                  cfg.telegram_chat_id)
         self.own_wallet = ""
@@ -520,7 +522,7 @@ class Engine:
 
     def _devcheck_applies(self, c: Candidate) -> bool:
         return (c.chain == "solana" and bool(c.creator) and not c.force and c.trigger != "dev"
-                and c.source in ("pumpfun", "pumpfun-migration") and self.devcheck.enabled)
+                and c.source in ("pumpfun", "pumpfun-migration", "call") and self.devcheck.enabled)
 
     def _start_devcheck(self, c: Candidate) -> None:
         if c.dev_check is None and self._devcheck_applies(c):
@@ -889,7 +891,9 @@ class Engine:
             self._buys_finished += 1
 
         why = {"dev": "👀 watched dev launched", "limit": "📋 limit order"}.get(
-            c.trigger, f"🔑 {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("keyword") else "")
+            c.trigger, f"🔑 {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("keyword")
+            else f"📣 called in {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("call:")
+            else "")
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
                 f"({self.mode}, {c.source}) {esc(why)} {esc(notes)}\n<code>{c.mint}</code> "
                 f"{esc(c.url or '')}")
@@ -1516,6 +1520,60 @@ class Engine:
         self._clear_leftover(mint)  # the written-off bag is gone now
         return f"🔴 sold {fill.tokens:,.0f} tokens → {fill.sol:.4f} SOL"
 
+    async def _calls_loop(self) -> None:
+        import importlib.util
+        if importlib.util.find_spec("telethon") is None:
+            log.warning("call sniper unavailable: re-run the installer to add its library")
+            await asyncio.Event().wait()
+        await self.calls.run(lambda: self.cfg.calls)
+
+    async def on_call(self, mint: str, group: CallGroup, n_groups: int) -> None:
+        """A CA was posted in a watched Telegram group: buy it (or just say so)."""
+        cfg = self.cfg.calls
+        where = esc(group.title) + (f" (posted in {n_groups} groups)" if n_groups > 1 else "")
+        head = f"📣 Call in {where}: <code>{mint}</code>"
+        size = group.sol or self.cfg.trading.buy_amount_sol
+        buttons = [[(f"Buy {size:g} SOL", f"b:{mint}:{size:g}"), ("🔍 Card", f"tc:{mint}")]]
+        if cfg.action != "buy" or self.paused:
+            note = "⏸ sniping is paused, not buying" if cfg.action == "buy" else "alert only"
+            await self.notifier.send(f"{head}\n{note}", buttons=buttons)
+            return
+        try:
+            curve = await fetch_curve(self.rpc, mint)
+        except Exception as e:
+            log.debug("curve lookup for call %s failed: %s", mint, e)
+            curve = None
+        on_curve = bool(curve and not curve.complete and curve.sol_quoted)
+        if cfg.max_market_cap_sol:
+            mcap = await self._market_cap_sol(mint, curve if on_curve else None)
+            if mcap is not None and mcap > cfg.max_market_cap_sol:
+                await self.notifier.send(f"{head}\n❌ not bought: market cap already "
+                                         f"{mcap:,.0f} SOL (max {cfg.max_market_cap_sol:g})",
+                                         buttons=buttons)
+                return
+        c = Candidate(chain="solana", mint=mint, source="call", symbol=mint[:6],
+                      creator=curve.creator if curve else None, buy_sol=group.sol or None,
+                      force=not group.filters, trigger=f"call:{group.title[:40]}",
+                      route="pump" if on_curve or mint.endswith("pump") else "jupiter",
+                      v_sol=curve.v_sol if on_curve else None,
+                      v_tokens=curve.v_tokens if on_curve else None)
+        if on_curve:
+            self._set_curve(mint, CurveState(curve.v_sol, curve.v_tokens))
+        result = await self.handle_candidate(c) or "done"
+        if not result.startswith("🟢"):   # a buy announces itself
+            await self.notifier.send(f"{head}\n{result}", buttons=buttons)
+
+    async def _market_cap_sol(self, mint: str, curve) -> Optional[float]:
+        try:
+            if curve is not None:
+                return curve.price * PUMP_TOTAL_SUPPLY
+            info = await self.rpc.get_mint_info(mint)
+            supply = int(info.get("supply", 0)) / 10 ** int(info.get("decimals", 0))
+            return await self.price_of(mint) * supply
+        except Exception as e:
+            log.debug("market cap for %s unavailable: %s", mint, e)
+            return None
+
     async def manual_buy(self, mint: str, sol: Optional[float], force: bool = False) -> str:
         from solders.pubkey import Pubkey
         try:
@@ -2036,6 +2094,8 @@ class Engine:
                                    self.on_momentum)
         loops.append(("momentum", momentum.run))
         loops += [(f"worker{i}", self.worker) for i in range(CANDIDATE_WORKERS)]
+        if tg:  # logging the Telegram account in happens in the bot chat
+            loops.append(("calls", self._calls_loop))
         if tg:
             loops.append(("telegram", tg.run))
         tasks = [asyncio.create_task(self._supervise(name, fn)) for name, fn in loops]

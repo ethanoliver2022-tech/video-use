@@ -168,6 +168,16 @@ class ExitConfig:
 
 
 @dataclass
+class CallsConfig:
+    """Buying contract addresses posted in Telegram groups you're in (your own account)."""
+    enabled: bool = False
+    action: str = "buy"             # "buy" or "alert" (just tell me)
+    min_groups: int = 1             # buy only once the CA was posted in this many groups
+    group_window_minutes: float = 30.0   # ...within this long of the first post
+    max_market_cap_sol: float = 0.0      # skip coins already bigger than this; 0 = no cap
+
+
+@dataclass
 class CopyTradeConfig:
     enabled: bool = False
     wallets: list[CopyWallet] = field(default_factory=list)
@@ -204,6 +214,7 @@ class Config:
     filters: FilterConfig = field(default_factory=FilterConfig)
     exits: ExitConfig = field(default_factory=ExitConfig)
     copytrade: CopyTradeConfig = field(default_factory=CopyTradeConfig)
+    calls: CallsConfig = field(default_factory=CallsConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     endpoints: Endpoints = field(default_factory=Endpoints)
     data_dir: str = "data"

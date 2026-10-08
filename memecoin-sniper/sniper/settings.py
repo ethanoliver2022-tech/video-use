@@ -136,6 +136,17 @@ SETTINGS: list[Setting] = [
             help="0 = your normal buy size"),
     Setting("discovery.momentum_alerts_per_hour", "Max signals per hour", "int", 1, 500),
     Setting("discovery.momentum_poll_seconds", "Check every", "int", 15, 3600, "s"),
+    # call sniper (Telegram groups)
+    Setting("calls.enabled", "Call sniper", "bool",
+            help="buy contract addresses posted in your watched Telegram groups"),
+    Setting("calls.action", "On a call", "choice", options=("buy", "alert"),
+            help="buy = buy it (filters and limits apply); alert = just tell me"),
+    Setting("calls.min_groups", "Min groups", "int", 1, 20,
+            help="only act once this many of your groups posted the same CA"),
+    Setting("calls.group_window_minutes", "Groups window", "float", 1, 1440, "min",
+            help="...within this long of the first post"),
+    Setting("calls.max_market_cap_sol", "Max call market cap", "float", 0, 1e9, "SOL",
+            help="skip called coins already worth more than this; 0 = no limit"),
     # copy trade
     Setting("copytrade.enabled", "Copy trading", "bool"),
     Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL"),
@@ -149,6 +160,7 @@ GROUPS = {
     "speed": "⚡ Speed",
     "momentum": "🚀 Momentum",
     "copytrade": "👥 Copy trade",
+    "calls": "📣 Call sniper",
 }
 
 

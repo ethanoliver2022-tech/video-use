@@ -21,6 +21,7 @@ A self-hosted Solana memecoin sniper with the feature set of the paid bots
 | 🎯 **Multi-chain discovery** | pump.fun launches and graduations (live websocket), plus new pools on Solana, Base, BSC and ETH from GeckoTerminal and DexScreener. | Photon/BullX "new pairs" |
 | 🎯 **Targeted snipers** | Three modes: snipe every launch that passes your filters, only *targeted* launches, or off. Targeted means a watchlist of devs whose next pump.fun launch is bought instantly, plus keywords matched in the name or ticker. | Banana Gun / Maestro "dev sniper", Trojan "auto-snipe" |
 | 🚀 **Momentum scanner** | On/off with one tap. Finds Solana tokens pumping right now (5-minute price rise, volume, more buyers than sellers, enough liquidity) from free GeckoTerminal + DexScreener data, and alerts you with buy buttons, or buys them itself through your normal filters and limits. | Photon / GMGN "trending", BullX "pump vision" |
+| 📣 **Call sniper** | Watches Telegram groups and channels you're in (through a Telegram account you log in from the bot chat) and buys the contract addresses posted there: first post only, an optional "posted in N groups" rule, a market-cap cap, a buy size per group, and your normal filters (or none, for a group you trust). Alerts-only mode too. | Maestro/Trojan "call channel" snipers |
 | 👥 **Copy trading** | Mirrors buys from wallets you follow, can follow their sells out, and sets a size per wallet. Wallets can be added or removed live from Telegram. | GMGN/Trojan copy trade |
 | 🔔 **Wallet tracker** | Alerts you when a tracked wallet buys or sells, with one-tap Buy and Token-card buttons, without copying anything. Switch any wallet between track and copy with one tap. | GMGN / Cielo wallet tracking |
 | 📋 **Limit orders** | Buy on a dip or a breakout, or sell at a profit or a custom stop. They expire on their own, survive restarts, and are created and cancelled from Telegram. | Trojan / Photon / BullX limit orders |
@@ -269,6 +270,22 @@ python -m sniper sell <mint>                             # emergency: sell whole
 ```
 `config.example.yaml` documents every setting. Settings changed in Telegram are
 stored as overrides on top of it.
+
+## Call sniper setup
+
+1. Make (or reuse) a **second Telegram account** and join the groups you want with it.
+   Don't use your main account: the login gives full access to the account it's for.
+2. On **my.telegram.org** (log in with that account) → *API development tools*, create an
+   app with any name and note its **api_id** and **api_hash**.
+3. In the bot: **📣 Call sniper → 🔑 Log in**, send `api_id api_hash`, then the phone
+   number, then the login code **with spaces between the digits** (`1 2 3 4 5`): Telegram
+   cancels a code sent in a chat as-is. Accounts with a two-step password are asked for it.
+   Every one of those messages is deleted from the chat right away.
+4. **➕ Add group** for each group, set its buy size and filters, then **▶️ Turn on**.
+
+The login is saved in `data/call_session.json` (owner-only, never sent anywhere). Log out
+from the menu, and end the session in that account's Telegram → Settings → Devices.
+Test a group in paper mode first: many call groups buy before they post.
 
 ## Tuning
 

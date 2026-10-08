@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional
 import httpx
 
 from .notify import TELEGRAM_API
+from .calls import CallGroup
 from .settings import BY_KEY, GROUPS, SETTINGS, format_value, get_value, group_of
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ Shortcuts:
 /momentum on | off (tokens pumping right now)
 /health to check every service the bot depends on
 /why to see why recent launches weren't bought
+/calls to buy CAs posted in Telegram groups you're in
 /reclaim to take back the ~0.002 SOL rent from empty token accounts
 /stats"""
 
@@ -361,6 +363,8 @@ class TelegramControl:
                     "discovery.momentum_enabled", args[0].lower() == "on")))
             else:
                 await self.settings_group("momentum")
+        elif cmd == "/calls":
+            await self.calls_menu()
         elif cmd == "/why":
             await self.send(self.engine.why_summary(), WHY_BUTTONS)
         elif cmd == "/health":
@@ -383,6 +387,7 @@ class TelegramControl:
             await self.main_menu(msg_id)
         elif data == "x":
             self.pending = None
+            await e.calls.cancel_login()
             await self.main_menu(msg_id)
         elif data == "go":
             e.set_paused(False)
@@ -441,6 +446,8 @@ class TelegramControl:
             await self.health()
         elif data == "st":
             await self.stats()
+        elif data == "cl" or head in ("cl", "ca", "cg", "cgs", "cgf", "cgo", "cgr"):
+            await self.calls_action(head if data != "cl" else "cl", rest, msg_id)
         elif data == "whyz":
             e.reset_why()
             await self.send("🔁 Why-no-buys counts reset. Tap 🔄 Again in a few minutes to see "
@@ -569,6 +576,8 @@ class TelegramControl:
                 await self.send(await e.place_limit_sell(p["data"], float(parts[0]), float(parts[1]), hours))
             elif kind == "buy_custom":
                 self._bg_reply(e.manual_buy(p["data"], float(text.replace("SOL", "").strip())))
+            elif kind.startswith("call_"):
+                await self.calls_text(kind, text, msg_id, p)
         except Exception as ex:
             self.pending = p  # let them try again
             p["expires"] = time.monotonic() + PENDING_TTL
@@ -619,6 +628,7 @@ class TelegramControl:
             [("🎯 Snipers", "sn"), ("📋 Orders", "o")],
             [("👥 Copy & track", "c"), ("⚙️ Settings", "set")],
             [("📈 Stats", "st"), switch],
+            [("📣 Call sniper", "cl")],
             [("🚀 Momentum: " + ("✅ on" if d.momentum_enabled else "off"), "mo"),
              ("🩺 Health", "hl"), ("🔄 Refresh", "m")],
         ], msg_id)
@@ -790,6 +800,187 @@ class TelegramControl:
                           ("Sell 100%", f"s:{p.mint}:100")],
                          [("📈 Live chart", f"ch:{p.mint}"), ("📋 Limit sell", f"ls:{p.mint}")],
                          [("🔍 Card", f"tc:{p.mint}"), ("🔄 Refresh", "refresh")]])
+
+    # ---------- call sniper (Telegram groups) ----------
+
+    async def calls_menu(self, msg_id: Optional[int] = None) -> None:
+        e = self.engine
+        w, c = e.calls, e.cfg.calls
+        if not w.logged_in:
+            await self.show(
+                "📣 <b>Call sniper</b>\n\nBuys contract addresses (CAs) posted in Telegram "
+                "groups and channels you're in. A bot can't read those, so this logs in as a "
+                "Telegram account. <b>Use a second account made for this</b>, not your main "
+                "one: the login is full access to that account (it stays on your server).\n\n"
+                "You'll need from <b>my.telegram.org</b> → API development tools: the "
+                "<b>api_id</b> and <b>api_hash</b> (any app name works).",
+                [[("🔑 Log in", "cl:login")], [("⬅️ Menu", "m")]], msg_id)
+            return
+        groups = w.groups.all()
+        state = ("✅ on" if c.enabled else "off") + (" · alerts only" if c.action != "buy" else "")
+        lines = [f"📣 <b>Call sniper</b>: {state}",
+                 f"Account: {html.escape(w.me or 'connecting…')}",
+                 f"Act after: {c.min_groups} group(s)" + (
+                     f" within {c.group_window_minutes:g} min" if c.min_groups > 1 else ""),
+                 "", f"<b>Watching {len(groups)} group(s)</b>" + (":" if groups else
+                                                                  ". Tap ➕ Add group.")]
+        rows = []
+        for g in groups:
+            size = f"{g.sol:g} SOL" if g.sol else "normal size"
+            flags = ("" if g.on else "⏸ ") + ("" if g.filters else "⚠️ no filters · ")
+            lines.append(f"• {html.escape(g.title)}: {flags}{size}")
+            rows.append([(f"⚙️ {g.title[:30]}", f"cg:{g.id}")])
+        rows = [[("⏸ Turn off" if c.enabled else "▶️ Turn on", "cl:on"),
+                 ("➕ Add group", "cl:add")]] + rows + [
+            [("⚙️ Options", "cl:opt"), ("🚪 Log out", "cl:out")], [("⬅️ Menu", "m")]]
+        await self.show("\n".join(lines), rows, msg_id)
+
+    async def calls_action(self, head: str, rest: str, msg_id: Optional[int]) -> None:
+        e = self.engine
+        w = e.calls
+        if head == "cl" and rest in ("", "back"):
+            await self.calls_menu(msg_id)
+        elif head == "cl" and rest == "login":
+            self._ask("call_api")
+            await self.send("1️⃣ On my.telegram.org (log in with the account you'll use) → "
+                            "<b>API development tools</b>, create an app with any name.\n\n"
+                            "Send its <b>api_id</b> and <b>api_hash</b> here, separated by a "
+                            "space:\n<code>1234567 0123456789abcdef0123456789abcdef</code>",
+                            [[("✖️ Cancel", "x")]])
+        elif head == "cl" and rest == "on":
+            await e.set_setting("calls.enabled", not e.cfg.calls.enabled)
+            await self.calls_menu(msg_id)
+        elif head == "cl" and rest == "opt":
+            await self.settings_group("calls", msg_id)
+        elif head == "cl" and rest == "out":
+            await self.show("Log the call sniper's Telegram account out of this bot? Your "
+                            "watched groups are kept.",
+                            [[("✅ Yes, log out", "cl:out!"), ("✖️ Cancel", "cl")]], msg_id)
+        elif head == "cl" and rest == "out!":
+            w.logout()
+            await self.send("🚪 Logged out. Tip: also end the session in that account's "
+                            "Telegram → Settings → Devices.", [[("📣 Call sniper", "cl")]])
+        elif head == "cl" and rest == "add":
+            try:
+                chats = await w.list_chats()
+            except Exception as ex:
+                await self.send(f"⚠️ {html.escape(str(ex))}", [[("📣 Call sniper", "cl")]])
+                return
+            have = {g.id for g in w.groups.all()}
+            rows = [[(t[:40], f"ca:{i}")] for i, t in chats if i not in have][:30]
+            if not rows:
+                await self.send("No other groups or channels found. Join the group with that "
+                                "account first, then try again.", [[("📣 Call sniper", "cl")]])
+                return
+            await self.send("Which one should I watch?", rows + [[("⬅️ Back", "cl")]])
+        elif head == "ca":
+            gid = int(rest)
+            try:
+                chats = dict(await w.list_chats())
+            except Exception:
+                chats = {}
+            w.groups.upsert(CallGroup(id=gid, title=chats.get(gid, str(gid))))
+            await self.call_group_menu(gid)
+        elif head in ("cg", "cgf", "cgo", "cgr", "cgs"):
+            gid = int(rest)
+            g = w.groups.get(gid)
+            if g is None:
+                await self.calls_menu(msg_id)
+                return
+            if head == "cgf":
+                g.filters = not g.filters
+                w.groups.upsert(g)
+            elif head == "cgo":
+                g.on = not g.on
+                w.groups.upsert(g)
+            elif head == "cgr":
+                w.groups.remove(gid)
+                await self.calls_menu(msg_id)
+                return
+            elif head == "cgs":
+                self._ask("call_size", gid)
+                await self.send(f"Buy size for calls from <b>{html.escape(g.title)}</b>, in SOL "
+                                "(0 = your normal buy size):", [[("✖️ Cancel", "x")]])
+                return
+            await self.call_group_menu(gid, msg_id)
+
+    async def call_group_menu(self, gid: int, msg_id: Optional[int] = None) -> None:
+        g = self.engine.calls.groups.get(gid)
+        if g is None:
+            await self.calls_menu(msg_id)
+            return
+        size = f"{g.sol:g} SOL" if g.sol else "your normal buy size"
+        text = (f"📣 <b>{html.escape(g.title)}</b>\n"
+                f"Status: {'▶️ watching' if g.on else '⏸ paused'}\n"
+                f"Buy size: {size}\n"
+                f"Filters: {'✅ on (recommended)' if g.filters else '⚠️ OFF: buys anything posted'}")
+        await self.show(text, [
+            [("💰 Buy size", f"cgs:{gid}"),
+             ("🛡 Filters: " + ("on" if g.filters else "OFF"), f"cgf:{gid}")],
+            [("⏸ Pause" if g.on else "▶️ Watch", f"cgo:{gid}"), ("🗑 Remove", f"cgr:{gid}")],
+            [("⬅️ Call sniper", "cl")]], msg_id)
+
+    async def _forget(self, msg_id: Optional[int]) -> None:
+        if msg_id:   # login details never stay in the chat history
+            try:
+                await self.api("deleteMessage", chat_id=self.owner, message_id=msg_id)
+            except Exception:
+                pass
+
+    async def calls_text(self, kind: str, text: str, msg_id: Optional[int], p: dict) -> None:
+        from .calls import LoginNeedsPassword
+        w = self.engine.calls
+        text = text.strip()
+        if kind == "call_size":
+            sol = float(text.replace("SOL", "").strip())
+            if not 0 <= sol <= 100:
+                raise ValueError("between 0 and 100 SOL")
+            g = w.groups.get(int(p["data"]))
+            if g:
+                g.sol = sol
+                w.groups.upsert(g)
+                await self.call_group_menu(g.id)
+            return
+        if kind == "call_api":
+            await self._forget(msg_id)
+            parts = text.split()
+            if len(parts) != 2 or not parts[0].isdigit() or not re.fullmatch(r"[0-9a-fA-F]{32}", parts[1]):
+                raise ValueError("send the api_id (digits) and api_hash (32 letters/digits), "
+                                 "separated by a space")
+            self._ask("call_phone", {"api_id": int(parts[0]), "api_hash": parts[1]})
+            await self.send("2️⃣ Now the account's <b>phone number</b>, with country code, "
+                            "e.g. <code>+15551234567</code>", [[("✖️ Cancel", "x")]])
+        elif kind == "call_phone":
+            await self._forget(msg_id)
+            phone = re.sub(r"[^\d+]", "", text)
+            if not re.fullmatch(r"\+?\d{7,15}", phone):
+                raise ValueError("that doesn't look like a phone number")
+            d = p["data"]
+            await w.start_login(d["api_id"], d["api_hash"], phone)
+            self._ask("call_code")
+            await self.send("3️⃣ Telegram just sent a login code to that account. Send it here "
+                            "<b>with spaces between the digits</b>, like <code>1 2 3 4 5</code>"
+                            ". (Telegram cancels a code that's sent in a chat as it is.)",
+                            [[("✖️ Cancel", "x")]])
+        elif kind == "call_code":
+            await self._forget(msg_id)
+            try:
+                who = await w.finish_code(text)
+            except LoginNeedsPassword:
+                self._ask("call_pw")
+                await self.send("4️⃣ That account has a two-step verification password. "
+                                "Send it (I delete the message right away).",
+                                [[("✖️ Cancel", "x")]])
+                return
+            await self._logged_in(who)
+        elif kind == "call_pw":
+            await self._forget(msg_id)
+            await self._logged_in(await w.finish_password(text))
+
+    async def _logged_in(self, who: str) -> None:
+        await self.send(f"✅ Call sniper logged in as {html.escape(who)}. Now tap ➕ Add group "
+                        "and pick up to a few groups to watch. It starts off: turn it on when "
+                        "the groups are set.", [[("📣 Call sniper", "cl")]])
 
     # ---------- live chart ----------
 
