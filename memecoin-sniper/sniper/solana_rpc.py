@@ -303,3 +303,47 @@ def balance_deltas(tx: dict, owner: str, mint: str) -> tuple[float, float]:
 
     token_delta = total(meta.get("postTokenBalances") or []) - total(meta.get("preTokenBalances") or [])
     return token_delta, sol_delta
+
+
+class ReadPool:
+    """Background reads (the copy watcher, wallet checks, dev wallet checks) spread over
+    every RPC you have, extra ones first, so they don't use up the main RPC's plan that
+    trading needs. An RPC that rate-limits is rested for a while; `rate` paces the calls."""
+
+    REST_SECONDS = 15.0
+
+    def __init__(self, rpcs: list["SolanaRpc"], rate: float = 0.0):
+        self.rpcs = rpcs
+        self.rate = rate
+        self._resting: dict[int, float] = {}
+        self._turn = 0
+        self._next_at = 0.0
+        self._lock = asyncio.Lock()
+
+    async def _pace(self) -> None:
+        if self.rate <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            wait = self._next_at - now
+            self._next_at = max(now, self._next_at) + 1.0 / self.rate
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    async def call(self, method: str, params: list[Any] | None = None) -> Any:
+        await self._pace()
+        now = time.monotonic()
+        n = len(self.rpcs)
+        order = [(self._turn + k) % n for k in range(n)]
+        self._turn = (self._turn + 1) % n
+        awake = [i for i in order if self._resting.get(i, 0) <= now] or order
+        last: Optional[Exception] = None
+        for i in awake:
+            try:
+                return await self.rpcs[i].call(method, params)
+            except RpcError as e:
+                last = e
+                if re.search(r"rate|limit|429|credits|too many", str(e), re.I):
+                    self._resting[i] = time.monotonic() + self.REST_SECONDS
+                # any other failure (e.g. a send-only endpoint): try the next RPC
+        raise last or RpcError(f"{method}: no RPC available")

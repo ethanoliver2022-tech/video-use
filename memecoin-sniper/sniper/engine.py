@@ -35,7 +35,7 @@ from .scanners.multichain import DexScreenerScanner, GeckoTerminalScanner
 from .scanners.pumpportal import PumpPortalStream, trade_price
 from .settings import (BY_KEY, apply_overrides, apply_setting, format_value, parse_value,
                        to_storable, update_in_place)
-from .solana_rpc import RpcError, SolanaRpc, TxFailed
+from .solana_rpc import ReadPool, RpcError, SolanaRpc, TxFailed
 from .store import Store
 
 log = logging.getLogger("sniper")
@@ -84,6 +84,7 @@ KEEPALIVE_SECONDS = 120  # idle connections kept open this long
 WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
 DEVCHECK_LEAD = 3.0      # with a window: start the dev wallet lookups this long before it ends
 COPIED_TTL = 7 * 86400  # 'first buy only' remembers a copied coin this long
+BACKGROUND_RPS = 4.0    # pace of background RPC reads (copy watcher, wallet checks)
 SOL_PRICE_TTL = 60.0     # seconds a SOL/USD price is reused for $ market cap limits
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
@@ -167,7 +168,13 @@ class Engine:
                                     store=self.store, jupiter=self.jupiter,
                                     ipfs_gateway=cfg.endpoints.ipfs_gateway,
                                     probe_sol=cfg.trading.buy_amount_sol)
-        self.devcheck = DevChecker(cfg.filters, self.rpc, self.store)
+        # background reads go over the extra RPCs first (main last), paced, so trading keeps
+        # the main RPC's rate limit to itself
+        extra = [SolanaRpc(u, self.http) for u in dict.fromkeys(cfg.speed.broadcast_rpcs)
+                 if u.startswith(("http://", "https://")) and u != cfg.endpoints.rpc_url]
+        self.reads = ReadPool([*extra, self.rpc], rate=BACKGROUND_RPS)
+        self.quick_reads = ReadPool([*extra, self.rpc])      # dev checks: before a buy, no queue
+        self.devcheck = DevChecker(cfg.filters, self.quick_reads, self.store)
         self.calls = CallWatcher(cfg.data_dir, self.store, self.on_call)
         self.notifier = Notifier(self.http, cfg.telegram_bot_token if cfg.notify.telegram else "",
                                  cfg.telegram_chat_id)
@@ -218,10 +225,13 @@ class Engine:
                 k: float(v) for k, v in json.loads(self.store.get_setting("copied_mints") or "{}").items()}
         except (ValueError, TypeError, AttributeError):
             self._copied = {}
-        self.wallet_checker = WalletChecker(self.rpc, self.store)
-        self.copy_poller = CopyPoller(self.rpc, lambda: list(self._copy), self.on_trade,
+        self.wallet_checker = WalletChecker(self.reads, self.store)
+        self.copy_poller = CopyPoller(self.reads, lambda: list(self._copy), self.on_trade,
                                       enabled=lambda: self.cfg.copytrade.rpc_watch,
-                                      curve=lambda m: fetch_curve(self.rpc, m))
+                                      curve=lambda m: fetch_curve(self.rpc, m),
+                                      known=lambda sig: sig in self._recent_sig_set,
+                                      # only a backup while PumpPortal's feed is live
+                                      interval=lambda: 6.0 if self.has_trade_stream else 2.0)
         self._sol_usd: tuple[float, float] = (0.0, 0.0)   # (price, when) for $ market caps
         self._scan_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()

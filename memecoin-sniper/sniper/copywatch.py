@@ -82,9 +82,12 @@ class CopyPoller:
     def __init__(self, rpc: "SolanaRpc", wallets: Callable[[], Iterable[str]],
                  on_trade: Callable[[dict], Awaitable[None]],
                  enabled: Callable[[], bool] = lambda: True,
-                 curve: Optional[Callable[[str], Awaitable[object]]] = None):
+                 curve: Optional[Callable[[str], Awaitable[object]]] = None,
+                 known: Callable[[str], bool] = lambda sig: False,
+                 interval: Callable[[], float] = lambda: POLL_SECONDS):
         self.rpc, self.wallets, self.on_trade = rpc, wallets, on_trade
         self.enabled, self.curve = enabled, curve
+        self.known, self.interval = known, interval   # trades PumpPortal already delivered
         self.last_sig: dict[str, Optional[str]] = {}
         self.errors = 0
 
@@ -110,6 +113,8 @@ class CopyPoller:
             bt = s.get("blockTime")
             if isinstance(bt, (int, float)) and now - bt > MAX_AGE_SECONDS:
                 continue
+            if self.known(s["signature"]):
+                continue   # PumpPortal already delivered it: no need to read the transaction
             tx = await self.rpc.call("getTransaction", [s["signature"], {
                 "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
                 "commitment": "confirmed"}])
@@ -142,5 +147,5 @@ class CopyPoller:
                 if failed:
                     self.errors += 1
                     log.debug("copy watcher: %d wallet lookup(s) failed: %s", len(failed), failed[0])
-            # a few wallets every 2s; more wallets, a bit slower, to spare the RPC
-            await asyncio.sleep(max(POLL_SECONDS, len(wallets) * 0.4))
+            # a few wallets every couple of seconds; more wallets, a bit slower
+            await asyncio.sleep(max(self.interval(), len(wallets) * 0.4))

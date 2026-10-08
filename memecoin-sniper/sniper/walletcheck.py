@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MAX_TX_PER_CHECK = 300   # newest transactions read per check (spares a free RPC plan)
-PARALLEL = 5
+PARALLEL = 2
 SOLD_OUT = 0.9           # sold this share of what it bought = a finished trade
 
 
