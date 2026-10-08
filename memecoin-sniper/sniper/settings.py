@@ -150,6 +150,9 @@ SETTINGS: list[Setting] = [
     # copy trade
     Setting("copytrade.enabled", "Copy trading", "bool"),
     Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL"),
+    Setting("copytrade.run_safety_checks", "Filters on copies", "bool",
+            help="off = copy every buy straight away, skipping your filters (rug checks, "
+                 "dev wallet, holders). Your max positions and daily loss limit still apply"),
 ]
 BY_KEY = {s.key: s for s in SETTINGS}
 GROUPS = {

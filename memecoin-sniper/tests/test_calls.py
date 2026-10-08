@@ -209,3 +209,30 @@ async def test_groups_are_added_and_tuned_from_chat(h, monkeypatch):
     await h.tap("cgr:-1001")
     assert w.groups.get(-1001) is None
     await h.close()
+
+
+async def test_copy_trades_can_skip_the_filters(h):
+    """Telegram toggle for copytrade.run_safety_checks; off = copies are bought unfiltered."""
+    from sniper.config import CopyWallet
+    from sniper.models import SafetyReport
+    eng = h.eng
+    await h.tap("c")
+    assert "🛡 Filters on copies: ✅ on" in str(h.sent[-1][1])
+    idx = [d for d in h.buttons() if d.startswith("e:")][-1]
+    await h.tap(idx)
+    assert not eng.cfg.copytrade.run_safety_checks and "Filters are OFF" in h.last
+
+    async def reject(c):
+        return SafetyReport(passed=False, reasons=["would have been filtered"])
+    eng.safety.evaluate = reject
+    leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
+    await eng.handle_copy({"mint": CA, "txType": "buy", "solAmount": 1.0, "pool": "pump",
+                           "traderPublicKey": leader.address}, leader)
+    assert CA in eng.positions and eng.positions[CA].source == "copy"
+
+    await h.tap(idx)                                   # back on: filters apply again
+    assert eng.cfg.copytrade.run_safety_checks
+    await eng.handle_copy({"mint": CA2, "txType": "buy", "solAmount": 1.0, "pool": "pump",
+                           "traderPublicKey": leader.address}, leader)
+    assert CA2 not in eng.positions
+    await h.close()

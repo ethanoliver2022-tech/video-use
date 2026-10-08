@@ -1154,7 +1154,7 @@ class TelegramControl:
         cur = get_value(self.engine.cfg, s.key)
         if s.kind == "bool":
             await self.engine.set_setting(s.key, not cur)
-            if s.key == "copytrade.enabled":
+            if s.key in ("copytrade.enabled", "copytrade.run_safety_checks"):
                 await self.copy_menu(msg_id)
             else:
                 await self.settings_group(group_of(s), msg_id)
@@ -1207,7 +1207,12 @@ class TelegramControl:
         if not wallets:
             lines.append("No wallets yet.")
         toggle_idx = next(i for i, s in enumerate(SETTINGS) if s.key == "copytrade.enabled")
+        filters_idx = next(i for i, s in enumerate(SETTINGS) if s.key == "copytrade.run_safety_checks")
+        checks = e.cfg.copytrade.run_safety_checks
+        if not checks:
+            lines.append("⚠️ Filters are OFF for copies: anything they buy is copied.")
         rows.append([("➕ Add wallet", "c:add"), (f"Copy: {status}", f"e:{toggle_idx}")])
+        rows.append([("🛡 Filters on copies: " + ("✅ on" if checks else "⚠️ OFF"), f"e:{filters_idx}")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 
