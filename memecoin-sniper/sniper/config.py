@@ -40,7 +40,8 @@ class CopyWallet:
 class TradingConfig:
     buy_amount_sol: float = 0.05
     max_open_positions: int = 3
-    slippage_pct: float = 20.0
+    slippage_pct: float = 20.0              # buys
+    sell_slippage_pct: float = 0.0          # sells; 0 = same as buys
     priority_fee_sol: float = 0.0005       # used when speed.auto_priority_fee is off
     min_sol_reserve: float = 0.03          # never spend below this (rent + fees for sells)
     daily_loss_limit_sol: float = 0.5      # stop opening positions after this much realized loss; 0 = off
@@ -217,6 +218,9 @@ class CopyTradeConfig:
     max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
     slippage_pct: float = 35.0              # copy buys: followers pile in, prices move fast
+    sell_slippage_pct: float = 0.0          # copy sells; 0 = your normal sell slippage
+    max_positions: int = 0                  # copies' own open-position limit; 0 = they share
+    #                                         the normal max positions
     only_their_sells: bool = True           # copies sell only when the wallet sells (plus the
     #                                         two below), never on the bot's own exit rules
     copy_rug_exits: bool = True             # ...except dev sold / big holder dumped (rugs)

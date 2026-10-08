@@ -293,3 +293,43 @@ async def test_copies_sell_only_when_the_wallet_sells(h):
                       tokens_initial=1, tokens_remaining=1, sol_in=0.1)
     assert eng.exit_cfg(sniped) is eng.cfg.exits
     await h.close()
+
+
+async def test_copies_skip_the_loss_cooldown_and_can_have_their_own_slots(h):
+    eng = h.eng
+    eng.cfg.trading.cooldown_after_loss_seconds = 600
+    eng.last_loss_at = time.monotonic()                      # a snipe just lost
+    eng.cfg.trading.max_open_positions = 1
+    eng.positions["SNIPED"] = Position(mint="SNIPED", symbol="S", source="pumpfun", creator=None,
+                                       entry_price=1.0, tokens_initial=1, tokens_remaining=1,
+                                       sol_in=0.1)
+    assert await eng.risk_block(0.01) == "max open positions"
+    assert await eng.risk_block(0.01, copy=True) == "max open positions"   # shared by default
+    eng.cfg.copytrade.max_positions = 2
+    assert await eng.risk_block(0.01, copy=True) is None     # own slots; no cool-down
+    eng.positions.pop("SNIPED")
+    assert await eng.risk_block(0.01) == "cooling down after loss"   # snipes still cool down
+    w = await _wallet(eng)
+    for _ in range(3):
+        await eng.handle_copy(_buy(w.address, _addr()), w)
+    assert sum(1 for p in eng.positions.values() if p.copied_from) == 2
+    assert "max copy positions" in h.last
+    await h.close()
+
+
+def test_sells_have_their_own_slippage(tmp_path):
+    from sniper.config import load_config
+    from sniper.engine import Engine
+    cfg = load_config("config.example.yaml")
+    cfg.data_dir = str(tmp_path)
+    eng = Engine(cfg, live=False, config_path="config.example.yaml", start_paused=True)
+    cfg.trading.slippage_pct, cfg.trading.sell_slippage_pct = 20, 30
+    p = Position(mint="M", symbol="X", source="pumpfun", creator=None, entry_price=1.0,
+                 tokens_initial=1, tokens_remaining=1, sol_in=0.1)
+    d = exits.ExitDecision(1, True, "take profit +40%")
+    assert eng._sell_slippage(p, d) == 30
+    cfg.trading.sell_slippage_pct = 0
+    assert eng._sell_slippage(p, d) == 20                    # 0 = same as buys
+    cfg.copytrade.sell_slippage_pct = 45
+    p.copied_from = "W"
+    assert eng._sell_slippage(p, d) == 45

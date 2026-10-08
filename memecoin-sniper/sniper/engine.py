@@ -198,6 +198,7 @@ class Engine:
         self.sell_failures: dict[str, int] = {}
         self._sell_next_try: dict[str, float] = {}
         self._buying: dict[str, float] = {}       # mint -> SOL, buys in flight
+        self._copy_buying: set[str] = set()       # ...of which copies (separate copy limit)
         self._buys_finished = 0                   # bumps when a buy leaves _buying
         # (SOL, monotonic time, _buys_finished when read): the wallet balance, refreshed in
         # the background so buys don't wait on an RPC round trip
@@ -573,7 +574,7 @@ class Engine:
                 or c.route != "pump" or self.scan_only or c.mint in self._buying
                 or (c.mint in self.positions and not self.positions[c.mint].closed)):
             return
-        if self._slots_used() >= self.cfg.trading.max_open_positions:
+        if self._slots_used("snipe") >= self.cfg.trading.max_open_positions:
             return  # it couldn't be bought anyway (the same rule the buy itself applies)
         sol = c.buy_sol or self.cfg.trading.buy_amount_sol
         task = asyncio.ensure_future(prepare(c, sol))
@@ -948,19 +949,33 @@ class Engine:
                                                           for f in dataclasses.fields(ce)})
         return self.cfg.exits
 
-    def _slots_used(self) -> int:
-        """Open positions (moonbags don't take up a slot) plus buys in flight or unconfirmed."""
-        return sum(1 for p in self.positions.values()
-                   if not p.closed and not exits.in_moonbag(p, self.exit_cfg(p))) \
-            + len(set(self._buying) | set(self.pending_buys()))
+    def _slots_used(self, kind: Optional[str] = None) -> int:
+        """Open positions (moonbags don't take up a slot) plus buys in flight or unconfirmed.
+        With a separate copy limit set, `kind` "copy" counts copies only, "snipe" the rest."""
+        split = kind is not None and self.cfg.copytrade.max_positions > 0
+        want_copy = kind == "copy"
 
-    async def risk_block(self, sol: float, bal: Optional[float] = None) -> Optional[str]:
-        t = self.cfg.trading
-        if self._slots_used() >= t.max_open_positions:
+        def counts(is_copy: bool) -> bool:
+            return not split or is_copy == want_copy
+        held = sum(1 for p in self.positions.values()
+                   if not p.closed and not exits.in_moonbag(p, self.exit_cfg(p))
+                   and counts(bool(p.copied_from) or p.source == "copy"))
+        flying = {m for m in set(self._buying) | set(self.pending_buys())
+                  if counts(m in self._copy_buying)}
+        return held + len(flying)
+
+    async def risk_block(self, sol: float, bal: Optional[float] = None,
+                         copy: bool = False) -> Optional[str]:
+        t, ct = self.cfg.trading, self.cfg.copytrade
+        if copy and ct.max_positions:   # copies have their own slots
+            if self._slots_used("copy") >= ct.max_positions:
+                return "max copy positions"
+        elif self._slots_used("snipe") >= t.max_open_positions:
             return "max open positions"
         if t.daily_loss_limit_sol > 0 and -self.store.realized_today() >= t.daily_loss_limit_sol:
             return "daily loss limit hit"
-        if (t.cooldown_after_loss_seconds and self.last_loss_at is not None
+        if (not copy   # the cool-down after a losing snipe doesn't stop copying a wallet
+                and t.cooldown_after_loss_seconds and self.last_loss_at is not None
                 and time.monotonic() - self.last_loss_at < t.cooldown_after_loss_seconds):
             return "cooling down after loss"
         if self.live:
@@ -1001,11 +1016,13 @@ class Engine:
                 return "already holding"
             if self._buys_finished != done_before:
                 bal = None  # a buy finished meanwhile: its spend may not be in that balance
-            blocked = await self.risk_block(sol, bal)  # in-flight buys are subtracted here
+            blocked = await self.risk_block(sol, bal, copy=c.source == "copy")
             if blocked:
                 log.info("skip %s %s: %s", c.symbol, c.mint, blocked)
                 return f"skipped: {blocked}"
             self._buying[c.mint] = sol
+            if c.source == "copy":
+                self._copy_buying.add(c.mint)
             if self.live:
                 # write-ahead: if the bot dies anywhere from here on, the reconciler still
                 # knows this buy may have landed and will adopt or expire it after restart
@@ -1070,6 +1087,7 @@ class Engine:
             self._drop_pending(c.mint)  # only after the position is safely on disk
         finally:
             self._buying.pop(c.mint, None)
+            self._copy_buying.discard(c.mint)
             self._buys_finished += 1
 
         why = {"dev": "👀 watched dev launched", "limit": "📋 limit order"}.get(
@@ -1548,12 +1566,16 @@ class Engine:
     def _sell_slippage(self, pos: Position, dec: exits.ExitDecision) -> float:
         """A token crashing through a rug blows past normal slippage, so each failed attempt
         allows more, and emergency exits start higher."""
-        base = self.cfg.trading.slippage_pct
+        t, ct = self.cfg.trading, self.cfg.copytrade
+        base = t.sell_slippage_pct or t.slippage_pct
+        if (pos.copied_from or pos.source == "copy") and ct.sell_slippage_pct:
+            base = ct.sell_slippage_pct
+        start = base
         if dec.reason.startswith(DANGER_EXITS):
             base *= 1.5
         n = self.sell_failures.get(pos.mint, 0)
-        # never below what buys use: someone running 80% slippage gets at least 80% on exits
-        cap = min(100.0, max(MAX_SELL_SLIPPAGE, self.cfg.trading.slippage_pct))
+        # never below the slippage you set: someone running 80% gets at least 80% on exits
+        cap = min(100.0, max(MAX_SELL_SLIPPAGE, start))
         return min(cap, max(base, base * (1 + n)))
 
     async def _sell_failed(self, pos: Position, err: Exception,

@@ -27,7 +27,11 @@ class Setting:
 SETTINGS: list[Setting] = [
     # trading
     Setting("trading.buy_amount_sol", "Buy size", "float", 0.001, 100, "SOL"),
-    Setting("trading.slippage_pct", "Slippage", "float", 0.5, 100, "%"),
+    Setting("trading.slippage_pct", "Buy slippage", "float", 0.5, 100, "%",
+            help="how far the price may move up on you while a buy lands"),
+    Setting("trading.sell_slippage_pct", "Sell slippage", "float", 0, 100, "%",
+            help="how far the price may move down on you while a sell lands; 0 = same as "
+                 "buy slippage. Failed sells retry with more, and rug exits start higher"),
     Setting("trading.max_open_positions", "Max positions", "int", 1, 50),
     Setting("trading.daily_loss_limit_sol", "Daily loss limit", "float", 0, 1000, "SOL",
             help="stop new buys for the rest of the UTC day after this much loss; 0 = no limit"),
@@ -155,9 +159,15 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.max_market_cap_usd", "Max copy market cap", "float", 0, 1e12, "$",
             help="don't copy into coins already worth more than this, e.g. 20k or 1.5m; "
                  "0 = no limit. A fresh pump.fun coin starts near $4-5k"),
-    Setting("copytrade.slippage_pct", "Copy slippage", "float", 0, 100, "%",
+    Setting("copytrade.slippage_pct", "Copy buy slippage", "float", 0, 100, "%",
             help="slippage for copy buys (copied wallets' buys pull in followers fast, so "
-                 "normal slippage often fails); 0 = your normal slippage"),
+                 "normal slippage often fails); 0 = your normal buy slippage"),
+    Setting("copytrade.sell_slippage_pct", "Copy sell slippage", "float", 0, 100, "%",
+            help="slippage for selling copies (e.g. when the wallet dumps with its "
+                 "followers); 0 = your normal sell slippage"),
+    Setting("copytrade.max_positions", "Max copy positions", "int", 0, 100,
+            help="copies get this many slots of their own, apart from sniping's max "
+                 "positions; 0 = copies share the normal max positions"),
     Setting("copytrade.first_buy_only", "First buy only", "bool",
             help="copy each coin once: not their add-on buys, nor a coin re-bought later"),
     Setting("copytrade.max_chase_pct", "Don't chase above", "float", 0, 10000, "%",
