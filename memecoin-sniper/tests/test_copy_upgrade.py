@@ -353,3 +353,34 @@ async def test_add_ons_to_a_coin_they_already_held_are_not_copied(h):
     await eng.handle_copy(add_on2, w)
     assert m2 in eng.positions
     await h.close()
+
+
+async def test_add_ons_are_caught_from_history_and_from_the_chain(h):
+    """PumpPortal's message doesn't always carry the wallet's balance: the bot also checks
+    the wallet's recorded trades and its balance on the chain."""
+    eng = h.eng
+    w = await _wallet(eng)
+    # 1) an earlier buy of this coin was seen (live feed or the wallet check)
+    m1 = _addr()
+    eng.store.add_wallet_trade(w.address, "EARLIER", m1, time.time() - 3600, "buy", 1.0, 5e6)
+    await eng.handle_copy(_buy(w.address, m1), w)
+    assert m1 not in eng.positions
+    # 2) no history and no balance in the message, but the chain shows a big bag
+    m2 = _addr()
+    msg = _buy(w.address, m2)
+
+    async def balance(owner, mint):
+        return msg["tokenAmount"] * 4
+    eng.rpc.get_token_balance = balance
+    await eng.handle_copy(msg, w)
+    assert m2 not in eng.positions
+    # 3) the chain shows just this buy: a first entry, copied
+    m3 = _addr()
+    msg3 = _buy(w.address, m3)
+
+    async def just_this(owner, mint):
+        return msg3["tokenAmount"]
+    eng.rpc.get_token_balance = just_this
+    await eng.handle_copy(msg3, w)
+    assert m3 in eng.positions
+    await h.close()

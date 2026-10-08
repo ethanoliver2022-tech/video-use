@@ -729,12 +729,11 @@ class Engine:
         if ct.first_buy_only and self._copied_before(mint):
             log.info("👥 %s bought %s again: already copied once (first buy only)", name, mint)
             return
-        if ct.first_buy_only and got:
-            after = num(msg.get("newTokenBalance"), allow_zero=True)
-            if after is not None and after - got > max(after * 0.01, 1.0):
+        if ct.first_buy_only:
+            held = await self._held_before(leader.address, mint, got or 0.0, msg)
+            if held:
                 # they held it before this buy: adding to a position, not entering one
-                log.info("👥 %s added to %s (already held %.0f tokens): not a first buy",
-                         name, mint, after - got)
+                log.info("👥 %s added to %s (%s): not a first buy", name, mint, held)
                 return
         if leader.paused:   # you were told when it paused: no message per buy
             log.info("👥 %s bought %s: wallet paused, not copied", name, mint)
@@ -792,6 +791,28 @@ class Engine:
             self._mark_copied(mint)
         elif result:
             await self._not_copied(name, mint, html.unescape(result), via)
+
+    async def _held_before(self, wallet: str, mint: str, got: float, msg: dict) -> str:
+        """Why we think the copied wallet already held this coin before this buy ('' = it
+        didn't). Three independent signs, as no single one is always available."""
+        sig = msg.get("signature")
+        since = time.time() - COPIED_TTL
+        for row_sig, row_mint, _ts, side, _sol, _tok in self.store.wallet_trades(wallet, since):
+            if row_mint == mint and side == "buy" and row_sig != sig:
+                return "it bought this coin before"
+        after = num(msg.get("newTokenBalance"), allow_zero=True)
+        if got and after is not None and after - got > max(after * 0.01, 1.0):
+            return f"it held {after - got:,.0f} tokens before"
+        try:   # straight from the chain: catches bags bought before the bot was watching
+            bal = await self.rpc.get_token_balance(wallet, mint)
+        except Exception as e:
+            log.debug("balance of %s in %s unavailable: %s", wallet[:6], mint, e)
+            return ""
+        # whether or not the RPC already shows this buy, holding clearly more than it means
+        # there was a bag already
+        if got and bal > got * 1.02 + 1.0:
+            return f"it holds {bal:,.0f} tokens, this buy was {got:,.0f}"
+        return ""
 
     async def _chase_pct(self, mint: str, their_price: float, on_curve: bool) -> Optional[float]:
         """How far the price is now above what the copied wallet paid (None = unknown)."""
