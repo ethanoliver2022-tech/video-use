@@ -287,6 +287,7 @@ async def test_copied_positions_can_have_their_own_tp_sl_and_moonbag(h):
     from sniper.config import CopyWallet, TakeProfitLevel
     eng = h.eng
     eng.cfg.exits.stop_loss_pct = 15
+    eng.cfg.copytrade.only_their_sells = False      # this test: the bot's rules for copies
     leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
     await eng.handle_copy(_buy_msg(leader.address, CA), leader)
     pos = eng.positions[CA]

@@ -261,3 +261,35 @@ async def test_their_own_big_buy_is_not_counted_as_chasing(h):
     await h.eng.handle_copy(msg, w)
     assert m in h.eng.positions
     await h.close()
+
+
+async def test_copies_sell_only_when_the_wallet_sells(h):
+    """Default: no take profit, stop loss, max hold, stale or migration exit on a copy."""
+    eng = h.eng
+    w = await _wallet(eng)
+    m = _addr()
+    await eng.handle_copy(_buy(w.address, m), w)
+    pos = eng.positions[m]
+    cfg = eng.exit_cfg(pos)
+    now = time.time()
+    pos.update_price(pos.entry_price * 0.4)                       # -60%
+    pos.opened_at = pos.last_update = now - 7200                  # 2h, no trades for 2h
+    pos.migrated = pos.seen_on_curve = True
+    assert exits.evaluate(pos, cfg, now) is None
+    pos.update_price(pos.entry_price * 5)                         # +400%
+    assert exits.evaluate(pos, cfg, now) is None
+    pos.dev_sold = True                                           # a rug sign still exits
+    assert exits.evaluate(pos, cfg, now).reason == "dev sold"
+    pos.dev_sold = False
+    exits.record_trade(pos, _sell(400, 600, trader=w.address), set())
+    assert exits.evaluate(pos, cfg, now).tokens == pytest.approx(pos.tokens_remaining * 0.4)
+    # an emergency stop, if set
+    pos.leader_sell_frac = 0
+    eng.cfg.copytrade.copy_stop_loss_pct = 50
+    pos.update_price(pos.entry_price * 0.4)
+    assert exits.evaluate(pos, eng.exit_cfg(pos), now).reason.startswith("stop loss")
+    # sniped positions keep the normal rules
+    sniped = Position(mint="S", symbol="S", source="pumpfun", creator=None, entry_price=1.0,
+                      tokens_initial=1, tokens_remaining=1, sol_in=0.1)
+    assert eng.exit_cfg(sniped) is eng.cfg.exits
+    await h.close()

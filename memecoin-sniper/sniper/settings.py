@@ -171,6 +171,14 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.rpc_watch", "Backup wallet watcher", "bool",
             help="also watch copied wallets straight from the chain (your RPC), so copies "
                  "happen even when PumpPortal's feed misses a trade (~2-4s slower)"),
+    Setting("copytrade.only_their_sells", "Copies sell only with them", "bool",
+            help="on = a copied position sells only when that wallet sells (mirrored by %), "
+                 "never on take profits, stop loss, max hold, migration etc."),
+    Setting("copytrade.copy_rug_exits", "Copies: rug exits", "bool",
+            help="with the above on: still sell at once if the dev sells or a big holder "
+                 "dumps (rug signs)"),
+    Setting("copytrade.copy_stop_loss_pct", "Copies: emergency stop", "float", 0, 99, "%",
+            help="with the above on: still sell if a copy is down this much; 0 = none"),
     Setting("copytrade.own_exits", "Own exits for copies", "bool",
             help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
                  "instead of your main exits"),
@@ -215,7 +223,8 @@ SNIPE_KEYS = {"discovery.auto_snipe", "discovery.snipe_keywords", "discovery.dev
 def group_of(s: Setting) -> str:
     if s.key in SNIPE_KEYS:
         return "snipe"
-    if s.key == "copytrade.own_exits":
+    if s.key in ("copytrade.own_exits", "copytrade.only_their_sells", "copytrade.copy_rug_exits",
+                 "copytrade.copy_stop_loss_pct"):
         return "copyexits"
     if s.key.startswith("discovery.momentum_"):
         return "momentum"

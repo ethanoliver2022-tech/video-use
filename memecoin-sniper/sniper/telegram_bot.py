@@ -1179,8 +1179,11 @@ class TelegramControl:
                 rows.append([(f"{s.label}: {format_value(s, get_value(self.engine.cfg, s.key))}", f"e:{i}")])
         note = "Tap a setting to change it."
         if group == "copyexits":
-            note = ("These apply to copied positions only. ✅ Using them." if
-                    self.engine.cfg.copytrade.own_exits else
+            ct = self.engine.cfg.copytrade
+            note = ("<b>Copies sell only with them</b> is on: copied positions sell when the "
+                    "wallet sells (plus rug exits / emergency stop if set). The TP/SL "
+                    "settings below are not used." if ct.only_their_sells else
+                    "These apply to copied positions only. ✅ Using them." if ct.own_exits else
                     "Off: copied positions use your main exits. Turn on <b>Own exits for "
                     "copies</b> to use these (they start as a copy of your main exits).")
             rows.append([("👥 Copy & track", "c")])
@@ -1272,8 +1275,14 @@ class TelegramControl:
         rows.append([("➕ Add wallet", "c:add"), (f"Copy: {status}", f"e:{toggle_idx}")])
         rows.append([("🛡 Filters on copies: " + ("✅ on" if checks else "⚠️ OFF"), f"e:{filters_idx}")])
         own = ct.own_exits
-        rows.append([("⚙️ Copy options", "set:copytrade"),
-                     ("🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping", "set:copyexits")])
+        if ct.only_their_sells:
+            lines.append("🚪 Copies sell only when the wallet sells"
+                         + (", or on a rug sign" if ct.copy_rug_exits else "")
+                         + (f", or at -{ct.copy_stop_loss_pct:g}%" if ct.copy_stop_loss_pct else ""))
+            exits_btn = "🎯 Exits: only their sells"
+        else:
+            exits_btn = "🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping"
+        rows.append([("⚙️ Copy options", "set:copytrade"), (exits_btn, "set:copyexits")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 

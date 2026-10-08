@@ -928,6 +928,19 @@ class Engine:
 
     def exit_cfg(self, pos: Position) -> ExitConfig:
         """The exit rules for a position: copied ones can have their own TP / SL / moonbag."""
+        ct = self.cfg.copytrade
+        if (pos.copied_from or pos.source == "copy") and ct.only_their_sells:
+            import dataclasses
+            never = 10.0 ** 12
+            e = self.cfg.exits
+            return dataclasses.replace(
+                e, take_profit=[], stop_loss_pct=ct.copy_stop_loss_pct or 100.0,
+                breakeven_after_first_tp=False, trailing_activate_pct=never,
+                max_hold_seconds=int(never), stale_seconds=int(never), sell_pressure_ratio=2.0,
+                exit_on_dev_sell=ct.copy_rug_exits and e.exit_on_dev_sell,
+                exit_on_whale_sell_pct=e.exit_on_whale_sell_pct if ct.copy_rug_exits else 0.0,
+                sell_on_migration=False, kol_buy_sell_pct=0.0, sell_initials_at_pct=0.0,
+                moonbag_pct=0.0)
         if pos.source == "copy" and self.cfg.copytrade.own_exits:
             import dataclasses
             ce = self.cfg.copyexits

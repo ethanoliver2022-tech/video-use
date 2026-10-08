@@ -216,6 +216,10 @@ class CopyTradeConfig:
     run_safety_checks: bool = True
     max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
+    only_their_sells: bool = True           # copies sell only when the wallet sells (plus the
+    #                                         two below), never on the bot's own exit rules
+    copy_rug_exits: bool = True             # ...except dev sold / big holder dumped (rugs)
+    copy_stop_loss_pct: float = 0.0         # ...and this emergency stop loss; 0 = none
     first_buy_only: bool = True             # copy each coin once (not their add-ons / re-buys)
     max_chase_pct: float = 30.0             # skip if the price is this % above their entry
     pause_after_losses: int = 5             # pause a wallet after this many losing copies
