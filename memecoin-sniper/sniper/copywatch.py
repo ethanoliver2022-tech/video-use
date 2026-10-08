@@ -23,6 +23,8 @@ PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 PUMP_AMM_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 POLL_SECONDS = 2.0
 MAX_AGE_SECONDS = 120   # a buy older than this when first seen is history, not a signal
+MIN_SWAP_SOL = 0.005    # SOL moved besides the network fee: below this it's a token
+#                         transfer, an airdrop or a token-for-token swap, not a SOL trade
 
 
 def _keys(tx: dict) -> list[str]:
@@ -52,6 +54,8 @@ def trades_in(tx: dict, wallet: str, signature: str) -> list[dict]:
         lamports = (meta["postBalances"][i] - meta["preBalances"][i]) / 1e9
     except (KeyError, IndexError, TypeError):
         return []
+    if i == 0:   # the fee payer: the network fee isn't part of the trade
+        lamports += float(meta.get("fee") or 0) / 1e9
 
     def held(balances, mint):
         return sum(float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
@@ -62,9 +66,9 @@ def trades_in(tx: dict, wallet: str, signature: str) -> list[dict]:
     out = []
     for mint in mints - {SOL_MINT, None}:
         delta = held(post, mint) - held(pre, mint)
-        if delta > 0 and sol < 0:
+        if delta > 0 and sol <= -MIN_SWAP_SOL:
             side = "buy"
-        elif delta < 0 and sol > 0:
+        elif delta < 0 and sol >= MIN_SWAP_SOL:
             side = "sell"
         else:
             continue   # a transfer, an airdrop, a token-for-token swap: not a SOL trade

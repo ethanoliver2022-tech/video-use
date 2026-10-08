@@ -37,7 +37,11 @@ def test_buys_and_sells_are_read_from_balance_changes():
     [wbuy] = trades_in(_tx(sol_change=-0.002, wsol=(1.0, 0.5)), W, "S3")
     assert wbuy["txType"] == "buy" and abs(wbuy["solAmount"] - 0.502) < 1e-9
     assert trades_in(_tx(err={"x": 1}), W, "S4") == []          # failed tx
-    assert trades_in(_tx(sol_change=-0.000005), W, "S5")[0]["txType"] == "buy"
+    # tokens arriving while only the network fee (or a tip) leaves: a transfer, not a buy
+    tx = _tx(sol_change=-0.000005)
+    tx["meta"]["fee"] = 5000
+    assert trades_in(tx, W, "S5") == []
+    assert trades_in(_tx(sol_change=-0.001), W, "S5b") == []
     assert trades_in(_tx(sol_change=0.0001), W, "S6") == []     # tokens in, SOL in: airdrop-ish
     assert trades_in(_tx(), "someone else", "S7") == []
 

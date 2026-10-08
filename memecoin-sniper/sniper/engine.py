@@ -711,7 +711,7 @@ class Engine:
         if spent < ct.min_leader_buy_sol:
             return await self._not_copied(
                 name, mint, f"they only bought {spent:.3f} SOL (Min leader buy is "
-                            f"{ct.min_leader_buy_sol:g})")
+                            f"{ct.min_leader_buy_sol:g})", msg.get("via", "pumpportal"))
         pool = msg.get("pool")
         pump = pool in (None, "", "pump", "pump-amm")  # pump.fun curve or PumpSwap
         on_curve = pool == "pump"
@@ -736,9 +736,10 @@ class Engine:
         if result and not result.startswith("🟢"):
             await self._not_copied(name, mint, html.unescape(result))
 
-    async def _not_copied(self, name: str, mint: str, why: str) -> None:
+    async def _not_copied(self, name: str, mint: str, why: str, via: str = "") -> None:
         """Say why a copy didn't happen: in Telegram too, or copying looks broken."""
-        text = f"👥 {esc(name)} bought <code>{mint}</code>, not copied: {esc(why)}"
+        src = {"rpc": " (seen on chain)", "pumpportal": " (seen via PumpPortal)"}.get(via, "")
+        text = f"👥 {esc(name)} bought <code>{mint}</code>{src}, not copied: {esc(why)}"
         await self.notifier.send(text, telegram=self._alert_allowed(self._copy_misses, 30),
                                  buttons=[[("🔍 Card", f"tc:{mint}")]])
 
