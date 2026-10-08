@@ -780,6 +780,7 @@ class Engine:
                       leader=leader.address if sells != "off" else None,
                       leader_mode="mirror" if sells == "mirror" else "all",
                       copied_from=leader.address, slippage_pct=ct.slippage_pct or None,
+                      leader_price=spent / got if spent > 0 and got else None,
                       buy_sol=size, force=not filters,
                       v_sol=v_sol if on_curve else None, v_tokens=v_tok if on_curve else None,
                       trigger=f"copy:{name}",
@@ -877,8 +878,11 @@ class Engine:
             streak += 1
         midnight = time.time() - (time.time() % 86400)
         today = sum(float(e.get("pnl_sol", 0)) for e in closes if e["ts"] >= midnight)
+        gaps = [float(e["gap_pct"]) for e in self.store.events("buy")
+                if e.get("copied_from") == address and isinstance(e.get("gap_pct"), (int, float))]
         return {"n": len(pnls), "wins": sum(1 for p in pnls if p > 0), "pnl": sum(pnls),
-                "today": today, "loss_streak": streak}
+                "today": today, "loss_streak": streak,
+                "gap": sum(gaps) / len(gaps) if gaps else None, "gap_n": len(gaps)}
 
     async def _check_wallet_pause(self, address: str) -> None:
         """After a copy closes: pause a wallet that keeps losing (if set)."""
@@ -1119,9 +1123,12 @@ class Engine:
                            dev_tokens=c.creator_initial_buy_tokens or None)
             self.positions[c.mint] = pos
             self.store.save_position(pos)
+            gap = ((pos.entry_price / c.leader_price - 1) * 100
+                   if c.leader_price and pos.entry_price > 0 else None)
             self.store.event("buy", c.mint, pos.symbol, source=c.source, sol=fill.sol,
                              tokens=fill.tokens, sig=fill.signature,
-                             timing=self._timing(fill, t_exec, c.queued_at, c.window_s))
+                             timing=self._timing(fill, t_exec, c.queued_at, c.window_s),
+                             copied_from=c.copied_from, gap_pct=gap)
             self._drop_pending(c.mint)  # only after the position is safely on disk
         finally:
             self._buying.pop(c.mint, None)
@@ -1133,6 +1140,8 @@ class Engine:
             else f"📣 called in {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("call:")
             else f"👥 copied {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("copy:")
             else "")
+        if c.leader_price and pos.entry_price > 0:
+            why += f" · entry {(pos.entry_price / c.leader_price - 1) * 100:+.0f}% vs theirs"
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
                 f"({self.mode}, {c.source}) {esc(why)} {esc(notes)}\n<code>{c.mint}</code> "
                 f"{esc(c.url or '')}")
@@ -1748,6 +1757,28 @@ class Engine:
         matches = [p for p in self.positions.values()
                    if not p.closed and p.symbol.lower() == key.lower()]
         return matches[0] if len(matches) == 1 else None
+
+    async def panic_sell_all(self) -> str:
+        """Pause everything and sell every open position at once."""
+        self.set_paused(True)
+        open_pos = [p for p in self.positions.values() if not p.closed]
+        if not open_pos:
+            return "⏸ Paused. No open positions to sell."
+        for p in open_pos:   # the exit loop keeps retrying any that don't sell now
+            p.force_sell = "panic sell"
+            self.store.save_position(p)
+        results = await asyncio.gather(
+            *(self.execute_sell(p, exits.ExitDecision(p.tokens_remaining, True, "panic sell"))
+              for p in open_pos), return_exceptions=True)
+        lines = []
+        for p, r in zip(open_pos, results):
+            ok = p.closed
+            why = "" if ok else f": {esc(str(r))[:120]}"
+            lines.append(f"{'✅' if ok else '⚠️'} {esc(p.symbol)}{why}")
+        left = sum(1 for p in open_pos if not p.closed)
+        return ("🚨 <b>Panic sell</b>: sniping and copying paused.\n" + "\n".join(lines)
+                + (f"\n{left} not sold yet: the bot keeps retrying those sells; check 📊 "
+                   "Positions." if left else "\nEverything sold."))
 
     async def manual_sell(self, key: str, pct: float = 100.0) -> str:
         pos = self.find_position(key)

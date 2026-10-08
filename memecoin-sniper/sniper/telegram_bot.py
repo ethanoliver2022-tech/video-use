@@ -520,6 +520,21 @@ class TelegramControl:
             await self.wallet_wizard(rest)
         elif head == "wp":
             await self.wallet_page(rest, msg_id)
+        elif data == "wf":
+            self._ask("find_wallets")
+            await self.send("🔎 <b>Find wallets from a coin</b>\nSend the address (or pump.fun "
+                            "link) of a coin that ran. I'll find who bought it early and sold "
+                            "well. Takes 1-2 minutes.", [[("✖️ Cancel", "x")]])
+        elif head == "wfa":
+            await self.offer_wallet([rest])
+        elif data == "panic":
+            n = sum(1 for p in e.positions.values() if not p.closed)
+            await self.show(f"🚨 <b>Sell everything?</b>\nThis pauses sniping and copying, and "
+                            f"sells all {n} open position(s) right now.",
+                            [[("🚨 Yes, sell all", "panic!")], [("✖️ Cancel", "m")]], msg_id)
+        elif data == "panic!":
+            await self.send("🚨 Selling everything…")
+            self._bg_reply(e.panic_sell_all())
         elif head in ("wpp", "wpx", "wpf", "wpk", "wpz", "wpl", "wpc"):
             await self.copy_wallet_action(head, rest, msg_id)
         elif data.startswith("c:rm:"):
@@ -586,6 +601,8 @@ class TelegramControl:
                 await self.copy_add_text(text)
             elif kind == "copy_name":
                 await self.wallet_wizard("n", text)
+            elif kind == "find_wallets":
+                await self.find_wallets(text)
             elif kind in ("wallet_size", "wallet_min", "wallet_mcap"):
                 await self.wallet_text(kind, text, p["data"])
             elif kind == "copy_size":
@@ -656,7 +673,7 @@ class TelegramControl:
             [("🎯 Snipers", "sn"), ("📋 Orders", "o")],
             [("👥 Copy & track", "c"), ("⚙️ Settings", "set")],
             [("📈 Stats", "st"), switch],
-            [("📣 Call sniper", "cl")],
+            [("📣 Call sniper", "cl"), ("🚨 Sell all", "panic")],
             [("🚀 Momentum: " + ("✅ on" if d.momentum_enabled else "off"), "mo"),
              ("🩺 Health", "hl"), ("🔄 Refresh", "m")],
         ], msg_id)
@@ -1261,6 +1278,8 @@ class TelegramControl:
             r = e.wallet_results(w.address)
             res = (f" · {r['n']} copies, {r['wins'] / r['n'] * 100:.0f}% won, {r['pnl']:+.3f} SOL"
                    if r["n"] else "")
+            if r.get("gap") is not None:
+                res += f" · entry {r['gap']:+.0f}% vs theirs"
             lines.append(f"{icon} <b>{html.escape(w.label or w.address[:8])}</b>{size}{res}"
                          f"\n    {self._seen_text(w.address)}")
             rows.append([(f"⚙️ {w.label or w.address[:8]}", f"wp:{w.address}")])
@@ -1273,6 +1292,7 @@ class TelegramControl:
         if not checks:
             lines.append("⚠️ Filters are OFF for copies: anything they buy is copied.")
         rows.append([("➕ Add wallet", "c:add"), (f"Copy: {status}", f"e:{toggle_idx}")])
+        rows.append([("🔎 Find wallets from a coin", "wf")])
         rows.append([("🛡 Filters on copies: " + ("✅ on" if checks else "⚠️ OFF"), f"e:{filters_idx}")])
         own = ct.own_exits
         if ct.only_their_sells:
@@ -1331,6 +1351,12 @@ class TelegramControl:
                      f"{r['n']} closed, {r['wins']} won, {r['pnl']:+.4f} SOL"
                      + (f", {r['loss_streak']} losses in a row" if r["loss_streak"] else "")
                      if r["n"] else "none closed yet")]
+        if r.get("gap") is not None:
+            g = r["gap"]
+            verdict = ("✅ close to them" if g <= 10 else "🟡 some chasing" if g <= 25
+                       else "🔴 you're paying a lot more: crowded wallet")
+            lines.append(f"<b>Entry vs theirs</b>: {g:+.1f}% on average over {r['gap_n']} "
+                         f"copies ({verdict})")
         rep = e.wallet_checker.reports.get(address)
         lines.append("")
         if rep:
@@ -1410,6 +1436,30 @@ class TelegramControl:
             val = None if t == "default" else parse_value(BY_KEY["copytrade.max_market_cap_usd"], t)
             await e.update_wallet(address, max_mcap_usd=val)
         await self.wallet_page(address)
+
+    async def find_wallets(self, text: str) -> None:
+        from .walletfind import find_wallets
+        found = wallet_addresses(text)
+        if not found:
+            raise ValueError("send a coin address or a pump.fun link")
+        mint = found[0]
+        e = self.engine
+        await self.send(f"🔎 Reading the first trades of <code>{mint}</code>… (1-2 minutes)")
+
+        async def run():
+            try:
+                res = await find_wallets(e.reads, mint,
+                                         exclude={e.own_wallet} if e.own_wallet else set())
+            except Exception as ex:
+                log.exception("wallet finder failed")
+                await self.send(f"⚠️ Couldn't read that coin: {html.escape(str(ex)[:150])}")
+                return
+            rows = [[(f"➕ {i}. {b.wallet[:4]}…{b.wallet[-4:]} ({b.pnl:+.2f} SOL)",
+                      f"wfa:{b.wallet}")] for i, b in enumerate(res.buyers, 1)]
+            await self.send(f"🔎 <b>Early buyers of</b> <code>{mint}</code>\n"
+                            f"<pre>{html.escape(res.text())}</pre>",
+                            rows + [[("👥 Copy & track", "c")]])
+        e._spawn(run())
 
     def _check_wallet(self, address: str) -> None:
         e = self.engine

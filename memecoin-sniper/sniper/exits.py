@@ -99,6 +99,8 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
     now = now or time.time()
     everything = lambda reason: ExitDecision(pos.tokens_remaining, True, reason)  # noqa: E731
 
+    if pos.force_sell:
+        return everything(pos.force_sell)
     if cfg.exit_on_dev_sell and pos.dev_sold:
         return everything("dev sold")
     if cfg.exit_on_whale_sell_pct and pos.whale_dump_pct >= cfg.exit_on_whale_sell_pct:
