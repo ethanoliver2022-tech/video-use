@@ -155,6 +155,9 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.max_market_cap_usd", "Max copy market cap", "float", 0, 1e12, "$",
             help="don't copy into coins already worth more than this, e.g. 20k or 1.5m; "
                  "0 = no limit. A fresh pump.fun coin starts near $4-5k"),
+    Setting("copytrade.rpc_watch", "Backup wallet watcher", "bool",
+            help="also watch copied wallets straight from the chain (your RPC), so copies "
+                 "happen even when PumpPortal's feed misses a trade (~2-4s slower)"),
     Setting("copytrade.own_exits", "Own exits for copies", "bool",
             help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
                  "instead of your main exits"),

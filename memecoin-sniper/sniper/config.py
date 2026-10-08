@@ -207,6 +207,7 @@ class CopyTradeConfig:
     run_safety_checks: bool = True
     max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
+    rpc_watch: bool = True                  # also watch copied wallets on-chain (backup feed)
 
 
 @dataclass

@@ -1220,14 +1220,18 @@ class TelegramControl:
         lines = [f"👥 <b>Copy trading & wallet tracker</b> (copying {status})",
                  "👥 copy = mirror their buys · 🔔 track = just alert me"]
         if not e.has_pumpportal_key:
-            lines.append("Needs a PumpPortal API key: add PUMPPORTAL_API_KEY to .env on the "
-                         "server and restart.")
+            lines.append("No PumpPortal key: copies come from the chain backup watcher only "
+                         "(a few seconds slower).")
         elif not e.has_trade_stream:
             lines.append("⚠️ PumpPortal is refusing the trade feed, so the bot can't see their "
                          "buys. Top up the wallet linked to your PumpPortal key (min 0.02 SOL).")
         if e.paused:
             lines.append("⏸ Sniping is paused: nothing is copied until you tap ▶️ Start.")
         ct = e.cfg.copytrade
+        feeds = ["PumpPortal " + ("✅" if e.has_trade_stream else "⚠️")]
+        if ct.rpc_watch:
+            feeds.append("chain backup ✅")
+        lines.append("Watching their trades via: " + " + ".join(feeds))
         lines.append(f"Copies buys of {ct.min_leader_buy_sol:g}+ SOL"
                      + (f" in coins under ${ct.max_market_cap_usd:,.0f} market cap"
                         if ct.max_market_cap_usd else ""))
@@ -1241,7 +1245,8 @@ class TelegramControl:
         for w in shown.values():
             icon = "🔔" if w.mode == "alert" else "👥"
             size = "" if w.mode == "alert" else f" · {w.buy_sol or e.cfg.trading.buy_amount_sol:g} SOL"
-            lines.append(f"{icon} {html.escape(w.label or '-')} <code>{w.address}</code>{size}")
+            lines.append(f"{icon} {html.escape(w.label or '-')} <code>{w.address}</code>{size}"
+                         f"\n    {self._seen_text(w.address)}")
             rows.append([(f"{'👥 Copy' if w.mode == 'alert' else '🔔 Track only'}", f"cm:{w.address}"),
                          (f"🗑 {w.label or w.address[:8]}", f"c:rm:{w.address}")])
         wallets = list(shown.values())
@@ -1259,6 +1264,16 @@ class TelegramControl:
                      ("🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping", "set:copyexits")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
+
+    def _seen_text(self, address: str) -> str:
+        seen = self.engine.copy_seen.get(address)
+        if not seen:
+            return "no trades seen since the bot started"
+        ts, via, side, mint = seen
+        ago = max(0, time.time() - ts)
+        when = f"{ago:.0f}s" if ago < 120 else f"{ago / 60:.0f}m" if ago < 7200 else f"{ago / 3600:.0f}h"
+        src = "PumpPortal" if via == "pumpportal" else "chain"
+        return f"last trade seen {when} ago ({side} {mint[:6]}…, via {src})"
 
     async def copy_command(self, args: list[str]) -> None:
         e = self.engine
@@ -1312,9 +1327,10 @@ class TelegramControl:
         await self.offer_wallet(addrs)
 
     async def offer_wallet(self, addrs: list[str]) -> None:
-        if not self.engine.has_pumpportal_key:
-            await self.send("Copying and tracking wallets needs a PumpPortal API key: add "
-                            "PUMPPORTAL_API_KEY to .env on the server, then restart.")
+        if not self.engine.has_pumpportal_key and not self.engine.cfg.copytrade.rpc_watch:
+            await self.send("Copying and tracking wallets needs a PumpPortal API key (add "
+                            "PUMPPORTAL_API_KEY to .env on the server) or ⚙️ Copy options → "
+                            "Backup wallet watcher on.")
             return
         known = {x["address"] for x in self.engine.store.copy_wallets()}
         self.wallet_wiz = {"addrs": addrs, "expires": time.monotonic() + PENDING_TTL}

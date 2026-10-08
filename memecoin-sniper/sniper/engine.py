@@ -21,6 +21,7 @@ from .execution.sender import TxSender
 from .execution.wallet import WalletManager, transfer_tx
 from .health import HealthWatch
 from .calls import CallGroup, CallWatcher
+from .copywatch import CopyPoller
 from .devcheck import DevChecker
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
@@ -205,6 +206,12 @@ class Engine:
         self._alerts: deque[float] = deque()
         self._tracker_alerts: deque[float] = deque()
         self._copy_misses: deque[float] = deque()
+        # copied / tracked wallet -> (time, "pumpportal" | "rpc", buy/sell, mint) of the last
+        # trade seen from it: shows in the copy menu whether their trades reach the bot
+        self.copy_seen: dict[str, tuple[float, str, str, str]] = {}
+        self.copy_poller = CopyPoller(self.rpc, lambda: list(self._copy), self.on_trade,
+                                      enabled=lambda: self.cfg.copytrade.rpc_watch,
+                                      curve=lambda m: fetch_curve(self.rpc, m))
         self._sol_usd: tuple[float, float] = (0.0, 0.0)   # (price, when) for $ market caps
         self._scan_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
@@ -643,9 +650,9 @@ class Engine:
             raise ValueError("mode must be copy or alert")
         if not 0 <= buy_sol <= 100:
             raise ValueError("size per trade must be between 0 and 100 SOL (0 = your buy size)")
-        if not self.has_pumpportal_key:
+        if not self.has_pumpportal_key and not self.cfg.copytrade.rpc_watch:
             raise ValueError("Copy trading and wallet tracking need a PumpPortal API key "
-                             "(PUMPPORTAL_API_KEY in .env).")
+                             "(PUMPPORTAL_API_KEY in .env) or the Backup wallet watcher on.")
         if copy_sells is None:  # keep what the wallet already had (default: follow their sells)
             old = next((x for x in self.store.copy_wallets() if x["address"] == address), None)
             cw = next((x for x in self.cfg.copytrade.wallets if x.address == address), None)
@@ -1165,14 +1172,14 @@ class Engine:
         if self._dup(msg):  # token + account subscriptions can both deliver the same trade
             return
         mint = msg["mint"]
+        if msg.get("via") == "rpc":   # from the backup wallet watcher: copy signals only
+            return self._on_wallet_trade(msg)
         v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
         if v_sol and v_tok:
             self._set_curve(mint, CurveState(v_sol, v_tok))
         if mint in self.flows:
             self.flows[mint].add(msg)
-        leader = self._copy.get(msg.get("traderPublicKey", ""))
-        if leader:
-            self._spawn(self.handle_copy(msg, leader))
+        self._on_wallet_trade(msg)
         pos = self.positions.get(mint)
         if not pos or pos.closed:
             return
@@ -1187,6 +1194,21 @@ class Engine:
             pos.update_price(price)
         exits.record_trade(pos, msg, self.kol_wallets, self.own_wallet)
         self._spawn(self.check_exit(pos))
+
+    def _on_wallet_trade(self, msg: dict) -> None:
+        """A trade by a copied / tracked wallet (from PumpPortal or the RPC watcher)."""
+        trader = msg.get("traderPublicKey", "")
+        leader = self._copy.get(trader)
+        if not leader:
+            return
+        self.copy_seen[trader] = (time.time(), msg.get("via", "pumpportal"),
+                                  msg.get("txType", ""), msg["mint"])
+        self._spawn(self.handle_copy(msg, leader))
+        pos = self.positions.get(msg["mint"])
+        if (msg.get("via") == "rpc" and pos and not pos.closed and msg.get("txType") == "sell"
+                and pos.leader == trader):
+            pos.leader_sold = True        # follow their sell out, even without PumpPortal
+            self._spawn(self.check_exit(pos))
 
     async def on_migration(self, mint: str) -> None:
         self.curves.pop(mint, None)  # graduated: that curve no longer prices anything
@@ -1849,8 +1871,10 @@ class Engine:
             raise ValueError(f"unknown setting {key}")
         s = BY_KEY[key]
         value = parse_value(s, raw)
-        if key == "copytrade.enabled" and value and not self.has_pumpportal_key:
-            raise ValueError("Copy trading needs a PumpPortal API key (PUMPPORTAL_API_KEY in .env).")
+        if (key == "copytrade.enabled" and value and not self.has_pumpportal_key
+                and not self.cfg.copytrade.rpc_watch):
+            raise ValueError("Copy trading needs a PumpPortal API key (PUMPPORTAL_API_KEY in "
+                             ".env) or the Backup wallet watcher on.")
         apply_setting(self.cfg, key, value)
         self.store.set_override(key, to_storable(s, value))
         await self._setting_changed(key)
@@ -2168,7 +2192,7 @@ class Engine:
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
                  ("feed-watch", self.feed_watch), ("health", self._health_watch),
-                 ("sol-price", self._sol_price_loop)]
+                 ("sol-price", self._sol_price_loop), ("copy-watch", self.copy_poller.run)]
         # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,

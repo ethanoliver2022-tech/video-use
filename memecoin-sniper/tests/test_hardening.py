@@ -85,6 +85,12 @@ async def test_without_key_no_paid_subscriptions_and_polling_prices(tmp_path):
     await eng.stream.watch_token("X")
     await eng.stream.watch_accounts([wallet()])
     assert eng.sent_ws == []  # never sends billable subscriptions without a key
+    # copying still works without a key, through the on-chain wallet watcher...
+    await eng.add_copy_wallet(wallet())
+    assert eng.sent_ws == []
+    # ...and needs the key once that watcher is switched off
+    await eng.set_setting("copytrade.enabled", "off")
+    eng.cfg.copytrade.rpc_watch = False
     with pytest.raises(ValueError, match="PumpPortal API key"):
         await eng.add_copy_wallet(wallet())
     with pytest.raises(ValueError, match="PumpPortal API key"):
