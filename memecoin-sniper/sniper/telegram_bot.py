@@ -1215,6 +1215,15 @@ class TelegramControl:
         if not e.has_pumpportal_key:
             lines.append("Needs a PumpPortal API key: add PUMPPORTAL_API_KEY to .env on the "
                          "server and restart.")
+        elif not e.has_trade_stream:
+            lines.append("⚠️ PumpPortal is refusing the trade feed, so the bot can't see their "
+                         "buys. Top up the wallet linked to your PumpPortal key (min 0.02 SOL).")
+        if e.paused:
+            lines.append("⏸ Sniping is paused: nothing is copied until you tap ▶️ Start.")
+        ct = e.cfg.copytrade
+        lines.append(f"Copies buys of {ct.min_leader_buy_sol:g}+ SOL"
+                     + (f" in coins under {ct.max_market_cap_sol:g} SOL market cap"
+                        if ct.max_market_cap_sol else ""))
         rows = []
         stored = {x["address"]: x for x in e.store.copy_wallets()}
         shown = {w.address: w for w in wallets}
@@ -1238,6 +1247,7 @@ class TelegramControl:
             lines.append("⚠️ Filters are OFF for copies: anything they buy is copied.")
         rows.append([("➕ Add wallet", "c:add"), (f"Copy: {status}", f"e:{toggle_idx}")])
         rows.append([("🛡 Filters on copies: " + ("✅ on" if checks else "⚠️ OFF"), f"e:{filters_idx}")])
+        rows.append([("⚙️ Copy options", "set:copytrade")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 

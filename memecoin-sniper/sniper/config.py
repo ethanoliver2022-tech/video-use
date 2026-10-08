@@ -181,8 +181,9 @@ class CallsConfig:
 class CopyTradeConfig:
     enabled: bool = False
     wallets: list[CopyWallet] = field(default_factory=list)
-    min_leader_buy_sol: float = 0.2         # ignore dust buys / tests
+    min_leader_buy_sol: float = 0.05        # ignore dust buys / tests
     run_safety_checks: bool = True
+    max_market_cap_sol: float = 0.0         # don't copy into coins bigger than this; 0 = no cap
 
 
 @dataclass

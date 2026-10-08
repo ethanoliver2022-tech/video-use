@@ -144,7 +144,10 @@ class SafetyChecker:
 
         # Brand-new pump.fun coins: the program itself revokes mint/freeze and the
         # curve holds ~all supply, so on-chain + rugcheck lookups only add latency.
-        if c.source == "pumpfun":
+        # The same goes for a copied or called coin still on its curve: seconds or minutes
+        # old, its few holders always look "concentrated" and rugcheck hasn't indexed it.
+        if c.source == "pumpfun" or (c.source in ("copy", "call") and c.route == "pump"
+                                     and c.v_sol and c.v_tokens):
             r.notes.append("pump.fun program guarantees mint/freeze revoked")
             return r
 

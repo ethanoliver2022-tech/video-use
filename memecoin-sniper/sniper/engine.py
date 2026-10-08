@@ -199,6 +199,7 @@ class Engine:
         self._recent_sig_set: set[str] = set()
         self._alerts: deque[float] = deque()
         self._tracker_alerts: deque[float] = deque()
+        self._copy_misses: deque[float] = deque()
         self._scan_alerts: deque[float] = deque()
         self._bg: set[asyncio.Task] = set()
         self._orders_running: set[int] = set()
@@ -687,25 +688,47 @@ class Engine:
         if (msg.get("txType") != "buy" or (held and not held.closed)  # a closed one may re-enter
                 or mint in self._buying):
             return
-        if self.paused or self.scan_only:
+        ct = self.cfg.copytrade
+        name = leader.label or leader.address[:6]
+        spent = num(msg.get("solAmount"), allow_zero=True) or 0.0
+        if self.scan_only:
             return
-        if (num(msg.get("solAmount"), allow_zero=True) or 0.0) < self.cfg.copytrade.min_leader_buy_sol:
-            return
+        if self.paused:
+            return await self._not_copied(name, mint, "⏸ sniping is paused (tap ▶️ Start)")
+        if spent < ct.min_leader_buy_sol:
+            return await self._not_copied(
+                name, mint, f"they only bought {spent:.3f} SOL (Min leader buy is "
+                            f"{ct.min_leader_buy_sol:g})")
         pool = msg.get("pool")
         pump = pool in (None, "", "pump", "pump-amm")  # pump.fun curve or PumpSwap
+        on_curve = pool == "pump"
+        v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
+        if ct.max_market_cap_sol:
+            mcap = num(msg.get("marketCapSol"))
+            if mcap is None:
+                mcap = await self._market_cap_sol(mint, None)
+            if mcap is not None and mcap > ct.max_market_cap_sol:
+                return await self._not_copied(
+                    name, mint, f"market cap {mcap:,.0f} SOL is over your copy limit "
+                                f"({ct.max_market_cap_sol:g} SOL)")
         c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6],
                       route="pump" if pump else "jupiter",  # other venues (LetsBonk...): Jupiter
                       leader=leader.address if leader.copy_sells else None,
-                      buy_sol=leader.buy_sol or None, force=not self.cfg.copytrade.run_safety_checks,
+                      buy_sol=leader.buy_sol or None, force=not ct.run_safety_checks,
+                      v_sol=v_sol if on_curve else None, v_tokens=v_tok if on_curve else None,
+                      trigger=f"copy:{name}",
                       url=f"https://pump.fun/coin/{mint}" if pump
                       else f"https://dexscreener.com/solana/{mint}")
-        name = leader.label or leader.address[:6]
-        log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint,
-                 num(msg.get("solAmount"), allow_zero=True) or 0.0)
+        log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint, spent)
         result = await self.handle_candidate(c)
         if result and not result.startswith("🟢"):
-            await self.notifier.send(f"👥 {esc(name)} bought {mint[:8]}… — not copied: {esc(result)}",
-                                     telegram=False)
+            await self._not_copied(name, mint, html.unescape(result))
+
+    async def _not_copied(self, name: str, mint: str, why: str) -> None:
+        """Say why a copy didn't happen: in Telegram too, or copying looks broken."""
+        text = f"👥 {esc(name)} bought <code>{mint}</code>, not copied: {esc(why)}"
+        await self.notifier.send(text, telegram=self._alert_allowed(self._copy_misses, 30),
+                                 buttons=[[("🔍 Card", f"tc:{mint}")]])
 
     async def _wallet_alert(self, msg: dict, w: CopyWallet) -> None:
         side, mint = msg.get("txType"), msg["mint"]
@@ -893,6 +916,7 @@ class Engine:
         why = {"dev": "👀 watched dev launched", "limit": "📋 limit order"}.get(
             c.trigger, f"🔑 {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("keyword")
             else f"📣 called in {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("call:")
+            else f"👥 copied {c.trigger.split(':', 1)[-1]}" if c.trigger.startswith("copy:")
             else "")
         text = (f"🟢 BUY <b>{esc(pos.symbol)}</b> {fill.sol:.4f} SOL → {fill.tokens:,.0f} tokens "
                 f"({self.mode}, {c.source}) {esc(why)} {esc(notes)}\n<code>{c.mint}</code> "

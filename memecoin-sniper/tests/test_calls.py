@@ -236,3 +236,45 @@ async def test_copy_trades_can_skip_the_filters(h):
                            "traderPublicKey": leader.address}, leader)
     assert CA2 not in eng.positions
     await h.close()
+
+
+def _buy_msg(leader, mint, sol=0.5, mcap=40.0, pool="pump"):
+    return {"mint": mint, "txType": "buy", "solAmount": sol, "pool": pool,
+            "traderPublicKey": leader, "marketCapSol": mcap,
+            "vSolInBondingCurve": 32.0, "vTokensInBondingCurve": 1_073_000_000 * 30 / 32}
+
+
+async def test_copies_of_curve_coins_skip_holder_and_rugcheck_lookups(h):
+    """A copied coin still on its curve: mint/freeze are guaranteed, and holder/rugcheck
+    lookups reject almost every young coin. They were silently blocking copies."""
+    from sniper.config import CopyWallet
+    eng = h.eng
+    lookups = []
+
+    async def mint_info(mint):
+        lookups.append(mint)
+        return None                                  # would fail "mint account not found"
+    eng.rpc.get_mint_info = mint_info
+    leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
+    await eng.handle_copy(_buy_msg(leader.address, CA), leader)
+    assert CA in eng.positions and lookups == []
+    assert any("copied whale" in t for t, *_ in h.sent)
+    await h.close()
+
+
+async def test_every_skipped_copy_says_why_in_telegram(h):
+    from sniper.config import CopyWallet
+    eng = h.eng
+    leader = CopyWallet(address=str(Keypair().pubkey()), label="whale")
+    await eng.handle_copy(_buy_msg(leader.address, CA, sol=0.01), leader)
+    assert "not copied" in h.last and "only bought 0.010 SOL" in h.last
+    eng.cfg.copytrade.max_market_cap_sol = 100
+    await eng.handle_copy(_buy_msg(leader.address, CA, mcap=250.0), leader)
+    assert "market cap 250 SOL is over your copy limit (100 SOL)" in h.last
+    assert CA not in eng.positions
+    await eng.handle_copy(_buy_msg(leader.address, CA2, mcap=60.0), leader)
+    assert CA2 in eng.positions                       # under the cap: copied
+    eng.paused = True
+    await eng.handle_copy(_buy_msg(leader.address, str(Keypair().pubkey())), leader)
+    assert "paused" in h.last
+    await h.close()

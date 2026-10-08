@@ -149,7 +149,11 @@ SETTINGS: list[Setting] = [
             help="skip called coins already worth more than this; 0 = no limit"),
     # copy trade
     Setting("copytrade.enabled", "Copy trading", "bool"),
-    Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL"),
+    Setting("copytrade.min_leader_buy_sol", "Min leader buy", "float", 0, 1000, "SOL",
+            help="only copy buys of at least this much SOL (skips their dust/test buys)"),
+    Setting("copytrade.max_market_cap_sol", "Max copy market cap", "float", 0, 1e9, "SOL",
+            help="don't copy into coins already worth more than this; 0 = no limit. "
+                 "A fresh pump.fun coin starts near 28 SOL and graduates around 400"),
     Setting("copytrade.run_safety_checks", "Filters on copies", "bool",
             help="off = copy every buy straight away, skipping your filters (rug checks, "
                  "dev wallet, holders). Your max positions and daily loss limit still apply"),
