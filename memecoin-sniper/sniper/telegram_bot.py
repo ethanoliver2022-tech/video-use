@@ -89,6 +89,8 @@ COPY_PROFIT_PRESETS = {
         "moonbag_pct": 0}),
 }
 
+COPY_SL_LEVELS = (0, 25, 40, 60)   # one-tap stop loss for copies (% down from entry)
+
 WHY_BUTTONS = [[("🔄 Again", "why"), ("🔁 Reset counts", "whyz")], [("🏠 Menu", "m")]]
 
 
@@ -540,6 +542,9 @@ class TelegramControl:
             await self.wallet_wizard(rest)
         elif head == "wp":
             await self.wallet_page(rest, msg_id)
+        elif head == "cps" and rest.isdigit() and int(rest) in COPY_SL_LEVELS:
+            await e.set_setting("copytrade.copy_stop_loss_pct", int(rest))
+            await self.settings_group("copyprofit", msg_id)
         elif head == "cpp" and rest in COPY_PROFIT_PRESETS:
             for key, value in COPY_PROFIT_PRESETS[rest][1].items():
                 await e.set_setting(f"copyprofit.{key}", value)
@@ -1221,21 +1226,27 @@ class TelegramControl:
         note = "Tap a setting to change it."
         if group == "copyprofit":
             ct = self.engine.cfg.copytrade
-            note = ("Profit taking for copies, on top of selling when the wallet sells. "
-                    "Pick a preset or set each one:" if ct.only_their_sells else
+            sl = ct.copy_stop_loss_pct
+            note = ("Profit taking and a stop loss for copies, on top of selling when the "
+                    "wallet sells. Pick a preset or set each one.\n"
+                    + (f"🛑 Stop loss: sells a copy at -{sl:g}%." if sl else
+                       "🛑 Stop loss: off (a losing copy waits for the wallet).")
+                    if ct.only_their_sells else
                     "⚠️ <b>Copies sell only with them</b> is off, so copies use the full exit "
                     "rules under 👥 Copy exits; these apply only when it's on.")
+            sl_row = [(("✅ " if (ct.copy_stop_loss_pct or 0) == v else "")
+                       + (f"SL -{v}%" if v else "SL off"), f"cps:{v}") for v in COPY_SL_LEVELS]
             rows = [[(label, f"cpp:{key}")] for key, (label, _) in COPY_PROFIT_PRESETS.items()] \
-                + rows + [[("👥 Copy & track", "c")]]
+                + [sl_row] + rows + [[("👥 Copy & track", "c")]]
         if group == "copyexits":
             ct = self.engine.cfg.copytrade
             note = ("<b>Copies sell only with them</b> is on: copied positions sell when the "
-                    "wallet sells (plus rug exits / emergency stop if set, and your 💰 Copy "
-                    "profit taking). The TP/SL settings below are not used." if ct.only_their_sells else
+                    "wallet sells (plus rug exits, your stop loss and profit taking: 💰 Copy "
+                    "profit & stop loss). The TP/SL settings below are not used." if ct.only_their_sells else
                     "These apply to copied positions only. ✅ Using them." if ct.own_exits else
                     "Off: copied positions use your main exits. Turn on <b>Own exits for "
                     "copies</b> to use these (they start as a copy of your main exits).")
-            rows.append([("💰 Copy profit taking", "set:copyprofit"), ("👥 Copy & track", "c")])
+            rows.append([("💰 Copy profit & stop loss", "set:copyprofit"), ("👥 Copy & track", "c")])
         rows.append([("⬅️ Settings", "set"), ("🏠 Menu", "m")])
         await self.show(f"{GROUPS.get(group, group)}\n{note}", rows, msg_id)
 
@@ -1338,7 +1349,9 @@ class TelegramControl:
         if ct.only_their_sells:
             cp = e.cfg.copyprofit
             on = bool(cp.take_profit or cp.sell_initials_at_pct or cp.trailing_activate_pct)
-            rows.append([("💰 Profit taking: " + ("✅ on" if on else "off"), "set:copyprofit")])
+            sl = ct.copy_stop_loss_pct
+            rows.append([("💰 Profit taking: " + ("✅ on" if on else "off")
+                          + (f" · SL -{sl:g}%" if sl else " · no SL"), "set:copyprofit")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
 

@@ -185,6 +185,7 @@ class CopyProfitConfig:
     sell_initials_at_pct: float = 0.0       # take your SOL back at this gain; 0 = off
     trailing_activate_pct: float = 0.0      # trailing stop arms once up this much; 0 = off
     trailing_stop_pct: float = 30.0         # ...then sells on this drop from the peak
+    breakeven_after_tp: bool = False        # after the first profit taken, sell if back to entry
     moonbag_pct: float = 0.0                # keep this % of the bag through the above
     moonbag_trailing_pct: float = 50.0
     moonbag_max_hold_hours: float = 24.0

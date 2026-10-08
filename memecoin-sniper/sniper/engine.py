@@ -980,7 +980,7 @@ class Engine:
             # taking for copies (Copy profit taking), which is all off unless you set it
             return dataclasses.replace(
                 e, take_profit=list(cp.take_profit), stop_loss_pct=ct.copy_stop_loss_pct or 100.0,
-                breakeven_after_first_tp=False,
+                breakeven_after_first_tp=cp.breakeven_after_tp,
                 trailing_activate_pct=cp.trailing_activate_pct or never,
                 trailing_stop_pct=cp.trailing_stop_pct,
                 max_hold_seconds=int(never), stale_seconds=int(never), sell_pressure_ratio=2.0,

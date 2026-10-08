@@ -423,3 +423,31 @@ async def test_copy_profit_taking_on_top_of_following_their_sells(h):
     await h.tap("cpp:off")
     assert eng.cfg.copyprofit.take_profit == [] and eng.cfg.copyprofit.sell_initials_at_pct == 0
     await h.close()
+
+
+async def test_copy_stop_loss_and_breakeven(h):
+    eng = h.eng
+    await h.tap("set:copyprofit")
+    assert "cps:40" in h.buttons() and "Stop loss: off" in h.last
+    await h.tap("cps:40")
+    assert eng.cfg.copytrade.copy_stop_loss_pct == 40 and "sells a copy at -40%" in h.last
+    p = Position(mint="P", symbol="P", source="copy", creator=None, entry_price=1.0,
+                 tokens_initial=100, tokens_remaining=100, sol_in=0.1, copied_from="W")
+    now = time.time()
+    p.update_price(0.7)                                          # -30%: holds
+    assert exits.evaluate(p, eng.exit_cfg(p), now) is None
+    p.update_price(0.55)                                         # -45%: stop loss
+    assert exits.evaluate(p, eng.exit_cfg(p), now).reason.startswith("stop loss")
+    await h.tap("cps:0")
+    assert exits.evaluate(p, eng.exit_cfg(p), now) is None       # off again: waits for them
+
+    await h.tap("cpp:balanced")
+    await eng.set_setting("copyprofit.breakeven_after_tp", True)
+    q = Position(mint="Q", symbol="Q", source="copy", creator=None, entry_price=1.0,
+                 tokens_initial=100, tokens_remaining=100, sol_in=0.1, copied_from="W")
+    q.update_price(2.05)
+    d = exits.evaluate(q, eng.exit_cfg(q), now)
+    exits.apply_fill(q, d, d.tokens, 0.06, eng.exit_cfg(q))      # 30% sold at 2x
+    q.update_price(0.99)
+    assert exits.evaluate(q, eng.exit_cfg(q), now).reason == "breakeven stop"
+    await h.close()

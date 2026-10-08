@@ -193,8 +193,9 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.copy_rug_exits", "Copies: rug exits", "bool",
             help="with the above on: still sell at once if the dev sells or a big holder "
                  "dumps (rug signs)"),
-    Setting("copytrade.copy_stop_loss_pct", "Copies: emergency stop", "float", 0, 99, "%",
-            help="with the above on: still sell if a copy is down this much; 0 = none"),
+    Setting("copytrade.copy_stop_loss_pct", "Stop loss", "float", 0, 99, "%",
+            help="sell a copy if it's down this much from your entry, even if the wallet "
+                 "holds; 0 = none (wait for the wallet)"),
     Setting("copytrade.own_exits", "Own exits for copies", "bool",
             help="on = copied positions use the 👥 Copy exits settings (TP, SL, moonbag) "
                  "instead of your main exits"),
@@ -208,6 +209,8 @@ SETTINGS: list[Setting] = [
             help="once a copy is up this much, sell if it falls back (below); 0 = off"),
     Setting("copyprofit.trailing_stop_pct", "Trailing stop drop", "float", 5, 95, "%",
             help="the fall from its peak that sells it, once armed"),
+    Setting("copyprofit.breakeven_after_tp", "Breakeven after profit", "bool",
+            help="once any profit was taken, sell the rest if it falls back to your entry"),
     Setting("copyprofit.moonbag_pct", "Moonbag", "float", 0, 50, "%",
             help="% of the original bag your profit taking never sells (their sells still "
                  "can); 0 = off"),
@@ -242,7 +245,7 @@ GROUPS = {
     "copytrade": "👥 Copy trade",
     "calls": "📣 Call sniper",
     "copyexits": "👥 Copy exits",
-    "copyprofit": "💰 Copy profit taking",
+    "copyprofit": "💰 Copy profit & stop loss",
 }
 
 
@@ -257,6 +260,8 @@ def group_of(s: Setting) -> str:
         return "snipe"
     if s.key == "notify.utc_offset_hours":
         return "trading"
+    if s.key == "copytrade.copy_stop_loss_pct":
+        return "copyprofit"
     if s.key in ("copytrade.own_exits", "copytrade.only_their_sells", "copytrade.copy_rug_exits",
                  "copytrade.copy_stop_loss_pct"):
         return "copyexits"
