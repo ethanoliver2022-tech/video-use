@@ -48,6 +48,8 @@ class Candidate:
     uri: Optional[str] = None       # token metadata JSON (pump.fun)
     route: str = "jupiter"          # "pump" (PumpPortal, curve or pump-amm) | "jupiter"
     leader: Optional[str] = None    # copy-trade wallet that triggered this, if any
+    copied_from: Optional[str] = None   # copied wallet (always set for copies: results)
+    leader_mode: str = "all"            # their sells: "mirror" (same %) or "all"
     buy_sol: Optional[float] = None # per-candidate size override (copy trades, manual buys)
     force: bool = False             # manual buy: skip filters
     trigger: str = ""               # why it was picked: "dev", "keyword:<word>", "limit", ...
@@ -132,6 +134,9 @@ class Position:
     route: str = "jupiter"
     leader: Optional[str] = None
     leader_sold: bool = False
+    copied_from: Optional[str] = None    # wallet this was copied from (per-wallet results)
+    leader_mode: str = "all"             # copied wallet sells: "mirror" its % or sell "all"
+    leader_sell_frac: float = 0.0        # share of our bag still to sell, mirroring them
     # write-ahead of the exit being executed, so a sell that lands while the bot is down is
     # booked as that exit (its TP level / initials / KOL flag) when it restarts
     pending_exit: Optional[dict] = None

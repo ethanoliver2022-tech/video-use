@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import html
+import json
 import logging
 import re
 import time
@@ -22,6 +23,7 @@ from .execution.wallet import WalletManager, transfer_tx
 from .health import HealthWatch
 from .calls import CallGroup, CallWatcher
 from .copywatch import CopyPoller
+from .walletcheck import WalletChecker
 from .devcheck import DevChecker
 from .intel import EarlyFlow
 from .models import PUMP_TOTAL_SUPPLY, SOL_MINT, Candidate, Position, num
@@ -81,6 +83,7 @@ FEED_RETRY_SECONDS = 300      # re-ask PumpPortal for a refused trade feed this 
 KEEPALIVE_SECONDS = 120  # idle connections kept open this long
 WARM_SECONDS = 20        # each trading host gets a keep-alive ping about this often (live)
 DEVCHECK_LEAD = 3.0      # with a window: start the dev wallet lookups this long before it ends
+COPIED_TTL = 7 * 86400  # 'first buy only' remembers a copied coin this long
 SOL_PRICE_TTL = 60.0     # seconds a SOL/USD price is reused for $ market cap limits
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PREBUILD_LEAD = 0.5      # with a confirmation window: build the buy this long before it ends
@@ -209,6 +212,12 @@ class Engine:
         # copied / tracked wallet -> (time, "pumpportal" | "rpc", buy/sell, mint) of the last
         # trade seen from it: shows in the copy menu whether their trades reach the bot
         self.copy_seen: dict[str, tuple[float, str, str, str]] = {}
+        try:   # coins already copied once ('first buy only')
+            self._copied: dict[str, float] = {
+                k: float(v) for k, v in json.loads(self.store.get_setting("copied_mints") or "{}").items()}
+        except (ValueError, TypeError, AttributeError):
+            self._copied = {}
+        self.wallet_checker = WalletChecker(self.rpc, self.store)
         self.copy_poller = CopyPoller(self.rpc, lambda: list(self._copy), self.on_trade,
                                       enabled=lambda: self.cfg.copytrade.rpc_watch,
                                       curve=lambda m: fetch_curve(self.rpc, m))
@@ -698,43 +707,157 @@ class Engine:
             await self._wallet_alert(msg, leader)
             return
         held = self.positions.get(mint)
-        if (msg.get("txType") != "buy" or (held and not held.closed)  # a closed one may re-enter
-                or mint in self._buying):
+        if (msg.get("txType") != "buy" or (held and not held.closed)  # their add-ons: skipped
+                or mint in self._buying or self.scan_only):
             return
         ct = self.cfg.copytrade
         name = leader.label or leader.address[:6]
+        via = msg.get("via", "pumpportal")
         spent = num(msg.get("solAmount"), allow_zero=True) or 0.0
-        if self.scan_only:
+        got = num(msg.get("tokenAmount"))
+        if ct.first_buy_only and self._copied_before(mint):
+            log.info("👥 %s bought %s again: already copied once (first buy only)", name, mint)
+            return
+        if leader.paused:   # you were told when it paused: no message per buy
+            log.info("👥 %s bought %s: wallet paused, not copied", name, mint)
             return
         if self.paused:
-            return await self._not_copied(name, mint, "⏸ sniping is paused (tap ▶️ Start)")
-        if spent < ct.min_leader_buy_sol:
+            return await self._not_copied(name, mint, "⏸ sniping is paused (tap ▶️ Start)", via)
+        min_buy = leader.min_leader_sol if leader.min_leader_sol is not None else ct.min_leader_buy_sol
+        if spent < min_buy:
             return await self._not_copied(
-                name, mint, f"they only bought {spent:.3f} SOL (Min leader buy is "
-                            f"{ct.min_leader_buy_sol:g})", msg.get("via", "pumpportal"))
+                name, mint, f"they only bought {spent:.3f} SOL (min for this wallet is "
+                            f"{min_buy:g})", via)
         pool = msg.get("pool")
         pump = pool in (None, "", "pump", "pump-amm")  # pump.fun curve or PumpSwap
         on_curve = pool == "pump"
         v_sol, v_tok = num(msg.get("vSolInBondingCurve")), num(msg.get("vTokensInBondingCurve"))
-        if ct.max_market_cap_usd:
+        cap = leader.max_mcap_usd if leader.max_mcap_usd is not None else ct.max_market_cap_usd
+        if cap:
             mcap = num(msg.get("marketCapSol"))
             if mcap is None:
                 mcap = await self._market_cap_sol(mint, None)
-            over = await self._over_cap(mcap, ct.max_market_cap_usd)
+            over = await self._over_cap(mcap, cap)
             if over:
-                return await self._not_copied(name, mint, f"{over} (your copy limit)")
+                return await self._not_copied(name, mint, f"{over} (your copy limit)", via)
+        if ct.max_chase_pct and spent > 0 and got:
+            # measured from the price right after their buy when PumpPortal reports it: a big
+            # buy moves the price itself, and that move is not the crowd piling in
+            after = v_sol / v_tok if (on_curve and via != "rpc" and v_sol and v_tok) else None
+            chase = await self._chase_pct(mint, after or spent / got, on_curve)
+            if chase is not None and chase > ct.max_chase_pct:
+                return await self._not_copied(
+                    name, mint, f"price is already {chase:+.0f}% above "
+                                + ("the price right after their buy" if after else "what they paid")
+                                + f" (max {ct.max_chase_pct:g}%)", via)
+        size = leader.buy_sol or None
+        if leader.size_pct:
+            size = spent * leader.size_pct / 100
+            if leader.max_sol:
+                size = min(size, leader.max_sol)
+            size = max(size, 0.001)
+        filters = ct.run_safety_checks if leader.filters is None else leader.filters
+        sells = leader.sells if leader.copy_sells else "off"
         c = Candidate(chain="solana", mint=mint, source="copy", symbol=mint[:6],
                       route="pump" if pump else "jupiter",  # other venues (LetsBonk...): Jupiter
-                      leader=leader.address if leader.copy_sells else None,
-                      buy_sol=leader.buy_sol or None, force=not ct.run_safety_checks,
+                      leader=leader.address if sells != "off" else None,
+                      leader_mode="mirror" if sells == "mirror" else "all",
+                      copied_from=leader.address,
+                      buy_sol=size, force=not filters,
                       v_sol=v_sol if on_curve else None, v_tokens=v_tok if on_curve else None,
                       trigger=f"copy:{name}",
                       url=f"https://pump.fun/coin/{mint}" if pump
                       else f"https://dexscreener.com/solana/{mint}")
         log.info("👥 %s bought %s (%.3f SOL) — copying", name, mint, spent)
         result = await self.handle_candidate(c)
-        if result and not result.startswith("🟢"):
-            await self._not_copied(name, mint, html.unescape(result))
+        if result and result.startswith("🟢"):
+            self._mark_copied(mint)
+        elif result:
+            await self._not_copied(name, mint, html.unescape(result), via)
+
+    async def _chase_pct(self, mint: str, their_price: float, on_curve: bool) -> Optional[float]:
+        """How far the price is now above what the copied wallet paid (None = unknown)."""
+        try:
+            if on_curve or mint.endswith("pump"):
+                curve = await fetch_curve(self.rpc, mint)
+                if curve and not curve.complete and curve.sol_quoted and curve.price > 0:
+                    return (curve.price / their_price - 1) * 100
+            return (await self.price_of(mint) / their_price - 1) * 100
+        except Exception as e:
+            log.debug("chase check for %s skipped: %s", mint, e)
+            return None
+
+    def _copied_before(self, mint: str) -> bool:
+        t = self._copied.get(mint)
+        return t is not None and time.time() - t < COPIED_TTL
+
+    def _mark_copied(self, mint: str) -> None:
+        now = time.time()
+        self._copied[mint] = now
+        self._copied = {m: t for m, t in self._copied.items() if now - t < COPIED_TTL}
+        self.store.set_setting("copied_mints", json.dumps(self._copied))
+
+    async def update_wallet(self, address: str, **changes) -> CopyWallet:
+        """Change a copied / tracked wallet's own settings (size, sells, filters, pause...)."""
+        import dataclasses
+        w = self._copy.get(address)
+        stored = next((x for x in self.store.copy_wallets() if x["address"] == address), None)
+        if stored is None:
+            if w is None:
+                w = next((x for x in self.cfg.copytrade.wallets if x.address == address), None)
+            if w is None:
+                raise ValueError("wallet not found")
+            stored = dataclasses.asdict(w)
+        stored.update(changes)
+        if "sells" in changes:
+            stored["copy_sells"] = changes["sells"] != "off"
+        opts = {k: stored.get(k) for k in self.store.WALLET_OPTS}
+        self.store.add_copy_wallet(address, stored.get("label", ""), stored.get("buy_sol", 0.0),
+                                   stored.get("copy_sells", True), stored.get("mode", "copy"), opts)
+        self._load_copy_wallets()
+        if "sells" in changes:   # open copies of this wallet follow the new sell mode
+            for p in self.positions.values():
+                if p.copied_from == address and not p.closed:
+                    p.leader = None if changes["sells"] == "off" else address
+                    p.leader_mode = "mirror" if changes["sells"] == "mirror" else "all"
+                    self.store.save_position(p)
+        cw = self._copy.get(address)
+        if cw is None:   # copying off: still report the wallet's settings
+            cw = CopyWallet(**{k: v for k, v in stored.items()
+                               if k in CopyWallet.__dataclass_fields__})
+        return cw
+
+    def wallet_results(self, address: str) -> dict:
+        """This wallet's copies: closed count, wins, PnL, today's PnL, losses in a row."""
+        closes = [e for e in self.store.events("close") if e.get("copied_from") == address]
+        pnls = [float(e.get("pnl_sol", 0)) for e in closes]
+        streak = 0
+        for p in reversed(pnls):
+            if p > 0:
+                break
+            streak += 1
+        midnight = time.time() - (time.time() % 86400)
+        today = sum(float(e.get("pnl_sol", 0)) for e in closes if e["ts"] >= midnight)
+        return {"n": len(pnls), "wins": sum(1 for p in pnls if p > 0), "pnl": sum(pnls),
+                "today": today, "loss_streak": streak}
+
+    async def _check_wallet_pause(self, address: str) -> None:
+        """After a copy closes: pause a wallet that keeps losing (if set)."""
+        ct = self.cfg.copytrade
+        w = self._copy.get(address)
+        if w is None or w.paused or not (ct.pause_after_losses or ct.pause_daily_loss_sol):
+            return
+        r = self.wallet_results(address)
+        why = ""
+        if ct.pause_after_losses and r["loss_streak"] >= ct.pause_after_losses:
+            why = f"{r['loss_streak']} losing copies in a row"
+        elif ct.pause_daily_loss_sol and -r["today"] >= ct.pause_daily_loss_sol:
+            why = f"lost {-r['today']:.3f} SOL today"
+        if why:
+            await self.update_wallet(address, paused=True, paused_reason=why)
+            await self.notifier.send(
+                f"⏸ Paused copying <b>{esc(w.label or address[:6])}</b>: {esc(why)}. "
+                "Resume it from 👥 Copy & track.", buttons=[[("👥 Copy & track", "c")]])
 
     async def _not_copied(self, name: str, mint: str, why: str, via: str = "") -> None:
         """Say why a copy didn't happen: in Telegram too, or copying looks broken."""
@@ -921,7 +1044,8 @@ class Engine:
                            # for PnL in SOL, but must not make exits fire at once on small buys
                            creator=c.creator, entry_price=min(sol, fill.sol) / fill.tokens,
                            tokens_initial=fill.tokens, tokens_remaining=fill.tokens, sol_in=fill.sol,
-                           route=c.route, leader=c.leader,
+                           route=c.route, leader=c.leader, copied_from=c.copied_from,
+                           leader_mode=c.leader_mode,
                            migrated=c.source == "pumpfun-migration",  # already off the curve
                            seen_on_curve=c.source == "pumpfun" or curve is not None,
                            dev_tokens=c.creator_initial_buy_tokens or None)
@@ -1204,11 +1328,12 @@ class Engine:
             return
         self.copy_seen[trader] = (time.time(), msg.get("via", "pumpportal"),
                                   msg.get("txType", ""), msg["mint"])
+        self.wallet_checker.record(msg)
         self._spawn(self.handle_copy(msg, leader))
         pos = self.positions.get(msg["mint"])
         if (msg.get("via") == "rpc" and pos and not pos.closed and msg.get("txType") == "sell"
                 and pos.leader == trader):
-            pos.leader_sold = True        # follow their sell out, even without PumpPortal
+            exits.leader_sold_part(pos, msg)   # follow their sell, even without PumpPortal
             self._spawn(self.check_exit(pos))
 
     async def on_migration(self, mint: str) -> None:
@@ -1527,7 +1652,9 @@ class Engine:
                 self.store.block(funder, f"funded the dev who dumped {pos.symbol}")
         self.store.event("close", pos.mint, pos.symbol, reason=pos.close_reason, source=pos.source,
                          sol_in=pos.sol_in, sol_out=pos.sol_out, pnl_sol=pnl,
-                         held_s=round(time.time() - pos.opened_at))
+                         held_s=round(time.time() - pos.opened_at), copied_from=pos.copied_from)
+        if pos.copied_from:   # in the background: never hold up the sell path
+            self._spawn(self._check_wallet_pause(pos.copied_from))
         self.sell_failures.pop(pos.mint, None)
         self._sell_next_try.pop(pos.mint, None)
         self._curve_misses.pop(pos.mint, None)
@@ -2193,7 +2320,10 @@ class Engine:
                  ("orders", self.order_loop), ("reconcile", self.reconcile_loop),
                  ("balance", self.balance_loop), ("keep-warm", self.keep_warm),
                  ("feed-watch", self.feed_watch), ("health", self._health_watch),
-                 ("sol-price", self._sol_price_loop), ("copy-watch", self.copy_poller.run)]
+                 ("sol-price", self._sol_price_loop), ("copy-watch", self.copy_poller.run),
+                 ("wallet-check", lambda: self.wallet_checker.loop(
+                     lambda: list(self._copy), lambda: self.cfg.copytrade.check_days,
+                     lambda: self.cfg.copytrade.check_every_hours))]
         # switched on/off live from Telegram (Settings → Snipers): no requests while off
         if d.geckoterminal_networks:
             gecko = GeckoTerminalScanner(e.geckoterminal_api, d.geckoterminal_networks,

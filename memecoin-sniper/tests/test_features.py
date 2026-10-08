@@ -482,7 +482,7 @@ async def test_telegram_snipers_orders_and_tracking(tmp_path):
     await say(f"/track {w} whale")
     assert "Tracking whale" in sent[-1][0]
     await tap("c")
-    assert "🔔 whale" in sent[-1][0]
+    assert "🔔 <b>whale</b>" in sent[-1][0]
     await eng.http.aclose()
 
 

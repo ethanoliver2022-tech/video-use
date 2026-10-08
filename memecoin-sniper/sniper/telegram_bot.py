@@ -452,7 +452,7 @@ class TelegramControl:
             stored = {x["address"]: x for x in e.store.copy_wallets()}
             current = (w.mode if w else stored.get(rest, {}).get("mode", "copy"))
             await e.set_wallet_mode(rest, "alert" if current == "copy" else "copy")
-            await self.copy_menu(msg_id)
+            await self.wallet_page(rest, msg_id)
         elif head == "bc":
             self._ask("buy_custom", rest)
             await self.send("Send the amount of SOL to buy:", [[("✖️ Cancel", "x")]])
@@ -518,6 +518,10 @@ class TelegramControl:
                             [[("✖️ Cancel", "x")]])
         elif head == "cw":
             await self.wallet_wizard(rest)
+        elif head == "wp":
+            await self.wallet_page(rest, msg_id)
+        elif head in ("wpp", "wpx", "wpf", "wpk", "wpz", "wpl", "wpc"):
+            await self.copy_wallet_action(head, rest, msg_id)
         elif data.startswith("c:rm:"):
             await e.remove_copy_wallet(data[5:])
             await self.copy_menu(msg_id)
@@ -582,6 +586,8 @@ class TelegramControl:
                 await self.copy_add_text(text)
             elif kind == "copy_name":
                 await self.wallet_wizard("n", text)
+            elif kind in ("wallet_size", "wallet_min", "wallet_mcap"):
+                await self.wallet_text(kind, text, p["data"])
             elif kind == "copy_size":
                 await self.wallet_wizard("s:", text.replace("SOL", "").strip())
             elif kind == "limit_buy":
@@ -1234,7 +1240,11 @@ class TelegramControl:
         lines.append("Watching their trades via: " + " + ".join(feeds))
         lines.append(f"Copies buys of {ct.min_leader_buy_sol:g}+ SOL"
                      + (f" in coins under ${ct.max_market_cap_usd:,.0f} market cap"
-                        if ct.max_market_cap_usd else ""))
+                        if ct.max_market_cap_usd else "")
+                     + (f", not over +{ct.max_chase_pct:g}% above their price"
+                        if ct.max_chase_pct else "")
+                     + (", first buy only" if ct.first_buy_only else "")
+                     + " (defaults; each wallet can differ: tap ⚙️)")
         rows = []
         stored = {x["address"]: x for x in e.store.copy_wallets()}
         shown = {w.address: w for w in wallets}
@@ -1243,12 +1253,14 @@ class TelegramControl:
                 from .config import CopyWallet
                 shown[addr] = CopyWallet(**x)
         for w in shown.values():
-            icon = "🔔" if w.mode == "alert" else "👥"
-            size = "" if w.mode == "alert" else f" · {w.buy_sol or e.cfg.trading.buy_amount_sol:g} SOL"
-            lines.append(f"{icon} {html.escape(w.label or '-')} <code>{w.address}</code>{size}"
+            icon = "⏸" if w.paused else ("🔔" if w.mode == "alert" else "👥")
+            size = "" if w.mode == "alert" else f" · {self._size_text(w)}"
+            r = e.wallet_results(w.address)
+            res = (f" · {r['n']} copies, {r['wins'] / r['n'] * 100:.0f}% won, {r['pnl']:+.3f} SOL"
+                   if r["n"] else "")
+            lines.append(f"{icon} <b>{html.escape(w.label or w.address[:8])}</b>{size}{res}"
                          f"\n    {self._seen_text(w.address)}")
-            rows.append([(f"{'👥 Copy' if w.mode == 'alert' else '🔔 Track only'}", f"cm:{w.address}"),
-                         (f"🗑 {w.label or w.address[:8]}", f"c:rm:{w.address}")])
+            rows.append([(f"⚙️ {w.label or w.address[:8]}", f"wp:{w.address}")])
         wallets = list(shown.values())
         if not wallets:
             lines.append("No wallets yet.")
@@ -1264,6 +1276,142 @@ class TelegramControl:
                      ("🎯 Copy TP/SL/moonbag" if own else "🎯 Exits: same as sniping", "set:copyexits")])
         rows.append([("⬅️ Back", "m")])
         await self.show("\n".join(lines), rows, msg_id)
+
+    def _size_text(self, w) -> str:
+        if w.size_pct:
+            return f"{w.size_pct:g}% of their buy" + (f" (max {w.max_sol:g})" if w.max_sol else "")
+        return f"{w.buy_sol or self.engine.cfg.trading.buy_amount_sol:g} SOL"
+
+    def _find_wallet(self, address: str):
+        e = self.engine
+        w = next((x for x in e.copy_wallets() if x.address == address), None)
+        if w is None:
+            from .config import CopyWallet
+            x = next((x for x in e.store.copy_wallets() if x["address"] == address), None)
+            if x is not None:
+                w = CopyWallet(**{k: v for k, v in x.items() if k in CopyWallet.__dataclass_fields__})
+        return w
+
+    async def wallet_page(self, address: str, msg_id: Optional[int] = None) -> None:
+        e = self.engine
+        w = self._find_wallet(address)
+        if w is None:
+            await self.copy_menu(msg_id)
+            return
+        ct = e.cfg.copytrade
+        sells = w.sells if w.copy_sells else "off"
+        sells_txt = {"mirror": "🔁 mirror (sell the same % they sell)",
+                     "all": "🚪 sell all when they sell", "off": "ignored"}[sells]
+        min_buy = (f"{w.min_leader_sol:g} SOL" if w.min_leader_sol is not None
+                   else f"{ct.min_leader_buy_sol:g} SOL (default)")
+        cap = w.max_mcap_usd if w.max_mcap_usd is not None else ct.max_market_cap_usd
+        cap_txt = (f"${cap:,.0f}" if cap else "no limit") + (
+            "" if w.max_mcap_usd is not None else " (default)")
+        filt = ("on" if ct.run_safety_checks else "OFF") + " (default)" if w.filters is None \
+            else ("on" if w.filters else "⚠️ OFF")
+        r = e.wallet_results(address)
+        lines = [f"{'🔔' if w.mode == 'alert' else '👥'} <b>{html.escape(w.label or '-')}</b>"
+                 f"\n<code>{address}</code>",
+                 ("⏸ <b>Paused</b>" + (f": {html.escape(w.paused_reason)}" if w.paused_reason
+                                        else "")) if w.paused else
+                 ("Copying its buys" if w.mode == "copy" else "Tracking only (alerts)"),
+                 "", f"💰 Size: {self._size_text(w)}", f"🔁 Their sells: {sells_txt}",
+                 f"📉 Copies their buys of: {min_buy}+", f"🧢 Max market cap: {cap_txt}",
+                 f"🛡 Filters: {filt}", f"👀 {self._seen_text(address)}", "",
+                 "<b>Your copies of it</b>: " + (
+                     f"{r['n']} closed, {r['wins']} won, {r['pnl']:+.4f} SOL"
+                     + (f", {r['loss_streak']} losses in a row" if r["loss_streak"] else "")
+                     if r["n"] else "none closed yet")]
+        rep = e.wallet_checker.reports.get(address)
+        lines.append("")
+        if rep:
+            ago = (time.time() - rep.made) / 3600
+            lines.append(f"<b>🔍 Wallet check</b> (updated {ago:.0f}h ago, refreshes every "
+                         f"{ct.check_every_hours:g}h)\n<pre>{html.escape(rep.text())}</pre>")
+        else:
+            lines.append("🔍 Wallet check: not done yet (tap Re-check).")
+        a = address
+        await self.show("\n".join(lines), [
+            [("🔔 Track only" if w.mode == "copy" else "👥 Copy its buys", f"cm:{a}"),
+             ("▶️ Resume" if w.paused else "⏸ Pause", f"wpp:{a}")],
+            [("💰 Size", f"wpz:{a}"), ("🔁 Sells: " + sells, f"wpx:{a}")],
+            [("📉 Min buy", f"wpl:{a}"), ("🧢 Max mcap", f"wpc:{a}")],
+            [("🛡 Filters: " + ("default" if w.filters is None else "on" if w.filters else "OFF"),
+              f"wpf:{a}")],
+            [("🔍 Re-check wallet", f"wpk:{a}"), ("🗑 Remove", f"c:rm:{a}")],
+            [("⬅️ Copy & track", "c")]], msg_id)
+
+    async def copy_wallet_action(self, head: str, address: str, msg_id: Optional[int]) -> None:
+        e = self.engine
+        w = self._find_wallet(address)
+        if w is None:
+            await self.copy_menu(msg_id)
+            return
+        if head == "wpp":
+            await e.update_wallet(address, paused=not w.paused, paused_reason="")
+        elif head == "wpx":
+            cur = w.sells if w.copy_sells else "off"
+            nxt = {"mirror": "all", "all": "off", "off": "mirror"}[cur]
+            await e.update_wallet(address, sells=nxt)
+        elif head == "wpf":
+            nxt = {None: True, True: False, False: None}[w.filters]
+            await e.update_wallet(address, filters=nxt)
+        elif head == "wpk":
+            self._check_wallet(address)
+            await self.send("🔍 Checking its last few days on the chain… (up to a minute)")
+            return
+        elif head in ("wpz", "wpl", "wpc"):
+            kind, prompt = {
+                "wpz": ("wallet_size", "Send the size per copy:\n<code>0.1</code> = 0.1 SOL each\n"
+                        "<code>5%</code> = 5% of what they buy\n<code>5% 0.3</code> = 5%, at most "
+                        "0.3 SOL"),
+                "wpl": ("wallet_min", "Only copy their buys of at least how much SOL? (e.g. "
+                        "<code>0.5</code>, or <code>default</code>)"),
+                "wpc": ("wallet_mcap", "Max market cap for this wallet's copies (e.g. "
+                        "<code>30k</code>, <code>0</code> = no limit, or <code>default</code>)"),
+            }[head]
+            self._ask(kind, address)
+            await self.send(prompt, [[("✖️ Cancel", "x")]])
+            return
+        await self.wallet_page(address, msg_id)
+
+    async def wallet_text(self, kind: str, text: str, address: str) -> None:
+        e = self.engine
+        t = text.strip().lower().replace("sol", "").strip()
+        if kind == "wallet_size":
+            parts = t.replace("max", " ").split()
+            if parts and parts[0].endswith("%"):
+                pct = float(parts[0].rstrip("%"))
+                cap = float(parts[1]) if len(parts) > 1 else 0.0
+                if not 0 < pct <= 1000 or not 0 <= cap <= 100:
+                    raise ValueError("e.g. 5% or 5% 0.3")
+                await e.update_wallet(address, size_pct=pct, max_sol=cap)
+            else:
+                sol = float(parts[0]) if parts else -1
+                if not 0 <= sol <= 100:
+                    raise ValueError("between 0 and 100 SOL (0 = your normal buy size)")
+                await e.update_wallet(address, buy_sol=sol, size_pct=0.0, max_sol=0.0)
+        elif kind == "wallet_min":
+            val = None if t == "default" else float(t)
+            if val is not None and not 0 <= val <= 1000:
+                raise ValueError("between 0 and 1000 SOL")
+            await e.update_wallet(address, min_leader_sol=val)
+        elif kind == "wallet_mcap":
+            from .settings import BY_KEY, parse_value
+            val = None if t == "default" else parse_value(BY_KEY["copytrade.max_market_cap_usd"], t)
+            await e.update_wallet(address, max_mcap_usd=val)
+        await self.wallet_page(address)
+
+    def _check_wallet(self, address: str) -> None:
+        e = self.engine
+        w = self._find_wallet(address)
+        name = (w.label if w and w.label else address[:8])
+
+        async def done(rep):
+            await self.send(f"🔍 <b>Wallet check: {html.escape(name)}</b>\n"
+                            f"<pre>{html.escape(rep.text())}</pre>",
+                            [[("⚙️ Wallet settings", f"wp:{address}")]])
+        e.wallet_checker.start(address, e.cfg.copytrade.check_days, done)
 
     def _seen_text(self, address: str) -> str:
         seen = self.engine.copy_seen.get(address)
@@ -1396,7 +1544,10 @@ class TelegramControl:
         who = html.escape(label) if label else (
             f"{len(wiz['addrs'])} wallets" if len(wiz["addrs"]) > 1 else wiz["addrs"][0][:8] + "…")
         size = "" if mode == "alert" else (f" · {sol:g} SOL per buy" if sol else " · normal size")
-        await self.send(f"✅ {what} {who}{size}")
+        await self.send(f"✅ {what} {who}{size}\n🔍 Checking its last "
+                        f"{self.engine.cfg.copytrade.check_days:g} days on the chain…")
+        for a in wiz["addrs"][:5]:
+            self._check_wallet(a)
         await self.copy_menu()
 
     async def reclaim(self) -> None:

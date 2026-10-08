@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, get_type_hints
+from typing import Any, Optional, get_type_hints
 
 import yaml
 from dotenv import load_dotenv
@@ -25,6 +25,15 @@ class CopyWallet:
     buy_sol: float = 0.0        # 0 = use trading.buy_amount_sol
     copy_sells: bool = True     # exit when they exit
     mode: str = "copy"          # "copy" = mirror their buys, "alert" = just tell me
+    # per-wallet overrides (None = the copytrade setting)
+    sells: str = "mirror"       # their sells: "mirror" (same %), "all" (leave with them), "off"
+    size_pct: float = 0.0       # >0: buy this % of what they spent (instead of buy_sol)
+    max_sol: float = 0.0        # cap for size_pct buys; 0 = no cap
+    min_leader_sol: Optional[float] = None
+    max_mcap_usd: Optional[float] = None
+    filters: Optional[bool] = None
+    paused: bool = False        # paused (by you, or automatically after losses)
+    paused_reason: str = ""
 
 
 @dataclass
@@ -207,6 +216,13 @@ class CopyTradeConfig:
     run_safety_checks: bool = True
     max_market_cap_usd: float = 0.0         # don't copy into coins worth more ($); 0 = no cap
     own_exits: bool = False                 # copied positions use the copyexits section
+    first_buy_only: bool = True             # copy each coin once (not their add-ons / re-buys)
+    max_chase_pct: float = 30.0             # skip if the price is this % above their entry
+    pause_after_losses: int = 5             # pause a wallet after this many losing copies
+    #                                         in a row; 0 = never
+    pause_daily_loss_sol: float = 0.0       # pause a wallet that lost this much today; 0 = off
+    check_days: float = 3.0                 # wallet check: look back this many days
+    check_every_hours: float = 4.0          # ...and refresh it this often
     rpc_watch: bool = True                  # also watch copied wallets on-chain (backup feed)
 
 

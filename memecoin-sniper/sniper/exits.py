@@ -21,6 +21,7 @@ from typing import Optional
 from .config import ExitConfig
 from .models import PUMP_TOTAL_SUPPLY, Position, TradeTick, num
 
+MIRROR_ALL = 0.9      # a copied wallet selling this share of its bag or more = it's out
 DUST_FRACTION = 0.02    # if a partial sell would leave < 2% of the original bag, sell it all
 INITIALS_BUFFER = 1.03  # sell 3% extra when taking initials to cover fees and slippage
 
@@ -51,9 +52,25 @@ def record_trade(pos: Position, msg: dict, kol_wallets: set[str], own_wallet: st
             pct = (sold + left) / PUMP_TOTAL_SUPPLY * 100      # its share before this sell
             pos.whale_dump_pct = max(pos.whale_dump_pct, pct)
     if side == "sell" and pos.leader and trader == pos.leader:
-        pos.leader_sold = True
+        leader_sold_part(pos, msg)
     if side == "buy" and trader in kol_wallets and trader not in pos.kol_bought:
         pos.kol_bought.append(trader)
+
+
+def leader_sold_part(pos: Position, msg: dict) -> None:
+    """The copied wallet sold. "all": leave with it. "mirror": sell the same share of our
+    bag as it sold of its own (half of theirs -> half of ours); all of it if it's out."""
+    sold = num(msg.get("tokenAmount"))
+    left = num(msg.get("newTokenBalance"), allow_zero=True)
+    if pos.leader_mode != "mirror" or not sold or left is None:
+        pos.leader_sold = True
+        return
+    frac = sold / (sold + left)
+    if frac >= MIRROR_ALL:
+        pos.leader_sold = True
+        return
+    # several sells before ours lands add up: 50% then 50% of the rest = 75%
+    pos.leader_sell_frac = 1 - (1 - pos.leader_sell_frac) * (1 - frac)
 
 
 def sell_pressure(pos: Position, cfg: ExitConfig) -> Optional[float]:
@@ -88,6 +105,14 @@ def evaluate(pos: Position, cfg: ExitConfig, now: Optional[float] = None) -> Opt
         return everything(f"big holder dumped ({pos.whale_dump_pct:.0f}% of supply)")
     if pos.leader_sold:
         return everything("copied wallet sold")
+    if pos.leader_sell_frac > 0:
+        frac = pos.leader_sell_frac
+        dec = _partial(pos, pos.tokens_remaining * frac,
+                       f"copied wallet sold ({frac * 100:.0f}% of its bag)")
+        if dec is not None:
+            dec.kind = "leader"
+            return dec
+        pos.leader_sell_frac = 0.0
     if cfg.sell_on_migration and pos.migrated and pos.seen_on_curve:
         return everything("migrated")  # an exit rule: retried like any other until it sells
 
@@ -188,6 +213,8 @@ def apply_fill(pos: Position, dec: ExitDecision, tokens_sold: float, sol_receive
         pos.kol_exit_done = True
     if dec.kind == "initials":
         pos.initials_taken = True
+    if dec.kind == "leader":
+        pos.leader_sell_frac = 0.0
     if dec.sell_all or is_dust(pos, pos.tokens_remaining):
         pos.tokens_remaining = 0.0
         pos.closed = True

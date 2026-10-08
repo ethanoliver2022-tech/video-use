@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS blocklist (creator TEXT PRIMARY KEY, reason TEXT, ts 
 CREATE TABLE IF NOT EXISTS copy_wallets (
     address TEXT PRIMARY KEY, label TEXT, buy_sol REAL, copy_sells INTEGER);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS wallet_trades (
+    wallet TEXT, sig TEXT, mint TEXT, ts REAL, side TEXT, sol REAL, tokens REAL,
+    PRIMARY KEY (wallet, sig, mint));
+CREATE INDEX IF NOT EXISTS wallet_trades_ts ON wallet_trades(wallet, ts);
 CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY, mode TEXT, mint TEXT, side TEXT, sol REAL, pct REAL,
     trigger_price REAL, direction TEXT, base_price REAL, created REAL, expires REAL,
@@ -63,6 +67,8 @@ class Store:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(copy_wallets)")}
         if "mode" not in cols:  # v0.5: wallets can be copied or only tracked (alerts)
             self.db.execute("ALTER TABLE copy_wallets ADD COLUMN mode TEXT DEFAULT 'copy'")
+        if "opts" not in cols:  # per-wallet settings (size %, sells, filters, paused...)
+            self.db.execute("ALTER TABLE copy_wallets ADD COLUMN opts TEXT DEFAULT '{}'")
 
     # ---- ledger ----
     def event(self, event: str, mint: str = "", symbol: str = "", **data) -> None:
@@ -144,16 +150,53 @@ class Store:
         return row[0] if row else None
 
     # ---- copy wallets & runtime settings (editable from Telegram) ----
+    WALLET_OPTS = ("sells", "size_pct", "max_sol", "min_leader_sol", "max_mcap_usd", "filters",
+                   "paused", "paused_reason")
+
     def copy_wallets(self) -> list[dict]:
         rows = self.db.execute(
-            "SELECT address, label, buy_sol, copy_sells, mode FROM copy_wallets").fetchall()
-        return [{"address": a, "label": l, "buy_sol": b, "copy_sells": bool(c), "mode": m or "copy"}
-                for a, l, b, c, m in rows]
+            "SELECT address, label, buy_sol, copy_sells, mode, opts FROM copy_wallets").fetchall()
+        out = []
+        for a, l, b, c, m, o in rows:
+            w = {"address": a, "label": l, "buy_sol": b, "copy_sells": bool(c), "mode": m or "copy"}
+            try:
+                opts = json.loads(o or "{}")
+            except ValueError:
+                opts = {}
+            w.update({k: v for k, v in opts.items() if k in self.WALLET_OPTS})
+            if not w["copy_sells"] and "sells" not in opts:
+                w["sells"] = "off"   # set before per-wallet sell modes existed
+            out.append(w)
+        return out
 
     def add_copy_wallet(self, address: str, label: str = "", buy_sol: float = 0.0,
-                        copy_sells: bool = True, mode: str = "copy") -> None:
-        self.db.execute("INSERT OR REPLACE INTO copy_wallets(address, label, buy_sol, copy_sells, mode)"
-                        " VALUES (?,?,?,?,?)", (address, label, buy_sol, int(copy_sells), mode))
+                        copy_sells: bool = True, mode: str = "copy",
+                        opts: Optional[dict] = None) -> None:
+        if opts is None:   # keep the per-wallet settings of a wallet added again
+            old = next((w for w in self.copy_wallets() if w["address"] == address), None)
+            opts = {k: old[k] for k in self.WALLET_OPTS if old and k in old}
+        opts = {k: v for k, v in opts.items() if k in self.WALLET_OPTS}
+        self.db.execute("INSERT OR REPLACE INTO copy_wallets(address, label, buy_sol, copy_sells, "
+                        "mode, opts) VALUES (?,?,?,?,?,?)",
+                        (address, label, buy_sol, int(copy_sells), mode, json.dumps(opts)))
+
+    # ---- copied wallets' own trades (wallet check) ----
+    def add_wallet_trade(self, wallet: str, sig: str, mint: str, ts: float, side: str,
+                         sol: float, tokens: float) -> None:
+        self.db.execute("INSERT OR IGNORE INTO wallet_trades VALUES (?,?,?,?,?,?,?)",
+                        (wallet, sig, mint, ts, side, sol, tokens))
+
+    def wallet_trades(self, wallet: str, since: float) -> list[tuple]:
+        return self.db.execute(
+            "SELECT sig, mint, ts, side, sol, tokens FROM wallet_trades WHERE wallet = ? AND "
+            "ts >= ? ORDER BY ts", (wallet, since)).fetchall()
+
+    def has_wallet_sig(self, wallet: str, sig: str) -> bool:
+        return self.db.execute("SELECT 1 FROM wallet_trades WHERE wallet = ? AND sig = ? LIMIT 1",
+                               (wallet, sig)).fetchone() is not None
+
+    def prune_wallet_trades(self, before: float) -> None:
+        self.db.execute("DELETE FROM wallet_trades WHERE ts < ?", (before,))
 
     # ---- limit orders ----
     def add_order(self, mint: str, side: str, sol: float, pct: float, trigger_price: float,

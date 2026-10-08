@@ -155,6 +155,19 @@ SETTINGS: list[Setting] = [
     Setting("copytrade.max_market_cap_usd", "Max copy market cap", "float", 0, 1e12, "$",
             help="don't copy into coins already worth more than this, e.g. 20k or 1.5m; "
                  "0 = no limit. A fresh pump.fun coin starts near $4-5k"),
+    Setting("copytrade.first_buy_only", "First buy only", "bool",
+            help="copy each coin once: not their add-on buys, nor a coin re-bought later"),
+    Setting("copytrade.max_chase_pct", "Don't chase above", "float", 0, 10000, "%",
+            help="skip a copy if the price is already this % above what they paid "
+                 "(their own buy pushes it up a bit); 0 = off"),
+    Setting("copytrade.pause_after_losses", "Pause after losses", "int", 0, 100,
+            help="pause a wallet after this many losing copies in a row; 0 = never"),
+    Setting("copytrade.pause_daily_loss_sol", "Pause after daily loss", "float", 0, 1000, "SOL",
+            help="pause a wallet whose copies lost this much today; 0 = never"),
+    Setting("copytrade.check_days", "Wallet check days", "float", 1, 14, "days",
+            help="how far back the wallet check looks"),
+    Setting("copytrade.check_every_hours", "Wallet check every", "float", 1, 48, "h",
+            help="how often each wallet's check is refreshed"),
     Setting("copytrade.rpc_watch", "Backup wallet watcher", "bool",
             help="also watch copied wallets straight from the chain (your RPC), so copies "
                  "happen even when PumpPortal's feed misses a trade (~2-4s slower)"),
