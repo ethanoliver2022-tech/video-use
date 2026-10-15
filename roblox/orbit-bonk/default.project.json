@@ -1,0 +1,60 @@
+{
+  "name": "OrbitBonk",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared"
+      },
+      "Remotes": {
+        "$className": "Folder",
+        "Ability": {
+          "$className": "RemoteEvent"
+        },
+        "Knockback": {
+          "$className": "RemoteEvent"
+        },
+        "Notify": {
+          "$className": "RemoteEvent"
+        },
+        "Effect": {
+          "$className": "RemoteEvent"
+        },
+        "DataUpdate": {
+          "$className": "RemoteEvent"
+        },
+        "Shop": {
+          "$className": "RemoteFunction"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/client"
+        }
+      },
+      "$properties": {
+        "CharacterJumpHeight": 8.5,
+        "CharacterWalkSpeed": 18,
+        "CharacterUseJumpPower": false
+      }
+    },
+    "Players": {
+      "$properties": {
+        "CharacterAutoLoads": true
+      }
+    },
+    "Workspace": {
+      "$properties": {
+        "Gravity": 196.2,
+        "FallenPartsDestroyHeight": -400
+      }
+    }
+  }
+}
